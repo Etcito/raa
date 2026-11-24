@@ -7,6 +7,10 @@ use crate::catalog::{
     Category, GraphFormat, NodeFamily, NodeTypeSpec, ParamKind, ParamValue, ShaderStage, SizeSpec,
 };
 
+use crate::error::{Issue, Severity, Stage};
+use crate::format::GraphDoc;
+use raa_loader::json::JsonValue;
+
 pub fn family() -> Box<dyn NodeFamily> {
     Box::new(SsrStages)
 }
@@ -16,6 +20,34 @@ struct SsrStages;
 impl NodeFamily for SsrStages {
     fn name(&self) -> &'static str {
         "ssr_stages"
+    }
+
+    fn validate_graph(&self, doc: &GraphDoc, issues: &mut Vec<Issue>) {
+        for node in doc.nodes.iter().filter(|node| {
+            node.type_id == "ssr.incident" && node.params.iter().any(|(key, value)| {
+                key == "extraRays" && matches!(value, JsonValue::Number(value) if *value > 0.0)
+            })
+        }) {
+            let has_trace = doc.links.iter().any(|link| {
+                !link.history && link.to.node == node.id && link.to.port == "trace"
+                    && link.from.port == "trace" && doc.nodes.iter().any(|source| {
+                        source.id == link.from.node && source.type_id == "ssr.trace"
+                    })
+            });
+            if !has_trace {
+                issues.push(Issue {
+                    code: "graph.ssr_extra_rays_source",
+                    severity: Severity::Error,
+                    stage: Stage::Structure,
+                    node: Some(node.id.clone()),
+                    port: Some("trace".into()),
+                    param: Some("extraRays".into()),
+                    link: None,
+                    message: "Additional SSR rays reuse a typed SSR trace's G-buffer and Hi-Z inputs.".into(),
+                    fix: "Connect ssr.trace.trace or set extraRays to zero.".into(),
+                });
+            }
+        }
     }
 
     fn node_types(&self) -> Vec<NodeTypeSpec> {
@@ -166,7 +198,12 @@ impl NodeFamily for SsrStages {
                     "Incident RGB and confidence",
                     GraphFormat::Rgba32Float,
                 )],
-                vec![],
+                vec![node_param(
+                    "extraRays", "Extra rays", "SSR incident",
+                    ParamKind::Int, ParamValue::Int(0), Some(0.0),
+                    Some(f64::from(raa_ssr::stages::MAX_EXTRA_RAYS)), Some(1.0), "",
+                    "crates/raa-ssr/src/wgsl/ssr_trace.wgsl",
+                )],
                 vec![stage_budget(ShaderStage::Fragment, 5, 1, 0, 0, 1)],
             ),
             post_stage(

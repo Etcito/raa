@@ -16,7 +16,7 @@ struct SsrParams {
     viewport: vec4<f32>,
     // intensity, max_roughness, thickness_m, Hi-Z mip count
     params: vec4<f32>,
-    // HDR mip-chain mip count, 0, 0, 0
+    // HDR mip-chain mip count, additional rays, 0, 0
     params2: vec4<f32>,
 }
 
@@ -158,13 +158,16 @@ fn trace_hit(in: VsOut, probe: bool) -> TraceOutput {
     }
     let p = view_pos(in.position.xy * ssr.viewport.zw, d);
     let r = reflect(normalize(p), normalize(nr.xyz));
+    return trace_ray(vec3<f32>(in.position.xy, d), p, r, roughness, probe);
+}
+
+fn trace_ray(o: vec3<f32>, p: vec3<f32>, r: vec3<f32>, roughness: f32, probe: bool) -> TraceOutput {
     // A second point of the view ray, kept in front of the near plane so it projects.
     let near_z = view_pos(vec2<f32>(0.5), 0.0).z;
     var len = max(-p.z, 1.0);
     if (r.z > 0.0) {
         len = min(len, 0.999 * (near_z - p.z) / r.z);
     }
-    let o = vec3<f32>(in.position.xy, d);
     let delta = to_screen(p + r * len) - o;
     let len_xy = length(delta.xy);
     if (len_xy < 1e-3) {
@@ -339,6 +342,46 @@ fn screen_incident(px: vec2<i32>) -> vec4<f32> {
 @fragment
 fn fs_incident(in: VsOut) -> @location(0) vec4<f32> {
     return screen_incident(vec2<i32>(in.position.xy));
+}
+
+// Keep the center ray's admission and confidence. Additional cone samples contribute only
+// their own accepted on-screen hits and cannot publish radiance at a missing center hit.
+@fragment
+fn fs_incident_multiray(in: VsOut) -> @location(0) vec4<f32> {
+    let px = vec2<i32>(in.position.xy);
+    let central = screen_incident(px);
+    if central.a <= 0.0 { return central; }
+
+    let depth = textureLoad(depth_tex, px, 0);
+    let nr = textureLoad(normal_tex, px, 0);
+    let roughness = clamp(nr.w, 0.0, 1.0);
+    if depth >= 1.0 || roughness <= 0.01 { return central; }
+    let p = view_pos(in.position.xy * ssr.viewport.zw, depth);
+    let n = normalize(nr.xyz);
+    let r = reflect(normalize(p), n);
+    let up = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), abs(r.z) > 0.99);
+    let tangent = normalize(cross(up, r));
+    let bitangent = cross(r, tangent);
+    let count = u32(ssr.params2.y);
+    let phase = fract(dot(vec2<f32>(px), vec2<f32>(0.06711056, 0.00583715)));
+    let cone = tan(min(2.0 * atan(0.6436 * roughness * roughness), 1.4));
+    let mip_bias = 0.5 * log2(1.0 + f32(count));
+    var radiance = central.rgb * central.a;
+    var total = central.a;
+    for (var sample = 0u; sample < count; sample++) {
+        let radius = cone * sqrt((f32(sample) + 0.5) / f32(count));
+        let angle = 6.2831853 * fract(phase + f32(sample) * 0.61803399);
+        let ray = normalize(r + radius * (cos(angle) * tangent + sin(angle) * bitangent));
+        if dot(ray, n) <= 0.0 { continue; }
+        let hit = trace_ray(vec3<f32>(in.position.xy, depth), p, ray, roughness, false).hit;
+        if hit.z > 0.0 {
+            let lod = clamp(hit.w - mip_bias, 0.0, max(ssr.params2.x - 1.0, 0.0));
+            radiance += hit.z * textureSampleLevel(hdr_mips, hdr_samp, hit.xy, lod).rgb;
+            total += hit.z;
+        }
+    }
+    if total == central.a { return central; }
+    return vec4<f32>(radiance / total, central.a);
 }
 
 struct Replacement {

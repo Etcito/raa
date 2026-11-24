@@ -324,6 +324,15 @@ impl ExecExtension for PostStagesExtension {
                 handle
                     .set_values(&values)
                     .map_err(|error| vec![apply_issue(id, &error)])?;
+                if node.type_id == "ssr.incident" && let StageHandle::Ssr(incident) = handle {
+                    let source = plan::incident_trace(plan, node).and_then(|trace| {
+                        installed.iter().find_map(|(id, handle)| match handle {
+                            StageHandle::Ssr(source) if *id == trace.id => Some(source),
+                            _ => None,
+                        })
+                    });
+                    incident.set_trace_source(source);
+                }
                 if node.type_id == "bloom.up"
                     && let StageHandle::Bloom(bloom) = handle
                 {

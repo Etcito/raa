@@ -15,8 +15,8 @@ use raa_pipeline::{
 
 use super::cpu;
 use super::passes::{
-    AREA_ANTI_LAG, AREA_DISPATCH_SIZE, AREA_PARAMS_SIZE, AREA_TRACE_ENTRY, AreaShadowPipelines,
-    AreaShadowWork, SDF_VOLUME_SIZE, trace_module_wgsl, tuned_pipeline,
+    AREA_ANTI_LAG, AREA_DISPATCH_SIZE, AREA_PARAMS_SIZE, AREA_SAMPLES_PER_PIXEL, AREA_TRACE_ENTRY,
+    AreaShadowPipelines, AreaShadowWork, SDF_VOLUME_SIZE, trace_module_wgsl, tuned_pipeline,
 };
 use crate::parts::GBufferViews;
 use crate::parts::screen::passes::{dispatch, layout, module};
@@ -304,11 +304,11 @@ pub(crate) struct AreaTraceStage {
 
 impl StageImpl for AreaTraceStage {
     fn param_keys(&self) -> &'static [&'static str] {
-        &[]
+        &[AREA_SAMPLES_PER_PIXEL.key]
     }
 
-    fn check_value(&self, key: &str, _value: f64) -> Result<(), String> {
-        Err(format!("`{key}` is not a parameter of area.trace"))
+    fn check_value(&self, key: &str, value: f64) -> Result<(), String> {
+        validate_tunable(&[AREA_SAMPLES_PER_PIXEL], key, value).map(|_| ())
     }
 
     /// Reallocates the outputs when the viewport or the layer count changed, writes the frame
@@ -341,9 +341,14 @@ impl StageImpl for AreaTraceStage {
         let Some(outputs) = self.outputs.as_ref() else {
             return Ok(());
         };
-        ctx.gpu
-            .queue()
-            .write_buffer(&outputs.params, 0, &frame.frame_index.to_le_bytes());
+        let spec = AREA_SAMPLES_PER_PIXEL;
+        let samples = cx.value(spec.key, spec.default) as u32;
+        let mut params = [0; AREA_PARAMS_SIZE as usize];
+        params[..4].copy_from_slice(&frame.frame_index.to_le_bytes());
+        let capture_seed = cx.shared.area_capture_seed().map_or(0, |seed| seed + 1);
+        params[4..8].copy_from_slice(&capture_seed.to_le_bytes());
+        params[8..12].copy_from_slice(&samples.to_le_bytes());
+        ctx.gpu.queue().write_buffer(&outputs.params, 0, &params);
         self.sdf = cx.shared.trace().and_then(|handle| {
             let mut scene = handle.try_borrow_mut().ok()?;
             let volume = scene.volume(ctx.gpu)?;

@@ -423,6 +423,52 @@ impl SsrPipelines {
     }
 }
 
+/// Optional incident pass that gathers additional screen rays.
+pub(crate) struct MultiRayIncident {
+    pub pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+}
+
+impl MultiRayIncident {
+    pub fn new(device: &wgpu::Device, p: &SsrPipelines, constants: &[(&str, f64)]) -> Self {
+        let fs = wgpu::ShaderStages::FRAGMENT;
+        let layout = layout(device, "raa-ssr.incident_multiray", &[
+            entry(0, fs, uniform_type(SSR_PARAMS_SIZE)),
+            entry(1, fs, texture_type(wgpu::TextureSampleType::Depth)),
+            entry(2, fs, texture_type(FLOAT)),
+            entry(4, fs, texture_type(UNFILTERABLE)),
+            entry(5, fs, texture_type(FLOAT)),
+            entry(6, fs, texture_type(FLOAT)),
+            entry(7, fs, FILTERING),
+        ]);
+        let pipeline = render(device, &p.trace_module, &[Some(&layout)], "fs_incident_multiray",
+            &[wgpu::TextureFormat::Rgba32Float], constants);
+        Self { pipeline, layout }
+    }
+
+    pub fn group(
+        &self,
+        device: &wgpu::Device,
+        p: &SsrPipelines,
+        targets: &CompositeTargets,
+        hiz: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-ssr.incident_multiray"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: p.params.as_entire_binding() },
+                view_entry(1, &targets.views.depth),
+                view_entry(2, &targets.views.normal),
+                view_entry(4, hiz),
+                view_entry(5, &targets.hdr_full),
+                view_entry(6, &targets.trace),
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&p.linear) },
+            ],
+        })
+    }
+}
+
 /// `fs_trace` and `fs_composite` pipelines; `layouts` = trace, composite, lighting.
 fn trace_pipelines(
     device: &wgpu::Device,

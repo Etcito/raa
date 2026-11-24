@@ -32,6 +32,17 @@ pub(super) const AREA_RECEIVER_WGSL: &str = include_str!("../../wgsl/area_shadow
 const AREA_TEMPORAL_WGSL: &str = include_str!("../../wgsl/area_shadow/temporal.wgsl");
 const AREA_SPATIAL_WGSL: &str = include_str!("../../wgsl/area_shadow/spatial.wgsl");
 
+/// Sample budget of the standalone stratified trace stage.
+pub const AREA_SAMPLES_PER_PIXEL: raa_pipeline::TunableSpec = raa_pipeline::TunableSpec {
+    key: "samplesPerPixel",
+    default: 1.0,
+    min: Some(1.0),
+    max: Some(16.0),
+    integer: true,
+    rebuild: "none",
+    source: "crates/raa-gi/src/wgsl/area_shadow/trace.wgsl",
+};
+
 /// Staged temporal filter switch. The bundled pass retains its legacy temporal blend.
 pub const AREA_ANTI_LAG: raa_pipeline::TunableSpec = raa_pipeline::TunableSpec {
     key: "antiLag",
@@ -92,7 +103,7 @@ pub const AREA_TRACE_ENTRY: &str = "raa_gi_area_trace";
 /// Side of the trace compute workgroup (8x8 threads).
 pub const WORKGROUP: u32 = 8;
 
-/// Size of `AreaShadowParamsGpu`: `frame_index` and three pad lanes.
+/// Size of `AreaShadowParamsGpu`: frame, capture seed, sample budget, and padding.
 pub const AREA_PARAMS_SIZE: u64 = 16;
 
 /// Size of `AreaDispatchGpu`: `index`, `usable`, `pairs` and `limit`.

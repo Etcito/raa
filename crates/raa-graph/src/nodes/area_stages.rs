@@ -35,7 +35,7 @@ impl NodeFamily for AreaStages {
                     ),
                 ],
                 vec![array(), output("linearDepth", T::Image2d, F::R32Float, 1)],
-                &[],
+                &["samplesPerPixel"],
                 5,
                 1,
                 2,
@@ -250,6 +250,10 @@ fn upgrade(_: u32, _: &mut Vec<(String, ParamValue)>) -> Result<(), String> {
     Ok(())
 }
 fn stage_param(pass: &str, key: &'static str) -> ParamSpec {
+    use raa_gi::parts::area_shadow::passes::AREA_SAMPLES_PER_PIXEL;
+    if key == AREA_SAMPLES_PER_PIXEL.key {
+        return tunable_param(key, &AREA_SAMPLES_PER_PIXEL, "Area shadow trace", "Samples per pixel");
+    }
     let binding_key = match (pass, key) {
         ("pass.gi.area-shadow", "restirCandidates") => "areaRestirCandidates",
         ("pass.gi.area-shadow", "restirSpatialSamples") => "areaRestirSpatialSamples",

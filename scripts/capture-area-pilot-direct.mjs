@@ -15,6 +15,8 @@ const capture = op === 'area-pilot' || op === 'gallery-path-capture';
 const gallery = op.startsWith('gallery-');
 const spherical = op === 'gallery-spherical';
 const mirror = op === 'gallery-mirror';
+const rayBudget = op === 'gallery-ray-budget';
+const raySelection = rayBudget ? /^(area|reflection):(joint-(?:development|final-[ab]))(?::(\d+))?$/.exec(comparison) : null;
 const sequence = op === 'gallery-sequence';
 const srTiming = op === 'gallery-sr-timing';
 const jointTrajectory = sequence && comparison.startsWith('joint-') ? comparison : undefined;
@@ -25,10 +27,13 @@ const liveMirror = mirror && comparison === 'live';
 const liveMirrorUi = mirror && comparison === 'live-ui';
 const uiOnly = liveSpherical || liveMirrorUi;
 const live = uiOnly || liveMirror;
+if (rayBudget && (!headful || !raySelection)) {
+  throw new Error('Ray budget needs --headful and <area|reflection>:<joint-development|joint-final-a|joint-final-b>[:final budget]');
+}
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
     || flags.some(flag => flag !== '--headful')
-    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-sr-timing', 'gallery-reflection-model', 'gallery-mirror'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-sr-timing|gallery-reflection-model|gallery-mirror] [baseline|fixed|live|live-ui|train|test|both|reflection|joint-train-a|joint-train-b|joint-train-c|joint-development|joint-final-a|joint-final-b|sr|joint|dataset|learned|coverage|sharp|priority] [--headful]');
+    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-sr-timing', 'gallery-reflection-model', 'gallery-ray-budget', 'gallery-mirror'].includes(op)) {
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-sr-timing|gallery-reflection-model|gallery-ray-budget|gallery-mirror] [baseline|fixed|live|live-ui|train|test|both|reflection|joint-train-a|joint-train-b|joint-train-c|joint-development|joint-final-a|joint-final-b|sr|joint|dataset|learned|coverage|sharp|priority] [--headful]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
@@ -158,6 +163,7 @@ try {
       buildId: receipt.buildId, remainingMs: 280000, requireFixed: comparison !== 'baseline',
       ...(mirror && { baseline: comparison === 'baseline', coverageOnly: comparison === 'coverage', sharpOnly: comparison === 'sharp', priorityOnly: comparison === 'priority' }),
       ...(srTiming && { modelHeads: comparison === 'joint' ? 'joint' : 'sr' }), ...(sequence && { split: jointTrajectory || ['fixed', 'reflection'].includes(comparison) ? 'both' : comparison, reflection: comparison === 'reflection', trajectory: jointTrajectory }), ...(predictionDataset && { dataset: true }), ...(predictionLearned && { learned: true }),
+      ...(raySelection && { head: raySelection[1], trajectory: raySelection[2], budget: Number(raySelection[3] || 0) }),
     })});
     const files = await Promise.all(result.files.map(async ({ name, blob, base64 }) => {
       if (base64) return { name, base64 };
@@ -174,7 +180,7 @@ try {
   if (spherical && receipt.files.includes('lib/gallery-temporal-fit/manifest.json')) {
     ui.neural = await evalPage(`import('/lib/gallery-neural.js').then(module => module.verifyGalleryNeuralUi())`, 60000);
   }
-  if ((spherical || mirror || sequence || srTiming || predictionDataset || predictionLearned || op === 'gallery-reflection-model') && browserErrors.length) throw new Error(browserErrors.join('\n'));
+  if ((spherical || mirror || sequence || srTiming || rayBudget || predictionDataset || predictionLearned || op === 'gallery-reflection-model') && browserErrors.length) throw new Error(browserErrors.join('\n'));
   const userAgent = await evalPage('navigator.userAgent');
   if (headful && /HeadlessChrome/.test(userAgent)) throw new Error('Expected a windowed Windows Chrome session');
   const windows = { browser: version.Browser, mode: headful ? 'windowed' : 'headless',
@@ -267,7 +273,7 @@ try {
       receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'), url,
     };
     const manifest = path.join(output, op === 'prediction' && !predictionDataset ? (predictionLearned ? 'learned-prediction.json' : 'prediction.json') : capture || sequence || predictionDataset ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
-      : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : mirror ? 'mirror.json' : op === 'gallery-reflection-model' ? 'reflection-model.json' : srTiming ? 'sr-timing.json' : 'measurement.json');
+      : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : mirror ? 'mirror.json' : op === 'gallery-reflection-model' ? 'reflection-model.json' : srTiming ? 'sr-timing.json' : rayBudget ? 'ray-budget.json' : 'measurement.json');
     await writeFile(manifest, JSON.stringify({ ...data, source, windows, ...(ui && { ui }) }, null, 2) + '\n', { flag: 'wx' });
     console.log(manifest);
     if (mirror && data.failure) {

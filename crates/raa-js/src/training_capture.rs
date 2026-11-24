@@ -19,6 +19,7 @@ impl Engine {
         &mut self,
         frame_id: f64,
         include_composite: Option<bool>,
+        include_area: Option<bool>,
     ) -> Result<JsValue, JsValue> {
         let runtime = self.capture_runtime()?;
         if runtime.stats().frames.checked_sub(1).map(|id| id as f64) != Some(frame_id) {
@@ -78,6 +79,16 @@ impl Engine {
                     .get("ssr.replace#replace", "color")
                     .ok_or_else(|| invalid("missing scene-linear SSR composite tap"))?;
                 textures.push(("compositeHdr", image.view.texture().clone()));
+            }
+            if include_area.unwrap_or(false) {
+                let image = resources
+                    .get("area.trace#trace", "raw")
+                    .ok_or_else(|| invalid("missing typed area trace pairs"))?;
+                // This offline tap reads layer zero, the first two stochastic slots.
+                textures.push(("areaPairs", image.view.texture().clone()));
+                if let Some(image) = resources.get("neural.area-reconstruction#areaModel", "pairs") {
+                    textures.push(("areaReconstruction", image.view.texture().clone()));
+                }
             }
             let size = targets.size();
             if textures

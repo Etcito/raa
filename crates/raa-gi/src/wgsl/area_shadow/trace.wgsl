@@ -23,7 +23,7 @@
 struct AreaShadowParamsGpu {
     frame_index: u32,
     capture_seed_plus_one: u32,
-    pad1: u32,
+    samples_per_pixel: u32, // zero in legacy callers means one sample
     pad2: u32,
 }
 
@@ -275,6 +275,7 @@ fn raa_gi_area_trace(@builtin(global_invocation_id) id: vec3<u32>) {
         view_depth = -raa_gi_view_position(centre, depth).z;
         let cells = raa_area_table.params.y;
         let frame_index = raa_area_params.frame_index;
+        let samples = clamp(raa_area_params.samples_per_pixel, 1u, 16u);
         for (var s = 0u; s < limit; s = s + 1u) {
             let packed = raa_area_table.lights[s / 4u][s % 4u];
             if packed == 0xFFFFFFFFu {
@@ -286,32 +287,35 @@ fn raa_gi_area_trace(@builtin(global_invocation_id) id: vec3<u32>) {
             }
             let capture_seed = raa_area_params.capture_seed_plus_one;
             let index = select(frame_index, capture_seed - 1u, capture_seed != 0u);
-            let cell = raa_area_stratum_cell(cells, index + s, pixel);
-            var jitter = raa_area_r2_jitter(index + 7u * s, pixel);
-            if capture_seed != 0u {
-                // Traverse complete strata with a new hashed jitter for each offline seed.
-                let key = raa_gi_probe_pcg(index * 2u + 1u)
-                    ^ raa_gi_probe_pcg(pixel.x * 2957u + pixel.y * 6113u + s * 823u);
-                jitter = vec2<f32>(
-                    raa_gi_probe_hash_to_unit(key),
-                    raa_gi_probe_hash_to_unit(key ^ 0x9e3779b9u),
-                );
-            }
-            let uv = raa_area_stratum_uv(cells, cell, jitter);
             let basis = raa_area_basis(light.direction_cos_outer.xyz);
-            let point = light.position_range.xyz
-                + basis[0] * (uv.x - 0.5) * light.width
-                + basis[1] * (uv.y - 0.5) * light.height;
-            let weight = raa_area_sample_weight(
-                position,
-                normal,
-                point,
-                light.direction_cos_outer.xyz,
-            );
-            if weight > 0.0 {
-                let visibility = raa_area_ray_visibility(position, normal, point);
-                weights[s] = vec2<f32>(weight * visibility, weight);
+            var pair = vec2<f32>(0.0);
+            for (var sample = 0u; sample < samples; sample++) {
+                // Keep sample zero identical. The stride rotates through all four or nine strata
+                // and shifts the R2 phase relative to the samples of adjacent frames.
+                let sequence = index + 1543u * sample;
+                let cell = raa_area_stratum_cell(cells, sequence + s, pixel);
+                var jitter = raa_area_r2_jitter(sequence + 7u * s, pixel);
+                if capture_seed != 0u {
+                    let key = raa_gi_probe_pcg(sequence * 2u + 1u)
+                        ^ raa_gi_probe_pcg(pixel.x * 2957u + pixel.y * 6113u + s * 823u);
+                    jitter = vec2<f32>(
+                        raa_gi_probe_hash_to_unit(key),
+                        raa_gi_probe_hash_to_unit(key ^ 0x9e3779b9u),
+                    );
+                }
+                let uv = raa_area_stratum_uv(cells, cell, jitter);
+                let point = light.position_range.xyz
+                    + basis[0] * (uv.x - 0.5) * light.width
+                    + basis[1] * (uv.y - 0.5) * light.height;
+                let weight = raa_area_sample_weight(
+                    position, normal, point, light.direction_cos_outer.xyz,
+                );
+                if weight > 0.0 {
+                    let visibility = raa_area_ray_visibility(position, normal, point);
+                    pair += vec2<f32>(weight * visibility, weight);
+                }
             }
+            weights[s] = pair / f32(samples);
         }
     }
     for (var g = 0u; g < min(groups, textureNumLayers(raa_area_raw_out)); g = g + 1u) {

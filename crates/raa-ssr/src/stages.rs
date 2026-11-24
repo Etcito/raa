@@ -25,7 +25,7 @@ use crate::{
     SsrDesc, SsrHandle,
     feature::{PARAMS_LEN, SsrCamera, constants, draw, draw_targets, pack_params},
     resources::{
-        CompositeTargets, HizTargets, SsrPipelines, SsrViewKey, TRACE_FORMAT, TraceTarget,
+        CompositeTargets, HizTargets, MultiRayIncident, SsrPipelines, SsrViewKey, TRACE_FORMAT, TraceTarget,
         diagnostic_view, replace_group,
     },
     tunables,
@@ -66,8 +66,12 @@ pub fn stage_entry(kind: SsrStageKind, instance: &str) -> String {
     format!("{}#{instance}", kind.type_id())
 }
 
+pub const MAX_EXTRA_RAYS: u32 = 8;
+
 struct State {
     desc: SsrDesc,
+    extra_rays: u32,
+    trace_source: Option<Rc<RefCell<State>>>,
     tunables: [f64; 3],
     generation: u64,
     camera: Option<SsrCamera>,
@@ -99,10 +103,15 @@ impl SsrStageHandle {
     pub fn copy_camera_from(&self, source: &SsrHandle) {
         self.state.borrow_mut().camera = source.camera();
     }
+    /// Use the same traversal limits and depth tolerance as the linked first-ray trace.
+    pub fn set_trace_source(&self, source: Option<&Self>) {
+        self.state.borrow_mut().trace_source = source.map(|source| source.state.clone());
+    }
     pub fn set_values(&self, values: &[(String, f64)]) -> Result<(), RaaError> {
         let mut s = self.state.borrow_mut();
         let mut desc = s.desc;
         let mut tun = s.tunables;
+        let mut extra_rays = s.extra_rays;
         for (key, value) in values {
             match (self.kind, key.as_str()) {
                 (SsrStageKind::Composite | SsrStageKind::Replace, "intensity") => {
@@ -116,6 +125,12 @@ impl SsrStageHandle {
                     if !value.is_finite() || !(0.0..=1.0).contains(&desc.max_roughness) {
                         return Err(invalid(&format!("invalid value for `{key}`")));
                     }
+                }
+                (SsrStageKind::Incident, "extraRays") => {
+                    if value.fract() != 0.0 || !(0.0..=f64::from(MAX_EXTRA_RAYS)).contains(value) {
+                        return Err(invalid(&format!("invalid value for `{key}`")));
+                    }
+                    extra_rays = *value as u32;
                 }
                 (SsrStageKind::Trace, "maxRoughness") => {
                     desc.max_roughness = *value as f32;
@@ -147,6 +162,7 @@ impl SsrStageHandle {
         desc.validate()?;
         let changed = s.tunables != tun;
         s.desc = desc;
+        s.extra_rays = extra_rays;
         s.tunables = tun;
         if changed {
             s.generation += 1;
@@ -172,6 +188,7 @@ struct StagePass {
     _dummy_trace: Option<wgpu::Texture>,
     bytes: [u8; PARAMS_LEN],
     built: u64,
+    multiray: Option<([f64; 3], MultiRayIncident)>,
 }
 
 enum StageTargets {
@@ -285,9 +302,12 @@ impl FeaturePass for StagePass {
         });
     }
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
-        let (desc, camera, generation, tunables) = {
+        let (desc, camera, generation, tunables, extra_rays) = {
             let state = self.state.borrow();
-            (state.desc, state.camera, state.generation, state.tunables)
+            let source = state.trace_source.as_ref().map(|source| source.borrow());
+            let (desc, tunables) = source.as_ref().map_or((state.desc, state.tunables),
+                |trace| (trace.desc, trace.tunables));
+            (desc, state.camera, state.generation, tunables, state.extra_rays)
         };
         if self.kind == SsrStageKind::Trace && self.built != generation {
             self.pipelines
@@ -343,6 +363,17 @@ impl FeaturePass for StagePass {
             *current = views;
         }
         pack_params(&mut self.bytes, size, mips, &desc, camera.as_ref());
+        if extra_rays > 0 {
+            if self.multiray.as_ref().is_none_or(|(built, _)| *built != tunables) {
+                self.multiray = Some((tunables, MultiRayIncident::new(
+                    ctx.gpu.device(), &self.pipelines, &constants(&tunables),
+                )));
+            }
+            let hiz_mips = ctx.resources.input(&self.entry, "hiz").map_or(0, |image| image.desc.mips);
+            self.bytes[284..288].copy_from_slice(&(hiz_mips as f32).to_le_bytes());
+            self.bytes[292..296].copy_from_slice(&(extra_rays as f32).to_le_bytes());
+        }
+
         ctx.gpu
             .queue()
             .write_buffer(&self.pipelines.params, 0, &self.bytes);
@@ -433,13 +464,17 @@ impl FeaturePass for StagePass {
                     .filter(|_| ctx.resources.input(&self.entry, "trace").is_some())
                 {
                     build_hdr_mips(ctx.encoder, color.view.texture(), t, &self.pipelines);
-                    draw(
-                        ctx.encoder,
-                        incident,
-                        &self.pipelines.incident,
-                        &t.composite_group,
-                        None,
-                    );
+                    if self.state.borrow().extra_rays > 0 {
+                        let Some(hiz) = ctx.resources.input(&self.entry, "hiz")
+                            .filter(|image| (image.desc.width, image.desc.height) == t.size) else {
+                            return Err(invalid("additional SSR rays require the scene-sized Hi-Z pyramid"));
+                        };
+                        let (_, multiray) = self.multiray.as_ref().expect("prepared multiray pass");
+                        let group = multiray.group(ctx.gpu.device(), &self.pipelines, t, &hiz.view);
+                        draw(ctx.encoder, incident, &multiray.pipeline, &group, None);
+                    } else {
+                        draw(ctx.encoder, incident, &self.pipelines.incident, &t.composite_group, None);
+                    }
                     self.state.borrow_mut().ran = true;
                 } else {
                     clear(ctx.encoder, incident);
@@ -563,6 +598,8 @@ pub fn install_stage(
     }
     let state = Rc::new(RefCell::new(State {
         desc: SsrDesc::default(),
+        extra_rays: 0,
+        trace_source: None,
         tunables: tunables::defaults(),
         generation: 0,
         camera: None,
@@ -581,6 +618,7 @@ pub fn install_stage(
         _dummy_trace: None,
         bytes: [0; PARAMS_LEN],
         built: 0,
+        multiray: None,
     }))?;
     Ok(SsrStageHandle { kind, entry, state })
 }

@@ -117,7 +117,7 @@ export interface Engine {
    * Offline readback of the latest submitted single view, without advancing its history.
    * Pass true to require the scene-linear output of the typed SSR replacement stage.
    */
-  captureTrainingTaps(frameId: number, includeComposite?: boolean): Promise<{
+  captureTrainingTaps(frameId: number, includeComposite?: boolean, includeArea?: boolean): Promise<{
     hdr: Uint8Array;
     depth: Uint8Array;
     normal: Uint8Array;
@@ -129,6 +129,9 @@ export interface Engine {
     reflectionIncident?: Uint8Array;
     reflectionReconstruction?: Uint8Array;
     compositeHdr?: Uint8Array;
+    /** Packed weighted pairs for stochastic slots zero and one, RGBA16F. */
+    areaPairs?: Uint8Array;
+    areaReconstruction?: Uint8Array;
     jitterNdc: [number, number];
   }>;
   /** Offline seeded reference trace, with an independent batch of 1 to 32 samples per pixel. */

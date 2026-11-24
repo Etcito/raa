@@ -102,6 +102,20 @@ pub fn bloom_composites(
         .collect()
 }
 
+/// Additional rays share the first ray's exact trace node and its input bindings.
+pub fn incident_trace<'a>(plan: &'a GraphPlan, node: &PlanNode) -> Option<&'a PlanNode> {
+    if node.type_id != "ssr.incident" || !node.params.iter().any(|(key, value)| {
+        key == "extraRays" && matches!(value, ParamValue::Int(count) if *count > 0)
+    }) {
+        return None;
+    }
+    let input = node.inputs.iter().find(|input| input.port == "trace")?;
+    let InputSource::Link { node: source, history: false, .. } = &input.source else {
+        return None;
+    };
+    plan.nodes.iter().find(|node| node.id == *source && node.type_id == "ssr.trace")
+}
+
 pub fn stage_bindings(
     plan: &GraphPlan,
     catalog: &Catalog,
@@ -149,6 +163,20 @@ pub fn stage_bindings(
             ));
         }
     }
+    // These inputs are inherited from the typed first-ray route, so a custom prepass or
+    // depth pyramid cannot accidentally send the additional rays through another scene view.
+    for incident in &plan.nodes {
+        let Some(trace) = incident_trace(plan, incident) else { continue };
+        let Some(consumer) = entry(entries, &incident.id) else { continue };
+        let Some(producer) = entry(entries, &trace.id) else { continue };
+        for port in ["depth", "normal", "hiz"] {
+            if let Some((_, _, source, source_port)) = result.iter().find(|(node, key, _, _)| {
+                node == &producer && *key == port
+            }) {
+                result.push((consumer.clone(), port, source.clone(), source_port.clone()));
+            }
+        }
+    }
     result
 }
 
@@ -192,4 +220,40 @@ fn entry(entries: &[(String, String)], node: &str) -> Option<String> {
         .iter()
         .find(|(id, _)| id == node)
         .map(|(_, entry)| entry.clone())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::plan_from_json;
+
+    const GRAPH: &str = include_str!("../../../graphs/real-frame-model.json");
+
+    #[test]
+    fn extra_ssr_rays_reuse_the_selected_trace_route() {
+        let result = GRAPH.replace(
+            r#""type": "ssr.incident""#,
+            r#""type": "ssr.incident", "params": { "extraRays": 3 }"#,
+        );
+        let catalog = Catalog::build();
+        for (text, expected) in [(GRAPH, 0), (&result, 3)] {
+            let plan = plan_from_json(text).expect("real-frame graph");
+            let incident = plan.nodes.iter().find(|node| node.id == "incident").unwrap();
+            assert!(incident.params.contains(&("extraRays".into(), ParamValue::Int(expected))));
+            let entries = plan_fns::node_entries(&plan, &catalog);
+            let binds = stage_bindings(&plan, &catalog, &entries);
+            for port in ["depth", "normal", "hiz"] {
+                let source = |entry: &str| binds.iter().find_map(|(node, key, source, output)| {
+                    (node == entry && *key == port).then_some((source, output))
+                });
+                let trace = source("ssr.trace#ssrTrace").expect("linked first-ray input");
+                assert_eq!(source("ssr.incident#incident"), (expected > 0).then_some(trace));
+            }
+        }
+        let missing_trace = result.replace(r#""ssrTrace.trace""#, r#""forward.color""#);
+        assert!(plan_from_json(&missing_trace).unwrap_err().iter().any(|issue| {
+            issue.code == "graph.ssr_extra_rays_source"
+        }));
+    }
 }
