@@ -442,9 +442,11 @@ fn group_two_bindings_are_private_to_their_pass() {
         );
         // Lighting, local lights, light tiles, the GI screen, volume and params (14, 17, 18),
         // the weather texture/uniform (15, 16) and the area stochastic table/mask (19, 20).
+        // The spherical cache lookup at 21 belongs to the forward shader.
+        let last_binding = if pass == PassKind::Forward { 21 } else { 20 };
         assert_eq!(
             group_bindings(&module, 1),
-            (0..=20).collect::<Vec<u32>>(),
+            (0..=last_binding).collect::<Vec<u32>>(),
             "{pass:?}"
         );
         let expected: &[u32] = match pass {
@@ -506,7 +508,7 @@ fn local_lighting_composes_with_selected_providers() {
     assert!(forward.contains("raa_pass_unlit(in.record)"));
     assert!(
         forward.find("raa_local_lighting(s, c)").unwrap()
-            < forward.find("raa_pass_unlit(in.record)").unwrap()
+            < forward.find("let color = select(").unwrap()
     );
 }
 
@@ -539,7 +541,7 @@ fn directional_radiance_is_applied_once_at_each_lit_pass_boundary() {
         let ambient = source.find("raa_slot_ambient(s, c)").expect("ambient");
         let indirect = source.find("raa_slot_indirect(s, c)").expect("indirect");
         let local = source.find("raa_local_lighting(s, c)").expect("local");
-        let unlit = source.find("raa_pass_unlit(in.record)").expect("unlit");
+        let unlit = source.find("let color = select(").expect("unlit selection");
         assert!(
             direct < ambient && ambient < indirect && indirect < local && local < unlit,
             "{pass:?}"
