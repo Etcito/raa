@@ -87,8 +87,12 @@ try {
   for (let attempt = 0; attempt < 100; attempt++) {
     if (launchError) throw launchError;
     if (browser.exitCode !== null) throw new Error(`Chrome exited ${browser.exitCode}`);
-    try { [port] = (await readFile(profilePort, 'utf8')).split(/\r?\n/); break; }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    try {
+      [port] = (await readFile(profilePort, 'utf8')).split(/\r?\n/);
+      if (/^\d+$/.test(port)) break;
+    } catch (error) {
+      if (!['ENOENT', 'EBUSY'].includes(error.code)) throw error;
+    }
     await delay(100);
   }
   if (!/^\d+$/.test(port ?? '')) throw new Error('Chrome DevTools did not start');
