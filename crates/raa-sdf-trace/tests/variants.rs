@@ -117,7 +117,7 @@ fn mesh_grid_shaders_reuse_forward_lookup_and_keep_directional_faces_private() {
     let hybrid = raa_sdf_trace::wgsl::mesh_hybrid_module();
     for source in [&mesh, &hybrid] {
         assert_eq!(source.matches(raa_shader::SPHERICAL_GI_WGSL).count(), 1);
-        assert!(source.contains("raa_spherical_evaluate_at(p, n, cell).diffuse"));
+        assert!(source.contains("raa_spherical_diffuse_at(p, n, cell)"));
         let module = validate_with(source, naga::valid::Capabilities::SHADER_FLOAT16_IN_FLOAT32);
         let (_, lookup) = module
             .global_variables
@@ -138,6 +138,16 @@ fn mesh_grid_shaders_reuse_forward_lookup_and_keep_directional_faces_private() {
             }
         );
     }
+    let physical = raa_shader::SPHERICAL_GI_WGSL
+        .split_once("fn raa_spherical_diffuse_at")
+        .unwrap()
+        .1
+        .split_once("fn raa_spherical_neighbors")
+        .unwrap()
+        .0;
+    assert!(physical.contains("raa_spherical_data[2].w"));
+    assert!(!physical.contains("desc.w"));
+    assert!(!hybrid.contains("coord.desc.w"));
     assert!(!mesh.contains("mesh_spherical_faces"));
     let module = validate_with(
         &hybrid,

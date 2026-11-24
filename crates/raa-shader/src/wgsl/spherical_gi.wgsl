@@ -107,11 +107,7 @@ struct RaaSphericalResult {
 }
 
 fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult {
-    return raa_spherical_evaluate_at(p, normal, raa_spherical_coordinate(p));
-}
-
-fn raa_spherical_evaluate_at(p: vec3<f32>, normal: vec3<f32>,
-                             cell: RaaSphericalCoordinate) -> RaaSphericalResult {
+    let cell = raa_spherical_coordinate(p);
     if cell.desc.x == 0u { return RaaSphericalResult(); }
     let desc = cell.desc;
     let shell = cell.shell;
@@ -146,16 +142,22 @@ fn raa_spherical_evaluate_at(p: vec3<f32>, normal: vec3<f32>,
         return RaaSphericalResult(vec4<f32>(0.0), vec4<f32>(rgb, 1.0));
     }
 
+    return RaaSphericalResult(raa_spherical_diffuse_at(p, normal, cell), vec4<f32>(0.0));
+}
+
+// Physical irradiance stays available while forward displays a debug overlay.
+fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
+                           cell: RaaSphericalCoordinate) -> vec4<f32> {
     let neighbors = raa_spherical_neighbors(p, normal, cell);
-    if neighbors.count < 2u { return RaaSphericalResult(); }
+    if neighbors.count < 2u { return vec4<f32>(0.0); }
     let channels = raa_spherical_data[2].w;
     var sum = vec3<f32>(0.0);
     for (var i = 0u; i < neighbors.count; i++) {
-        sum += neighbors.weights[i] * raa_spherical_incident(neighbors.entries[i], desc.z, channels);
+        sum += neighbors.weights[i] * raa_spherical_incident(neighbors.entries[i], cell.desc.z, channels);
     }
     let blend = smoothstep(0.0, 0.15, neighbors.total);
     let intensity = bitcast<f32>(raa_spherical_data[0].w);
-    return RaaSphericalResult(vec4<f32>(intensity * sum / neighbors.total, blend), vec4<f32>(0.0));
+    return vec4<f32>(intensity * sum / neighbors.total, blend);
 }
 
 // Reuse exactly the forward lookup's current, ready, normal-compatible cells.

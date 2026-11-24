@@ -404,7 +404,7 @@ fn mesh_spherical_diffuse(p: vec3<f32>, n: vec3<f32>, mat: Material) -> vec4<f32
     if !any(weight > vec3<f32>(0.0)) { return vec4<f32>(0.0); }
     let cell = raa_spherical_coordinate(p);
     if cell.desc.x == 0u { return vec4<f32>(0.0); }
-    let sample = raa_spherical_evaluate_at(p, n, cell).diffuse;
+    let sample = raa_spherical_diffuse_at(p, n, cell);
     let clip = frame.view_proj * vec4<f32>(p, 1.0);
     let offscreen = clip.w <= 0.0 || any(abs(clip.xy) > vec2<f32>(clip.w))
         || clip.z < 0.0 || clip.z > clip.w;
