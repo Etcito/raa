@@ -49,24 +49,20 @@
     {
       "levels": 3,
       "steps": [
-        { "op": "mark_stale" },
-        { "op": "choose_outdated", "expect": 2 },
-        { "op": "complete", "level": 2 },
-        { "op": "mark_stale" },
-        { "op": "start_waiting" },
-        { "op": "choose_outdated", "expect": 1 },
-        { "op": "complete", "level": 1 },
-        { "op": "complete", "level": 0 },
-        { "op": "pending", "expect": true },
-        { "op": "start_waiting" },
-        { "op": "choose_outdated", "expect": 2 },
-        { "op": "complete", "level": 0 },
-        { "op": "complete", "level": 1 },
-        { "op": "complete", "level": 2 },
         { "op": "pending", "expect": false },
-        { "op": "choose_outdated", "expect": null }
+        { "op": "mark_stale" },
+        { "op": "choose_outdated", "expect": 2 },
+        { "op": "begin", "level": 2, "expect": true },
+        { "op": "mark_stale" },
+        { "op": "choose_outdated", "expect": 1 },
+        { "op": "begin", "level": 1, "expect": true },
+        { "op": "choose_outdated", "expect": 0 },
+        { "op": "begin", "level": 0, "expect": true },
+        { "op": "choose_outdated", "expect": 2 },
+        { "op": "begin", "level": 2, "expect": true },
+        { "op": "pending", "expect": false }
       ],
-      "why": "new(3) starts clean; mark_stale marks 0,1,2 so the coarsest is 2; complete(2) leaves 0,1; a mark_stale during the round only sets waiting, and start_waiting does nothing while 0,1 are outdated, so the coarsest is 1; once 1 and 0 complete the waiting round is pending; start_waiting then marks all three, so the coarsest is 2 and after all complete nothing waits or is pending"
+      "why": "changes before voxelization coalesce; only the level already started is queued again"
     }
   ],
   "relight": [

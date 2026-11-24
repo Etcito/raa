@@ -83,6 +83,9 @@ impl GiVertexColors {
     pub fn set_mesh(&self, mesh: MeshId, colors: Option<&[f32]>) -> Result<(), RaaError> {
         let packed = colors.map(|c| pack_colors("vertexColors", c)).transpose()?;
         let mut state = self.0.borrow_mut();
+        if state.meshes.get(&mesh).map(|entry| &entry.packed) == packed.as_ref() {
+            return Ok(());
+        }
         state.counter += 1;
         let version = state.counter;
         match packed {
@@ -116,16 +119,19 @@ impl GiVertexColors {
             .map(|c| pack_colors("clusterVertexColors", c))
             .transpose()?;
         let mut state = self.0.borrow_mut();
-        let changed = match packed {
-            Some(packed) => {
-                state.clusters.insert((key, ordinal), packed);
-                true
-            }
-            None => state.clusters.remove(&(key, ordinal)).is_some(),
-        };
-        if changed {
-            state.cluster_generation += 1;
+        let section = (key, ordinal);
+        if state.clusters.get(&section) == packed.as_ref() {
+            return Ok(());
         }
+        match packed {
+            Some(packed) => {
+                state.clusters.insert(section, packed);
+            }
+            None => {
+                state.clusters.remove(&section);
+            }
+        }
+        state.cluster_generation += 1;
         Ok(())
     }
 
@@ -225,6 +231,29 @@ mod tests {
         assert_eq!(pool_rows(4097), Some(2));
         assert_eq!(pool_rows(4096 * 8192), Some(8192));
         assert_eq!(pool_rows(4096 * 8192 + 1), None);
+    }
+
+    #[test]
+    fn identical_streams_and_absent_removals_keep_the_revision() {
+        let colors = GiVertexColors::default();
+        let mesh = MeshId(4);
+        colors.set_mesh(mesh, None).unwrap();
+        colors.set_cluster(1, 0, None).unwrap();
+        assert_eq!(colors.revision(), 0);
+
+        colors.set_mesh(mesh, Some(&[0.5; 8])).unwrap();
+        colors.set_cluster(1, 0, Some(&[0.5; 8])).unwrap();
+        let revision = colors.revision();
+        let generation = colors.cluster_generation();
+        colors.set_mesh(mesh, Some(&[0.501; 8])).unwrap();
+        colors.set_cluster(1, 0, Some(&[0.501; 8])).unwrap();
+        assert_eq!(colors.revision(), revision);
+        assert_eq!(colors.cluster_generation(), generation);
+
+        colors.set_mesh(mesh, Some(&[0.25; 8])).unwrap();
+        colors.set_cluster(1, 0, None).unwrap();
+        assert_eq!(colors.revision(), revision + 2);
+        assert_eq!(colors.cluster_generation(), generation + 1);
     }
 
     #[test]

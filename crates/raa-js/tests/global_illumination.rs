@@ -353,12 +353,38 @@ fn stats_entries_follow_the_key_order_with_a_null_frame_index() {
             ("rejectedPercent", GiWire::Null),
             ("clampedPercent", GiWire::Null),
             ("litHistoryAge", GiWire::Null),
+            ("rebuildPendingLevels", GiWire::Number(0.0)),
+            ("rebuildReason", GiWire::Null),
+            ("rebuildLevel", GiWire::Null),
+            ("rebuildFloodPassesRemaining", GiWire::Null),
+            ("relitLevels", GiWire::Number(0.0)),
         ]
     );
     assert_eq!(
         stats_entries(&stats_at(Some(7)))[9],
         ("statsFrameIndex", GiWire::Number(7.0))
     );
+}
+
+#[test]
+fn stats_entries_publish_scene_and_camera_rebuild_progress() {
+    let stats = GiStats {
+        active: true,
+        pending_rebuild: true,
+        rebuild_pending_levels: 3,
+        rebuild_reason: Some("cameraAndSceneChanged"),
+        rebuild_level: Some(0),
+        rebuild_flood_passes_remaining: Some(6),
+        relit_levels: 2,
+        ..GiStats::default()
+    };
+    assert!(stats_entries(&stats).ends_with(&[
+        ("rebuildPendingLevels", GiWire::Number(3.0)),
+        ("rebuildReason", text("cameraAndSceneChanged")),
+        ("rebuildLevel", GiWire::Number(0.0)),
+        ("rebuildFloodPassesRemaining", GiWire::Number(6.0)),
+        ("relitLevels", GiWire::Number(2.0)),
+    ]));
 }
 
 #[test]

@@ -44,9 +44,14 @@ test('reports actual engine counters and current internal texture dimensions', (
     image('gi.area-shadow', 'mask', 641, 361, 2),
     image('tonemap', 'color', 641, 361),
   ];
+  let gi = {
+    active: true, pendingRebuild: true, allocatedBytes: 2 * 1024 * 1024,
+    rebuildPendingLevels: 3, rebuildReason: 'cameraAndSceneChanged',
+    rebuildLevel: 0, rebuildFloodPassesRemaining: 6, relitLevels: 2,
+  };
   const engine = {
     stats: () => ({ frames: 1, cpuMsMedian: 2.1, cpuMsP95: 3.47, instances: 12, drawCalls: 8, triangles: 321 }),
-    giStats: () => ({ active: true, pendingRebuild: true, allocatedBytes: 2 * 1024 * 1024 }),
+    giStats: () => gi,
     passImageExtents: () => images,
   };
 
@@ -54,12 +59,20 @@ test('reports actual engine counters and current internal texture dimensions', (
   assert.match(container.textContent, /CPU frame median 2\.10 ms.*p95 3\.47 ms/);
   assert.match(container.textContent, /Instances 12.*Draw calls 8.*Triangles 321/);
   assert.match(container.textContent, /GI volume rebuilding.*GI memory 2\.0 MiB/);
+  assert.match(container.textContent, /GI levels pending 3.*camera recenter and scene change.*level 0.*6 flood passes left.*GI levels relit 2/);
   assert.match(container.textContent, /gi\.screen +probes 41 × 23 · pyramid 641 × 361 \(10 mips\)/);
   assert.match(container.textContent, /gi\.area-shadow +mask 641 × 361 × 2/);
   assert.doesNotMatch(container.textContent, /tonemap/);
 
   images = [];
+  gi = {
+    ...gi, pendingRebuild: false, rebuildPendingLevels: 0, rebuildReason: null,
+    rebuildLevel: null, rebuildFloodPassesRemaining: null, relitLevels: 3,
+  };
   update(engine, 500, 641, 361);
+  assert.match(container.textContent, /GI volume active/);
+  assert.match(container.textContent, /GI levels pending 0.*GI levels relit 3/);
+  assert.doesNotMatch(container.textContent, /GI rebuild/);
   assert.doesNotMatch(container.textContent, /Internal pass textures|gi\.screen/);
 });
 

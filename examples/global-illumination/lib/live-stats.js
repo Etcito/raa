@@ -1,5 +1,11 @@
 const refreshMs = 500;
 const unavailable = '—';
+const rebuildReasons = {
+  allocation: 'volume allocation',
+  sceneChanged: 'scene change',
+  cameraMoved: 'camera recenter',
+  cameraAndSceneChanged: 'camera recenter and scene change',
+};
 
 const number = (value, digits = 0) => Number.isFinite(value) ? value.toFixed(digits) : unavailable;
 const extent = (width, height) => `${width} × ${height}`;
@@ -87,6 +93,19 @@ export function createLiveStats(container) {
     if (gi) {
       const state = gi.active ? (gi.pendingRebuild ? 'rebuilding' : 'active') : (gi.inactiveReason ?? 'inactive');
       lines.push(`GI volume ${state}  ·  GI memory ${number(gi.allocatedBytes / (1024 * 1024), 1)} MiB`);
+      if (gi.active && Number.isInteger(gi.rebuildPendingLevels)) {
+        const details = [`GI levels pending ${gi.rebuildPendingLevels}`];
+        const reason = rebuildReasons[gi.rebuildReason];
+        if (reason) {
+          let rebuild = `GI rebuild ${reason}`;
+          if (gi.rebuildLevel != null) {
+            rebuild += ` · level ${gi.rebuildLevel} · ${gi.rebuildFloodPassesRemaining} flood passes left`;
+          }
+          details.push(rebuild);
+        }
+        details.push(`GI levels relit ${number(gi.relitLevels)}`);
+        lines.push(details.join('  ·  '));
+      }
     }
     lines.push(...gpuTimingLines(optional(() => engine.passGpuTimings())));
     const images = passLines(optional(() => engine.passImageExtents()), width, height);

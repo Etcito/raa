@@ -64,6 +64,15 @@ pub(crate) struct LightFrame {
     pub(crate) clear_radiance: bool,
 }
 
+/// A level being rebuilt across frames, retaining the origin and reason from voxelization.
+#[derive(Clone, Copy)]
+struct PendingRebuild {
+    level: usize,
+    origin: [i32; 3],
+    next_pass: usize,
+    reason: &'static str,
+}
+
 /// One slice of a pending rebuild: its level, begin and commit flags and flood passes.
 #[derive(Clone, Debug)]
 pub(crate) struct RebuildSlice {
@@ -78,6 +87,8 @@ pub(crate) struct RebuildSlice {
 pub(crate) struct VolumeWork {
     pub rebuild_all: bool,
     pub slice: Option<RebuildSlice>,
+    pub rebuild_reason: Option<&'static str>,
+    pub rebuild_pending_levels: u32,
     pub relight: usize,
     /// Every other committed level also relit this frame (the hot window after a lighting
     /// change): each relight is one more bounce, so the volume settles in a few frames instead of
@@ -131,7 +142,7 @@ pub(crate) struct GiVolume {
     light_binds: Vec<wgpu::BindGroup>,
     write_binds: Vec<wgpu::BindGroup>,
     origins: Vec<Option<[i32; 3]>>,
-    pending: Option<(usize, [i32; 3], usize)>,
+    pending: Option<PendingRebuild>,
     light_updates: Vec<u32>,
     params: [u8; 96],
 }
@@ -547,7 +558,7 @@ impl GiVolume {
     /// Follows the camera and decides this frame's work (solstice `volume.rs:398-529`,
     /// `GiVolume::prepare`). A first build rebuilds every level at its snapped origin in one
     /// frame; afterwards one pending slice advances a rebuild by `FLOOD_PASSES_PER_FRAME` of the
-    /// 18 flood passes, storing the origin and completing the round on its last pass. Writes the
+    /// 18 flood passes, storing the origin on its last pass. Writes the
     /// per-level `GiVoxelizeGpu`, `GiLightGpu` and `GiWriteGpu` uniforms, relights one committed
     /// level (a level being rebuilt is never relit, solstice `volume.rs:454-466`) and stores the
     /// `GiVolumeParamsGpu` bytes for [`GiVolume::params_bytes`].
@@ -565,47 +576,55 @@ impl GiVolume {
             full_relight,
             clear_radiance,
         } = light;
-        rounds.start_waiting();
         let resolution = self.quality.resolution;
         let levels = self.quality.levels as usize;
         let first_build = self.origins.first().copied().flatten().is_none();
         let mut slice = None;
+        let mut rebuild_reason = None;
         if first_build {
+            rebuild_reason = Some("allocation");
             for level in 0..levels {
                 let voxel = clipmap::voxel_size(level as u32);
                 let origin = clipmap::snapped_origin(camera_position, voxel, resolution);
                 if let Some(slot) = self.origins.get_mut(level) {
                     *slot = Some(origin);
                 }
-                rounds.complete(level);
             }
         } else {
             if self.pending.is_none() {
-                self.pending = clipmap::choose_rebuild(&self.origins, camera_position, resolution)
-                    .map(|(level, origin)| (level, origin, 0))
-                    .or_else(|| {
-                        rounds.choose_outdated().and_then(|level| {
-                            let origin = self.origins.get(level).copied().flatten()?;
-                            Some((level, origin, 0))
-                        })
-                    });
+                let camera = clipmap::choose_rebuild(&self.origins, camera_position, resolution);
+                let target = camera.or_else(|| {
+                    let level = rounds.choose_outdated()?;
+                    Some((level, self.origins[level]?))
+                });
+                self.pending = target.map(|(level, origin)| {
+                    let reason = match (camera.is_some(), rounds.begin(level)) {
+                        (true, true) => "cameraAndSceneChanged",
+                        (true, false) => "cameraMoved",
+                        (false, _) => "sceneChanged",
+                    };
+                    PendingRebuild {
+                        level,
+                        origin,
+                        next_pass: 0,
+                        reason,
+                    }
+                });
             }
-            if let Some((level, origin, next_pass)) = self.pending {
+            if let Some(pending) = &mut self.pending {
                 let passes = clipmap::flood_pass_count();
-                let end = (next_pass + clipmap::FLOOD_PASSES_PER_FRAME).min(passes);
+                let end = (pending.next_pass + clipmap::FLOOD_PASSES_PER_FRAME).min(passes);
                 let commit = end == passes;
+                rebuild_reason = Some(pending.reason);
                 slice = Some(RebuildSlice {
-                    level,
-                    begin: next_pass == 0,
-                    passes: next_pass..end,
+                    level: pending.level,
+                    begin: pending.next_pass == 0,
+                    passes: pending.next_pass..end,
                     commit,
                 });
-                self.pending = Some((level, origin, end));
+                pending.next_pass = end;
                 if commit {
-                    if let Some(slot) = self.origins.get_mut(level) {
-                        *slot = Some(origin);
-                    }
-                    rounds.complete(level);
+                    self.origins[pending.level] = Some(pending.origin);
                 }
             }
         }
@@ -613,7 +632,7 @@ impl GiVolume {
         let being_rebuilt = if committed {
             None
         } else {
-            self.pending.map(|(level, _, _)| level)
+            self.pending.map(|pending| pending.level)
         };
         let relight = cursor.next(self.quality.levels, being_rebuilt);
         let extra_relights: Vec<usize> = if full_relight {
@@ -645,8 +664,8 @@ impl GiVolume {
             let voxel = clipmap::voxel_size(level as u32);
             let voxelize_origin = self
                 .pending
-                .filter(|pending| pending.0 == level)
-                .map_or(origin, |pending| pending.1);
+                .filter(|pending| pending.level == level)
+                .map_or(origin, |pending| pending.origin);
             let level_offset = level as u32 * resolution * resolution * resolution;
             let record = GiVoxelizeGpu {
                 origin: voxelize_origin.map(|c| c as f32 * voxel),
@@ -728,6 +747,13 @@ impl GiVolume {
         VolumeWork {
             rebuild_all: first_build,
             slice,
+            rebuild_reason,
+            rebuild_pending_levels: rounds.pending_levels(
+                &self.origins,
+                camera_position,
+                resolution,
+                being_rebuilt,
+            ),
             relight,
             extra_relights,
             voxelize,
@@ -899,11 +925,6 @@ impl GiVolume {
     /// `LightingResources::set_gi`.
     pub(crate) fn params_bytes(&self) -> [u8; 96] {
         self.params
-    }
-
-    /// Whether a rebuild slice is pending, so stats report `pendingRebuild`.
-    pub(crate) fn pending_slice(&self) -> bool {
-        self.pending.is_some()
     }
 
     /// Whether every level has been committed at least once; the `VALID` flag condition.

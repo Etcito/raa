@@ -370,6 +370,20 @@ pub(crate) fn stats_entries(s: &GiStats) -> Vec<(&'static str, GiWire)> {
             "litHistoryAge",
             number_or_null(s.lit_history_age.map(|age| age as f64)),
         ),
+        (
+            "rebuildPendingLevels",
+            GiWire::Number(f64::from(s.rebuild_pending_levels)),
+        ),
+        ("rebuildReason", text_or_null(s.rebuild_reason)),
+        (
+            "rebuildLevel",
+            number_or_null(s.rebuild_level.map(f64::from)),
+        ),
+        (
+            "rebuildFloodPassesRemaining",
+            number_or_null(s.rebuild_flood_passes_remaining.map(f64::from)),
+        ),
+        ("relitLevels", GiWire::Number(f64::from(s.relit_levels))),
     ]
 }
 

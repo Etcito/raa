@@ -139,8 +139,12 @@ fn rebuild_rounds_match_the_fixture() {
         for step in array(field(case, "steps")) {
             match string(field(step, "op")) {
                 "mark_stale" => rounds.mark_stale(),
-                "start_waiting" => rounds.start_waiting(),
-                "complete" => rounds.complete(u32_of(field(step, "level")) as usize),
+                "begin" => assert_eq!(
+                    rounds.begin(u32_of(field(step, "level")) as usize),
+                    boolean(field(step, "expect")),
+                    "{}",
+                    case_why(case)
+                ),
                 "choose_outdated" => {
                     let expected = match field(step, "expect") {
                         JsonValue::Null => None,
@@ -158,6 +162,24 @@ fn rebuild_rounds_match_the_fixture() {
             }
         }
     }
+}
+
+#[test]
+fn continuous_changes_keep_servicing_each_level_and_a_paused_scene_drains() {
+    let mut rounds = RebuildRounds::new(3);
+    for level in [2, 1, 0, 2, 1, 0] {
+        rounds.mark_stale();
+        assert_eq!(rounds.choose_outdated(), Some(level));
+        assert!(rounds.begin(level));
+        // Each level takes three frames. Edits during the last two must survive its commit.
+        rounds.mark_stale();
+        rounds.mark_stale();
+    }
+    for level in [2, 1, 0] {
+        assert_eq!(rounds.choose_outdated(), Some(level));
+        assert!(rounds.begin(level));
+    }
+    assert!(!rounds.pending());
 }
 
 #[test]

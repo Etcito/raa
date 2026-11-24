@@ -28,6 +28,7 @@
 //! orthographic view of one level, the volume's byte size and the forward LOD rule.
 
 use std::cmp::Reverse;
+use std::collections::VecDeque;
 
 use raa_lit::LodLevel;
 use raa_math::Vec3;
@@ -64,8 +65,7 @@ pub fn voxel_size(level: u32) -> f32 {
 /// snap step and multiplied back, then minus half of `resolution`.
 ///
 /// Handoff: `raa-gi: clipmap tests and fixture` calls the entry points of this file:
-/// `snapped_origin`, `choose_rebuild`, `RebuildRounds::{new, mark_stale, start_waiting,
-/// choose_outdated, complete, pending}`, `RelightCursor::next`, `light_schedule`, `flood_steps`,
+/// `snapped_origin`, `choose_rebuild`, `RebuildRounds`, `RelightCursor::next`, `light_schedule`, `flood_steps`,
 /// `flood_pass_count`, `volume_bytes`, `forward_lod`, `level_view` and `voxel_size`. Today they
 /// are pure functions of their arguments; the only state crossing is a `RebuildRounds` or
 /// `RelightCursor` that the caller owns.
@@ -130,65 +130,72 @@ pub fn choose_rebuild(
     (offset > 0).then_some((level, wanted))
 }
 
-/// Rebuild rounds over the levels (solstice `volume.rs:686-711, 773-788`). A round marks every
-/// level outdated; a change that arrives during a round waits until the round has finished.
+/// Pending scene refreshes, ordered by when each level was first dirtied. A level
+/// takes the current scene when voxelization starts, so edits before that point coalesce.
+/// Edits during its flood passes queue it again, behind levels that are still waiting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RebuildRounds {
-    outdated: Vec<bool>,
-    waiting: bool,
+    levels: usize,
+    outdated: VecDeque<usize>,
 }
 
 impl RebuildRounds {
-    /// A state for `levels` levels with none outdated and no round waiting (solstice
-    /// `volume.rs:391-392`, the initial `outdated` and `refresh_waiting`).
-    pub fn new(levels: u32) -> RebuildRounds {
-        RebuildRounds {
-            outdated: vec![false; levels as usize],
-            waiting: false,
+    /// Starts with every level current.
+    pub fn new(levels: u32) -> Self {
+        Self {
+            levels: levels as usize,
+            outdated: VecDeque::with_capacity(levels as usize),
         }
     }
 
-    /// Marks every level outdated, or, while some still are, notes that another round waits
-    /// (solstice `volume.rs:693-695, 774-780`, `mark_stale` and `mark_outdated`).
+    /// Queues every level that has not already been queued, coarsest first.
     pub fn mark_stale(&mut self) {
-        if self.any_outdated() {
-            self.waiting = true;
-        } else {
-            self.outdated.fill(true);
+        for level in (0..self.levels).rev() {
+            if !self.outdated.contains(&level) {
+                self.outdated.push_back(level);
+            }
         }
     }
 
-    /// Starts a waiting round once no level is outdated (solstice `volume.rs:698-700, 783-788`,
-    /// `start_waiting_refresh` and `start_waiting`).
-    pub fn start_waiting(&mut self) {
-        if self.waiting && !self.any_outdated() {
-            self.waiting = false;
-            self.outdated.fill(true);
-        }
-    }
-
-    /// The coarsest outdated level, rebuilt where it stands (solstice `volume.rs:704-711`,
-    /// `choose_outdated`).
+    /// The next level to refresh when the camera needs no recentering.
     pub fn choose_outdated(&self) -> Option<usize> {
-        self.outdated.iter().rposition(|&outdated| outdated)
+        self.outdated.front().copied()
     }
 
-    /// Clears the outdated mark of `level` once its rebuild commits; an index past the levels
-    /// does nothing (solstice `volume.rs:447-449`).
-    pub fn complete(&mut self, level: usize) {
-        if let Some(outdated) = self.outdated.get_mut(level) {
-            *outdated = false;
-        }
+    /// Acknowledges the inputs captured at voxelization, including for a camera rebuild.
+    /// Returns whether the level was already queued for a scene change.
+    pub fn begin(&mut self, level: usize) -> bool {
+        self.outdated
+            .iter()
+            .position(|&queued| queued == level)
+            .and_then(|index| self.outdated.remove(index))
+            .is_some()
     }
 
-    /// Whether a level is outdated or a round is waiting (solstice `volume.rs:686-711`, the
-    /// pending rebuild and the waiting round).
+    /// Whether a scene refresh is queued. A started slice is tracked separately.
     pub fn pending(&self) -> bool {
-        self.waiting || self.any_outdated()
+        !self.outdated.is_empty()
     }
 
-    fn any_outdated(&self) -> bool {
-        self.outdated.iter().any(|&outdated| outdated)
+    /// Counts unique levels with an unfinished slice, newer inputs or a different wanted origin.
+    pub(crate) fn pending_levels(
+        &self,
+        origins: &[Option<[i32; 3]>],
+        camera: Vec3,
+        resolution: u32,
+        rebuilding: Option<usize>,
+    ) -> u32 {
+        origins
+            .iter()
+            .enumerate()
+            .filter(|&(level, origin)| {
+                Some(level) == rebuilding
+                    || self.outdated.contains(&level)
+                    || origin.is_some_and(|origin| {
+                        origin != snapped_origin(camera, voxel_size(level as u32), resolution)
+                    })
+            })
+            .count() as u32
     }
 }
 
@@ -263,4 +270,37 @@ pub fn forward_lod(chain: &[LodLevel], world_scale: f32, voxel_size: f32) -> usi
         .iter()
         .rposition(|level| level.error * world_scale <= 0.5 * voxel_size)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_levels_include_camera_work_after_commit_and_count_overlaps_once() {
+        let resolution = 64;
+        let camera = Vec3::new(7.0, 0.0, 0.0);
+        let mut origins = [Some([-32; 3]); 3];
+        let mut rounds = RebuildRounds::new(3);
+        rounds.mark_stale();
+
+        let (level, origin) = choose_rebuild(&origins, camera, resolution).unwrap();
+        assert_eq!(level, 0);
+        assert!(rounds.begin(level));
+        assert_eq!(
+            rounds.pending_levels(&origins, camera, resolution, Some(level)),
+            3
+        );
+        assert_eq!(rounds.choose_outdated(), Some(2));
+
+        origins[level] = Some(origin);
+        assert_eq!(rounds.pending_levels(&origins, camera, resolution, None), 2);
+        assert!(rounds.begin(2));
+        assert!(rounds.begin(1));
+        assert_eq!(rounds.pending_levels(&origins, camera, resolution, None), 2);
+        for (level, origin) in origins.iter_mut().enumerate() {
+            *origin = Some(snapped_origin(camera, voxel_size(level as u32), resolution));
+        }
+        assert_eq!(rounds.pending_levels(&origins, camera, resolution, None), 0);
+    }
 }

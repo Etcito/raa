@@ -16,7 +16,7 @@ interface GiQuality { resolution: 64 | 96; levels: 3 | 4 | 5; probeRays: 6 | 8 }
 type GiQualityPatch = Partial<GiQuality>
 type GiInactiveReason = 'disabled' | 'passDisabled' | 'multiView' | 'noInstance'
 interface InstanceGlobalIllumination { requested: boolean | null; voxelized: boolean; driver: 'forward' | 'virtual' | null; code: string | null; message: string | null }
-interface GiStats { active: boolean; inactiveReason: GiInactiveReason | null; quality: GiQuality; finestVoxelMetres: number; voxelizedForwardInstances: number; voxelizedVirtualInstances: number; pendingRebuild: boolean; framesSinceRebuild: number; allocatedBytes: number; statsFrameIndex: number | null; pending: boolean }
+interface GiStats { active: boolean; inactiveReason: GiInactiveReason | null; quality: GiQuality; finestVoxelMetres: number; voxelizedForwardInstances: number; voxelizedVirtualInstances: number; pendingRebuild: boolean; framesSinceRebuild: number; allocatedBytes: number; statsFrameIndex: number | null; pending: boolean; rebuildPendingLevels: number; rebuildReason: 'allocation' | 'sceneChanged' | 'cameraMoved' | 'cameraAndSceneChanged' | null; rebuildLevel: number | null; rebuildFloodPassesRemaining: number | null; relitLevels: number }
 interface Engine {
   setGlobalIllumination(patch: GlobalIlluminationPatch): void
   globalIllumination(): GlobalIlluminationSettings
@@ -178,8 +178,13 @@ but still receives GI, and so do refused skinned, deformed, transparent and fur 
 | `finestVoxelMetres` | metres | 0.2 |
 | `voxelizedForwardInstances` | count | scene instances voxelized by driver A in the latest prepared frame |
 | `voxelizedVirtualInstances` | count | scene instances voxelized by driver B in the latest prepared frame |
-| `pendingRebuild` | boolean | a rebuild slice is pending, or a round is outdated or waiting |
-| `framesSinceRebuild` | frames | frames since the last rebuild round completed; saturates at 1000000; 0 while pending |
+| `pendingRebuild` | boolean | at least one clipmap level needs further rebuild work |
+| `framesSinceRebuild` | frames | frames with no rebuild pending, counting the completion frame as 1 and saturating at 1000000. Zero while inactive or pending |
+| `rebuildPendingLevels` | count | levels with an unfinished slice, newer scene inputs or a different snapped origin |
+| `rebuildReason` | string or null | `allocation`, `sceneChanged`, `cameraMoved`, or `cameraAndSceneChanged` for rebuild work in this frame. Null if no rebuild was recorded |
+| `rebuildLevel` | level or null | zero-based level rebuilt this frame. Null for a whole-volume build or no rebuild |
+| `rebuildFloodPassesRemaining` | count or null | flood passes still needed on that slice. Null if no slice was recorded |
+| `relitLevels` | count | clipmap levels relit this frame |
 | `allocatedBytes` | bytes | every GPU byte raa-gi owns; 0 when inactive |
 | `statsFrameIndex` | invocation id or null | the newest invocation whose submission completed; null before the first |
 | `pending` | boolean | a prepared frame whose submission is not yet observed |
@@ -204,11 +209,14 @@ there is no readback. Before the first published frame, `statsFrameIndex` is nul
   dummies are bound.
 - Disabling GI (`disabled`) or the `gi.volume` pass (`passDisabled`) releases everything.
   Re-enabling starts the first-build path: every level is rebuilt in one frame.
-- A rebuild round starts when a voxel member is added or removed, or when a member's signature
-  changes (slot, mesh, material id, world matrix, base colour, emissive or material flags). The
-  levels then rebuild over several frames, six of the 18 flood passes per frame, while their old
-  contents keep serving. A moved instance lights its new place after the round completes.
-- A camera move rebuilds the level whose snapped origin changed, in cells of 8 voxels.
+- Adding or removing a voxel member, changing a member signature (slot, mesh, material id, world
+  matrix, base colour, emissive or material flags), or changing the packed vertex colours queues
+  a refresh for each level. Each level voxelizes the latest scene when its rebuild starts.
+  Changes while that level floods queue it behind levels still waiting for voxelization. Old
+  atlas contents serve until each level commits, after six of the 18 flood passes per frame.
+- A camera move queues levels whose snapped origin changed, in cells of 8 voxels. A camera
+  rebuild also consumes any scene changes already queued for that level.
+- Light changes can relight the volume without rebuilding its voxel geometry.
 - Resize: in milestone 1 the volume does not depend on the surface size, so a resize changes
   nothing. From milestone 2, a resize recreates only the screen resources and invalidates the
   screen histories.

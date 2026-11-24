@@ -20,7 +20,7 @@ use raa_scene::{Camera, DirectionalLight, Scene};
 use raa_vg::VgHandle;
 use raa_vg::scene::{ItemScratch, SyncItem};
 
-use crate::clipmap::{RebuildRounds, RelightCursor};
+use crate::clipmap::{RebuildRounds, RelightCursor, flood_pass_count};
 use crate::debug::DebugRenderer;
 use crate::emissive::{EmissiveSources, emission_power, emission_signature};
 use crate::forward_driver::ForwardDriver;
@@ -621,9 +621,9 @@ impl GiHandle {
             .emission_power
             .is_some_and(|previous| injected < DARKER * previous);
         core.emission_power = Some(injected);
-        // A changed scene (an object moved, appeared or left) changes the light paths too: the
-        // volume replaces its radiance while it follows.
-        if changed {
+        // Changed geometry or voxel albedo also changes the light paths.
+        // Replace the stored radiance while the volume follows.
+        if changed || colors_changed {
             core.hot_relight = HOT_RELIGHT_FRAMES;
         }
         let power = lighting_power(lit, core.sun_color) + sky;
@@ -666,10 +666,19 @@ impl GiHandle {
             part.prepare_frame(gpu, &frame);
         }
 
-        let pending_slice = core.volume.as_ref().is_some_and(GiVolume::pending_slice);
-        let pending_rebuild = pending_slice || core.rounds.pending();
-        core.frames_since_rebuild = if pending_rebuild {
+        let work = core.work.as_ref();
+        let rebuild_pending_levels = work.map_or(0, |work| work.rebuild_pending_levels);
+        let pending_rebuild = rebuild_pending_levels > 0;
+        let rebuild_reason = work.and_then(|work| work.rebuild_reason);
+        let rebuild_slice = work.and_then(|work| work.slice.as_ref());
+        let rebuild_level = rebuild_slice.map(|slice| slice.level as u32);
+        let rebuild_flood_passes_remaining =
+            rebuild_slice.map(|slice| (flood_pass_count() - slice.passes.end) as u32);
+        let relit_levels = work.map_or(0, |work| 1 + work.extra_relights.len() as u32);
+        core.frames_since_rebuild = if !active || pending_rebuild {
             0
+        } else if rebuild_reason.is_some() {
+            1
         } else {
             core.frames_since_rebuild
                 .saturating_add(1)
@@ -697,6 +706,11 @@ impl GiHandle {
             voxelized_forward_instances: if active { core.report.forward_count } else { 0 },
             voxelized_virtual_instances: if active { core.report.virtual_count } else { 0 },
             pending_rebuild,
+            rebuild_pending_levels,
+            rebuild_reason,
+            rebuild_level,
+            rebuild_flood_passes_remaining,
+            relit_levels,
             frames_since_rebuild: core.frames_since_rebuild,
             allocated_bytes,
             stats_frame_index: None,

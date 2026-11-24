@@ -21,9 +21,19 @@ pub struct GiStats {
     pub voxelized_forward_instances: u32,
     /// Scene instances voxelized by driver B in the latest prepared frame.
     pub voxelized_virtual_instances: u32,
-    /// A rebuild slice is pending, or a round is outdated or waiting.
+    /// At least one clipmap level needs further rebuild work.
     pub pending_rebuild: bool,
-    /// Frames since the last rebuild round completed (0 while pending).
+    /// Unique levels with an unfinished slice, newer scene inputs or a different snapped origin.
+    pub rebuild_pending_levels: u32,
+    /// The cause of the rebuild recorded this frame, or `None` on a relight-only or inactive frame.
+    pub rebuild_reason: Option<&'static str>,
+    /// The zero-based level recorded this frame, or `None` for a whole-volume build or no rebuild.
+    pub rebuild_level: Option<u32>,
+    /// Flood passes left on that slice after the frame, or `None` when no slice was recorded.
+    pub rebuild_flood_passes_remaining: Option<u32>,
+    /// Number of levels relit this frame, regardless of rebuild activity.
+    pub relit_levels: u32,
+    /// Frames with no rebuild pending, counting the completion frame as 1. Zero while inactive.
     pub frames_since_rebuild: u32,
     /// Every GPU byte the crate owns; 0 while inactive.
     pub allocated_bytes: u64,

@@ -190,11 +190,11 @@ export interface GiStats {
   voxelizedForwardInstances: number;
   /** Scene instances voxelized by driver B (virtualized) in the latest prepared frame. */
   voxelizedVirtualInstances: number;
-  /** A rebuild slice is pending, or a round is outdated or waiting. */
+  /** At least one clipmap level needs further rebuild work. */
   pendingRebuild: boolean;
   /**
-   * Frames since the last rebuild round completed, saturating at 1000000; 0 while a rebuild is
-   * pending.
+   * Frames with no rebuild pending, counting the completion frame as 1 and saturating at
+   * 1000000. Zero while inactive or while a level still needs rebuilding.
    */
   framesSinceRebuild: number;
   /** Every GPU byte raa-gi owns; 0 when inactive. */
@@ -211,6 +211,16 @@ export interface GiStats {
   clampedPercent: number | null;
   /** Real-frame age of the lit HDR available to screen hits, or null if unavailable. */
   litHistoryAge: number | null;
+  /** Unique levels with an unfinished slice, newer scene inputs or a different snapped origin. */
+  rebuildPendingLevels: number;
+  /** The cause of the rebuild recorded this frame, or null when no rebuild was recorded. */
+  rebuildReason: 'allocation' | 'sceneChanged' | 'cameraMoved' | 'cameraAndSceneChanged' | null;
+  /** Zero-based level recorded this frame, or null for a whole-volume build or no rebuild. */
+  rebuildLevel: number | null;
+  /** Flood passes still needed on that slice, or null when no slice was recorded. */
+  rebuildFloodPassesRemaining: number | null;
+  /** Levels relit this frame, regardless of rebuild activity. */
+  relitLevels: number;
 }
 
 /**
