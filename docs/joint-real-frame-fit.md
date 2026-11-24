@@ -77,10 +77,48 @@ candidate, 0.07758 for the prior fit, 0.11304 for one raw ray, and 0.03686 for
 nine actual rays. That diagnostic replay used the recorded forward guides
 and no incident history input. The corresponding earlier GPU diagnostic had
 zero area output support because the typed area receiver was prepared too late.
-The runtime fix is distinct from the model fit. Area lacks a final checkpoint
-qualification here.
+The runtime fix is distinct from the model fit.
 
-Machine-readable selection, fit and final reports are under
-`out/joint-real-frame-d6b8d80`. The native candidate composed replay, paired 720p GPU timing, and physical
-input-to-photon gate remain unverified. The currently shipped
-gallery continues loading the prior checkpoint on its existing opt-in path.
+The native area check after the receiver fix showed 0.07755 RMSE for V2 and
+0.07763 for V1 on development, compared with 0.11304 for the raw input.
+On the two final trajectories the V2 result was 0.07743 and 0.07638,
+compared with 0.11679 and 0.12052 for raw. Five rays achieved 0.04485 and
+0.04968. On final A the five-ray cost was 0.270 ms compared with 0.262 ms
+for learned area. On final B their GPU costs differed more substantially.
+The area head remains an explicit experiment.
+
+In native SSR replay the frozen candidate reduced accepted incident HDR RMSE
+from 0.08607 to 0.06749 on final A and from 0.08771 to 0.06556 on final B.
+The checks preserved first-hit identity, confidence and all 55,588 offscreen
+lanes across the two runs. The extra-ray comparisons on the final tapes
+had different GPU costs and used a distinct sampling footprint.
+
+## Native composed comparison
+
+Windowed Windows Chrome on the RTX 3090 passed all 1,539 checked WebGPU golden
+values for `d6b8d80`. Both held-out native gallery builds used renderer
+`2103f67`. Of the served assets, only the model manifest and weights differed.
+The composed scorer matched the actual output to the final teacher on frame ID,
+time, jitter, event, and extent and verified the selected heads and weights
+on every learned frame.
+
+| Native display with matched raster teacher | PSNR (dB) | SSIM | Linear HDR RMSE | Warped log change MAE |
+|---|---:|---:|---:|---:|
+| Analytic temporal resolve, V2 build | 28.231 | 0.92984 | 0.05937 | 0.004177 |
+| V1 SR + SSR, analytic area | 23.638 | 0.77671 | 0.06526 | 0.006469 |
+| V2 SR + SSR, analytic area | 25.955 | 0.90421 | 0.06475 | 0.006219 |
+| V1 with all three learned heads | 23.653 | 0.77828 | 0.06505 | 0.006257 |
+| V2 with all three learned heads | 25.975 | 0.90593 | 0.06453 | 0.006008 |
+
+The native analytic control in the V1 build also scored 28.231 dB.
+The 640×360 → 1280×720 timing replay kept analytic area for each checkpoint
+and used eight alternating blocks with 36 warm-up and 60 measured frames per
+block. Median Chrome animation-frame spacing was 17.1 ms with zero missed
+nominal slots. The V2 learned-minus-analytic differences in summed timed-pass
+p50 were +3.012, +0.838, +0.636 and −2.202 ms. Timing varied substantially
+across pairs. Physical input-to-photon verification remains pending.
+
+Machine-readable selection, fit, final and native parity reports are under
+`out/joint-real-frame-d6b8d80`. The paired 720p timing manifests and full
+ray-budget reports are under `out/sr-joint-windows-captures` and
+`out/ray-budget-2103f67`.
