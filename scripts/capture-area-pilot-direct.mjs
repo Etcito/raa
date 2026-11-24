@@ -159,7 +159,8 @@ try {
     }));
     return { json: result.json, files };
   })()`, 300000);
-  const mirrorUi = mirror ? await evalPage(`import('/lib/gallery-mirror-evidence.js').then(module => module.verifyGalleryMirrorUi())`, 120000) : null;
+  const mirrorUi = mirror ? await evalPage(`import('/lib/gallery-mirror-evidence.js').then(module => module.verifyGalleryMirrorUi({ fitted: ${comparison !== 'baseline'} }))`, 120000) : null;
+  const mirrorScreenshot = mirrorUi && await send('Page.captureScreenshot', { format: 'png' });
   const ui = mirrorUi ?? (spherical ? await evalPage(`import('/lib/gallery-spherical-evidence.js').then(module => module.verifyGallerySphericalUi())`, 120000) : null);
   if (spherical && receipt.files.includes('lib/gallery-temporal-fit/manifest.json')) {
     ui.neural = await evalPage(`import('/lib/gallery-neural.js').then(module => module.verifyGalleryNeuralUi())`, 60000);
@@ -184,6 +185,11 @@ try {
     await mkdir(path.dirname(output), { recursive: true });
     await mkdir(output);
     const files = new Map(result.files.map(file => [file.name, Buffer.from(file.base64, 'base64')]));
+    if (mirrorScreenshot) {
+      const screenshot = Buffer.from(mirrorScreenshot.data, 'base64');
+      await writeFile(path.join(output, 'mirror-ui.png'), screenshot, { flag: 'wx' });
+      ui.screenshot = { file: 'mirror-ui.png', sha256: createHash('sha256').update(screenshot).digest('hex') };
+    }
     if (capture) {
       for (const frame of data.frames) {
         const records = gallery ? Object.values(frame.signals).flatMap(signal => [signal.input, signal.reference])

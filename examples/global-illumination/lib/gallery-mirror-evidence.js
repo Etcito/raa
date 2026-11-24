@@ -178,7 +178,7 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
   }
 }
 
-export async function verifyGalleryMirrorUi() {
+export async function verifyGalleryMirrorUi({ fitted = false } = {}) {
   const option = id => document.querySelector(`[data-option="${id}"]`);
   const status = () => document.getElementById('status').textContent;
   const stats = () => document.getElementById('live-stats').textContent;
@@ -209,6 +209,34 @@ export async function verifyGalleryMirrorUi() {
   change('gi-grid', 'spherical');
   await wait(() => stats().includes('Hybrid reflections') && /Spherical GI · ready cells [1-9]/.test(stats()),
     'Default spherical mirror UI did not reach occupied captures');
-  return { status: status(), initial, volume, spherical: stats(),
+  const spherical = stats();
+  let learned;
+  if (fitted) {
+    const cache = option('spherical-mirror-cache');
+    requireEvidence(cache?.value === 'auto' && !cache.disabled, 'Spherical secondary cache must start in automatic mode');
+    change('model-assisted-path', true);
+    const ran = () => /Hybrid path · model [1-9]/.test(stats());
+    await wait(() => ran() && !option('gi-grid').disabled, 'Fitted dispatch did not run with the spherical grid');
+    const sphericalFit = stats();
+    for (const lobe of ['diffuse-indirect', 'rough-specular']) {
+      requireEvidence(![...option('lighting-view').options].find(row => row.value === lobe)?.disabled,
+        `Fitted lobe control is disabled: ${lobe}`);
+      change('lighting-view', lobe);
+      await wait(ran, `Fitted dispatch disappeared in ${lobe}`);
+    }
+    change('spherical-mirror-lighting', '1');
+    change('spherical-mirror-lighting', '7');
+    change('spherical-mirror-cache', 'off');
+    await wait(() => option('spherical-mirror-lighting').disabled, 'Cache bypass kept group controls active');
+    change('spherical-mirror-cache', 'auto');
+    change('gi-grid', 'volume');
+    await wait(() => ran() && option('spherical-mirror-cache').disabled && !stats().includes('Spherical GI'),
+      'Fitted dispatch did not run after switching to the volume grid');
+    const volumeFit = stats();
+    change('lighting-view', 'combined');
+    change('model-assisted-path', false);
+    learned = { spherical: sphericalFit, volume: volumeFit };
+  }
+  return { status: status(), initial, volume, spherical, learned,
     resolution: document.getElementById('resolution').value };
 }

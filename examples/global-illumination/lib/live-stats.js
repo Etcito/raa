@@ -128,6 +128,9 @@ export function createLiveStats(container) {
       const share = 100 * tracing.traced / tracing.eligible;
       lines.push(`Hybrid reflections · GPU traced ${tracing.traced}/${tracing.eligible} (${number(share, 1)}%) · screen accepted ${tracing.acceptedScreen}`);
     }
+    if (tracing && 'sphericalDiffuseHits' in tracing && (tracing.traced || tracing.hybridLobeSpp)) {
+      lines.push(`Secondary cache · spherical diffuse ${number(tracing.sphericalDiffuseHits)} · spherical rough ${number(tracing.sphericalSpecularHits)} · volume diffuse ${number(tracing.volumeDiffuseHits)} · volume rough ${number(tracing.volumeSpecularHits)}`);
+    }
     lines.push(...gpuTimingLines(optional(() => engine.passGpuTimings())));
     const images = passLines(optional(() => engine.passImageExtents()), width, height);
     if (images.length) lines.push('Internal pass textures', ...images);
