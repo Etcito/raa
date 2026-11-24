@@ -2,7 +2,10 @@ import { digest } from './gallery-path-model.js';
 import { jointTrajectory } from './gallery-joint-trajectories.js';
 import { loadGalleryNeural } from './gallery-neural.js';
 import { reflectionGraph } from './gallery-reflection-teacher.js';
-import { createGalleryReplay, decodeGalleryTap, warmGalleryReplay } from './gallery-sequence.js';
+import {
+  createGalleryReplay, decodeGalleryTap, galleryGuideChannels, galleryReplaySignals,
+  saveGalleryPlane, warmGalleryReplay,
+} from './gallery-sequence.js';
 
 const size = [160, 90];
 const pixels = size[0] * size[1];
@@ -87,17 +90,39 @@ function reflectionScore(frame, baseline, label) {
   return { lanes, offscreen, changed, squared, logSquared };
 }
 
-function areaScore(pairs, reference) {
-  let lanes = 0, squared = 0, weightSquared = 0;
+function areaScore(pairs, reference, raw = pairs) {
+  let lanes = 0, squared = 0, weightSquared = 0, visibleWeightedSquared = 0;
+  let commonLanes = 0, commonSquared = 0, outputOnEmpty = 0, missingOutput = 0, invalidPairs = 0;
+  let s = 0, u = 0, referenceS = 0, referenceU = 0, visibilitySum = 0, referenceVisibilitySum = 0;
   for (let k = 0; k < pairs.length; k += 2) {
-    if (reference[k + 1] <= 0) continue;
-    const visibility = pairs[k + 1] > 1e-8 ? pairs[k] / pairs[k + 1] : 1;
+    const [visible, weight] = [pairs[k], pairs[k + 1]];
+    invalidPairs += Number(visible < 0 || weight < visible);
+    const hasOutput = weight > 1e-8;
+    if (reference[k + 1] <= 1e-8) {
+      outputOnEmpty += Number(hasOutput);
+      continue;
+    }
+    const ratio = hasOutput ? visible / weight : 1;
     const target = reference[k] / reference[k + 1];
-    squared += (visibility - target) ** 2;
-    weightSquared += (pairs[k + 1] - reference[k + 1]) ** 2;
+    const error = (ratio - target) ** 2;
+    squared += error;
+    weightSquared += (weight - reference[k + 1]) ** 2;
+    visibleWeightedSquared += (visible - reference[k]) ** 2;
+    if (raw[k + 1] > 1e-8) {
+      commonSquared += error;
+      commonLanes++;
+    }
+    missingOutput += Number(!hasOutput);
+    s += visible;
+    u += weight;
+    referenceS += reference[k];
+    referenceU += reference[k + 1];
+    visibilitySum += ratio;
+    referenceVisibilitySum += target;
     lanes++;
   }
-  return { lanes, squared, weightSquared };
+  return { lanes, squared, weightSquared, visibleWeightedSquared, commonLanes, commonSquared,
+    outputOnEmpty, missingOutput, invalidPairs, s, u, referenceS, referenceU, visibilitySum, referenceVisibilitySum };
 }
 
 const percentile = (values, p) => values.toSorted((a, b) => a - b)[Math.ceil(values.length * p) - 1];
@@ -106,10 +131,21 @@ function summarize(frames, samples, head) {
   const combine = rows => {
     const lanes = sum(rows, 'lanes');
     if (!lanes) throw new Error('Replay has no valid comparison lanes');
-    return { lanes, rmse: Math.sqrt(sum(rows, 'squared') / lanes),
-      ...(head === 'reflection' ? { logRmse: Math.sqrt(sum(rows, 'logSquared') / lanes),
-        offscreen: sum(rows, 'offscreen'), changed: sum(rows, 'changed') }
-        : { weightRmse: Math.sqrt(sum(rows, 'weightSquared') / lanes) }) };
+    const rmse = Math.sqrt(sum(rows, 'squared') / lanes);
+    if (head === 'reflection') {
+      return { lanes, rmse, logRmse: Math.sqrt(sum(rows, 'logSquared') / lanes),
+        offscreen: sum(rows, 'offscreen'), changed: sum(rows, 'changed') };
+    }
+    const commonLanes = sum(rows, 'commonLanes');
+    const s = sum(rows, 's'), u = sum(rows, 'u'), referenceS = sum(rows, 'referenceS'), referenceU = sum(rows, 'referenceU');
+    return { lanes, rmse, commonLanes, commonRmse: Math.sqrt(sum(rows, 'commonSquared') / commonLanes),
+      weightedVisibleRmse: Math.sqrt(sum(rows, 'visibleWeightedSquared') / lanes),
+      weightRmse: Math.sqrt(sum(rows, 'weightSquared') / lanes),
+      outputOnEmptyTeacher: sum(rows, 'outputOnEmpty'), missingOutput: sum(rows, 'missingOutput'),
+      invalidPairs: sum(rows, 'invalidPairs'),
+      meanS: s / lanes, meanU: u / lanes, meanVisibility: sum(rows, 'visibilitySum') / lanes, energyRatio: s / u,
+      teacher: { meanS: referenceS / lanes, meanU: referenceU / lanes,
+        meanVisibility: sum(rows, 'referenceVisibilitySum') / lanes, energyRatio: referenceS / referenceU } };
   };
   const ms = samples.map(sample => sample.ms);
   if (ms.length < 8) throw new Error('Insufficient timestamp readbacks');
@@ -173,6 +209,7 @@ async function measureCase(context, graph, tape, head, settings) {
     student.apply(tape.replay[0]);
     await warmGalleryReplay(engine, tape.replay[0].timeMs);
     const frames = [], samples = new Map();
+    let previous;
     for (const [i, pose] of tape.replay.entries()) {
       student.apply(pose, tape.replay[i - 1]);
       const timing = engine.renderInstrumented(pose.timeMs, { viewId: 'primary', trialId: tape.id,
@@ -193,7 +230,13 @@ async function measureCase(context, graph, tape, head, settings) {
       if (settings.learned && !engine.neuralReconstructionStats()?.ran[head]) {
         throw new Error('Learned ' + head + ' head did not publish');
       }
-      frames.push({ frameId: timing.frameIndex, event: pose.event,
+      let guides;
+      if (settings.captureInputs) {
+        const signals = galleryReplaySignals(taps, pose, previous);
+        previous = { camera: pose.camera, depth: signals.depth, jitterPx: signals.jitterPx };
+        guides = { guide: signals.guide, hdr: signals.hdr, depth: signals.depth, motion: signals.motion };
+      }
+      frames.push({ frameId: timing.frameIndex, event: pose.event, guides,
         ...(head === 'area' ? { pairs: decodeGalleryTap(
           settings.learned ? taps.areaReconstruction : taps.areaPairs, pixels * 4, true) }
           : { trace: decodeGalleryTap(taps.reflectionTrace, pixels * 4, true),
@@ -217,20 +260,36 @@ export async function measureGalleryRayBudget(context, { buildId, head, trajecto
     throw new Error('Final replay needs an extra-ray count frozen from development');
   }
   const graph = await reflectionGraph();
+  const diagnostic = head === 'area' && development && budgetSteps.area.includes(budget);
   const label = head === 'reflection' ? await reflectionLabels(trajectory, tape.replay)
     : await areaLabels(context, graph, tape);
-  const baseline = await measureCase(context, graph, tape, head, { name: 'baseline', budget: 0 });
-  const results = [];
+  const baseline = await measureCase(context, graph, tape, head,
+    { name: 'baseline', budget: 0, captureInputs: diagnostic });
+  const results = [], files = [];
+  const developmentFrames = diagnostic ? tape.replay.map((pose, i) => ({ ...pose, id: trajectory + '-' + i, planes: {} })) : null;
   let weights;
   for (const settings of [
     { name: 'baseline', budget: 0 }, { name: 'learned', learned: true },
-    ...(development ? budgetSteps[head] : [budget]).map(budget => ({ name: 'extra-rays', budget })),
+    ...(development && !diagnostic ? budgetSteps[head] : [budget]).map(budget => ({ name: 'extra-rays', budget })),
   ]) {
     const run = settings.name === 'baseline' ? baseline : await measureCase(context, graph, tape, head, settings);
     weights ??= run.weights;
     const frames = run.frames.map((frame, i) => ({ frame: frame.frameId, event: frame.event,
-      ...(head === 'area' ? areaScore(frame.pairs, label.frames[i].target)
+      ...(head === 'area' ? areaScore(frame.pairs, label.frames[i].target, baseline.frames[i].pairs)
         : reflectionScore(frame, baseline.frames[i], label.frames[i])) }));
+    if (developmentFrames) {
+      for (const [i, { planes, id }] of developmentFrames.entries()) {
+        const frame = run.frames[i];
+        const name = settings.learned ? 'areaReconstruction' : settings.budget ? 'areaExtraPairs' : 'areaPairs';
+        planes[name] = await saveGalleryPlane(files, id, name, size, frame.pairs);
+        if (settings.name === 'baseline') {
+          for (const [name, values] of Object.entries(frame.guides)) {
+            planes[name] = await saveGalleryPlane(files, id, name, size, values);
+          }
+          planes.areaTargetPairs = await saveGalleryPlane(files, id, 'areaTargetPairs', size, label.frames[i].target);
+        }
+      }
+    }
     results.push({ ...settings, ...summarize(frames, run.samples, head), frames });
   }
   const learned = results[1];
@@ -245,5 +304,14 @@ export async function measureGalleryRayBudget(context, { buildId, head, trajecto
     teacher: head === 'area' ? { samplesPerBatch: label.samplesPerBatch,
       batchRmse: label.frames.map(frame => frame.batchRmse) }
       : { buildId: label.source, replaySha256: label.replayHash },
-    results }, files: [] };
+    results,
+    ...(developmentFrames && { developmentPlanes: {
+      format: 'raa.area-ray-development/1', guideChannels: galleryGuideChannels,
+      pairChannels: ['visibleWeight0', 'totalWeight0', 'visibleWeight1', 'totalWeight1'],
+      validity: 'target U > 1e-8; common also requires baseline raw U > 1e-8',
+      sampleCounts: { raw: 1, learned: 1, extra: budget, teacher: [128, 128] },
+      frames: developmentFrames,
+    } }),
+  }, files };
+
 }
