@@ -66,7 +66,7 @@ pub fn stage_entry(kind: SsrStageKind, instance: &str) -> String {
     format!("{}#{instance}", kind.type_id())
 }
 
-pub const MAX_EXTRA_RAYS: u32 = 8;
+pub const MAX_EXTRA_RAYS: u32 = 24;
 
 struct State {
     desc: SsrDesc,
