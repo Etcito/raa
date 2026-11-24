@@ -2,6 +2,7 @@ import { setCanvasSize } from '../../../web/common/page-runner.js';
 import { volumeRoom } from './content.js';
 import { interactiveInterior } from './interactive-interior.js';
 import { PATH_FIXTURE, digest, loadGalleryFit } from './gallery-path-model.js';
+import { runGallerySpherical, sphericalEvidenceSize } from './gallery-spherical-evidence.js';
 
 const scene = interactiveInterior.default;
 const TIME = 1000;
@@ -322,6 +323,17 @@ export async function measureGalleryDiffuse(context, { buildId, requireFixed = t
     source: captureSource, modelSha256, size: [width, height], camera: CAMERAS[0], samples, ...layout,
     space: 'linear-scene-rgb-from-rgba16f', regions: REGIONS, requireFixed, cases,
   }, files: [] };
+}
+
+export async function measureGallerySpherical(context, { buildId, remainingMs = 280000 } = {}) {
+  const [width, height] = sphericalEvidenceSize;
+  const { engine, source, state, setPose } = await create(context, buildId, width, height);
+  try {
+    return await runGallerySpherical({ engine, source, state, setPose, scene, camera: CAMERAS[0],
+      target: context.target, half, digest, timeMs: TIME, remainingMs });
+  } finally {
+    engine.dispose();
+  }
 }
 
 const PANEL_ROI = [132, 67, 206, 100];

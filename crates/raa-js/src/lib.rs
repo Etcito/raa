@@ -16,6 +16,8 @@ pub(crate) mod state;
 mod trace;
 #[cfg(target_arch = "wasm32")]
 mod mesh_trace;
+#[cfg(target_arch = "wasm32")]
+mod spherical_gi;
 
 #[cfg(target_arch = "wasm32")]
 mod engine;

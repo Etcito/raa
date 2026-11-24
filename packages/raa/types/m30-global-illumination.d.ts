@@ -257,6 +257,17 @@ export interface Engine {
   /** The latest published counters, a fresh {@link GiStats}. */
   giStats(): GiStats;
   /**
+   * Merges a spherical grid patch and installs the optional capture pass on first enable.
+   * Grid changes discard earlier captures. Debug changes preserve the capture cache.
+   */
+  setSphericalGi(patch: Partial<SphericalGiSettings>): void;
+  /** Effective settings for this engine. The grid is disabled by default. */
+  sphericalGi(): SphericalGiSettings;
+  /** Live capture counters. Returns null before the feature has been installed. */
+  sphericalGiStats(): SphericalGiStats | null;
+  /** Polls or requests a diagnostic GPU texel readback from one ready spherical probe. */
+  sphericalGiProbe(): SphericalGiProbe | null;
+  /**
    * Registers or removes (`null`/`undefined`) per-vertex colours of a mesh for the GI voxelizer:
    * a Float32Array (linear) or Uint8Array (normalised by 255) of `components` (3 = rgb, 4 =
    * rgba, default 4) values per vertex, matching the mesh's vertex count. Omitted keeps the
@@ -280,4 +291,70 @@ export interface Engine {
     colors: Float32Array | Uint8Array | null | undefined,
     components?: 3 | 4,
   ): void;
+}
+
+export type SphericalGiDebug = 'off' | 'boundaries' | 'occupancy' | 'age' | 'light-hash';
+
+export interface SphericalGiSettings {
+  enabled: boolean;
+  /** Integer from 0 to 6. Each cube face has 2 ** sphereSubdivision cells along each axis. */
+  sphereSubdivision: number;
+  /** Finite number from 0 to 2. Shell widths grow by a factor of 2 ** exponentialPower. */
+  exponentialPower: number;
+  /** Inner radial boundary in world units. Must be nonnegative and smaller than zMax. */
+  clipStart: number;
+  /**
+   * Finite outer radial boundary in world units, strictly greater than clipStart.
+   * The last shell center is zMax minus half that shell's width. Shell boundaries
+   * must be distinct in float32.
+   */
+  zMax: number;
+  debug: SphericalGiDebug;
+  /** Bit mask for sky (1), sun (2), and other lights (4). Defaults to 7. */
+  channelMask: number;
+}
+
+export interface SphericalGiStats {
+  active: boolean;
+  cells: number;
+  nearCells: number;
+  farCells: number;
+  readyCells: number;
+  readyFaces: number;
+  inFlightFaces: number;
+  pendingFaces: number;
+  originEpoch: number;
+  lastCellQueries: number;
+  /** Cells with observed contributing-light metadata for every face. */
+  lightingMetadataReadyCells: number;
+  /** Cumulative cells and faces discarded after lighting changes. */
+  lightInvalidatedCells: number;
+  lightInvalidatedFaces: number;
+  /** Bytes in the active spherical capture buffers. */
+  gpuBytes: number;
+  /** Total faces recorded since the active grid was allocated. */
+  capturedFaces: number;
+  captureFrames: number;
+  /** Hexadecimal representation of the full light revision. */
+  lightRevision: string;
+  /** World-space grid anchor retained across sub-threshold camera movement. */
+  origin: [number, number, number];
+  lastShell: { inner: number; center: number; outer: number };
+}
+
+export interface SphericalGiProbe {
+  slot: number;
+  frame: number;
+  /** Hit counts in cube face order +X, -X, +Y, -Y, +Z, -Z. */
+  faceHits: [number, number, number, number, number, number];
+  /** Per-face counts of texels with valid world position and normal. */
+  faceValidGeometry: SphericalGiProbe['faceHits'];
+  /** Per-face counts of misses with cleared position and normal. */
+  faceValidMisses: SphericalGiProbe['faceHits'];
+  /** RGB sums for sky, sun, and other lights, in that order. */
+  channelSums: [[number, number, number], [number, number, number], [number, number, number]];
+  /** Hash of this cell's contributing-light state, encoded as hexadecimal. */
+  lightHash: string;
+  /** Stable IDs of lights observed by this cell, encoded as hexadecimal. */
+  contributingLightIds: string[];
 }

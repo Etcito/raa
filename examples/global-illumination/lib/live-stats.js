@@ -107,6 +107,13 @@ export function createLiveStats(container) {
         lines.push(details.join('  ·  '));
       }
     }
+    const spherical = engine.sphericalGiStats?.();
+    if (spherical?.active) {
+      lines.push(`Spherical GI · ready cells ${number(spherical.readyCells)}/${number(spherical.cells)} · near ${number(spherical.nearCells)} · far ${number(spherical.farCells)}`);
+      lines.push(`Spherical faces · ready ${number(spherical.readyFaces)} · pending ${number(spherical.pendingFaces)} · captured ${number(spherical.capturedFaces)}`);
+      lines.push(`Spherical lighting · tracked cells ${number(spherical.lightingMetadataReadyCells)} · invalidated faces ${number(spherical.lightInvalidatedFaces)}`);
+      lines.push(`Spherical GPU memory ${number(spherical.gpuBytes / (1024 * 1024), 2)} MiB · origin epoch ${number(spherical.originEpoch)}`);
+    }
     const tracing = optional(() => engine.meshTracingStats());
     if (tracing?.referencePixels) {
       lines.push(`Path-traced reference · ${number(tracing.referencePixels)} pixels × ${tracing.referenceSpp} spp · ${tracing.pathBounces} path bounces`);

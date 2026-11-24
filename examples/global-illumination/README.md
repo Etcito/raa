@@ -45,3 +45,31 @@ node scripts/capture-area-pilot-direct.mjs 'C:\Program Files\Google\Chrome\Appli
 The direct driver uses a temporary Chrome profile and loopback-only HTTP and DevTools.
 The manifest records Chrome's native renderer, the WebGPU adapter identity, the build
 receipt hash and the verified capture array hashes.
+
+## Spherical GI in the interactive gallery
+
+Choose **Spherical** under **Indirect grid** while global illumination is on.
+The grid replaces diffuse indirect light where ready captures can support the surface.
+The selected volume solver supplies the remaining pixels. Choose **Volume** to free
+the spherical capture resources. The live statistics show occupied cells, ready faces,
+tracked lighting and GPU memory.
+
+`Engine.setSphericalGi(patch)` accepts a boolean `enabled`, an integer
+`sphereSubdivision` from 0 to 6, and a finite `exponentialPower` from 0 to 2.
+Subdivision gives `2 ** sphereSubdivision` angular cells along each axis of a
+cube face. Consecutive shell widths grow by `2 ** exponentialPower`, with 0
+giving uniform widths. `clipStart` and `zMax` are finite radial boundaries in world
+units. `clipStart` is nonnegative and `zMax` is strictly greater than `clipStart`.
+Shell boundaries must remain distinct in float32. The final shell ends at `zMax`
+and its center is half its width inside that boundary.
+
+Run the comparison on Windows using the direct Chrome driver:
+
+```powershell
+node scripts/capture-area-pilot-direct.mjs 'C:\Program Files\Google\Chrome\Application\chrome.exe' dist/global-illumination out/gallery-spherical-win gallery-spherical
+```
+
+The evidence includes linear RGBA16F captures, separate sky, sun and local-light
+contributions, comparison with both volume solvers, grid and light invalidation,
+and hot control checks. Add the final argument `live` and use a fresh output
+directory to check the same build at port 8081.

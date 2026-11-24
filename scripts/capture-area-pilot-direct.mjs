@@ -11,9 +11,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 const [chromeArg, pageArg, outputArg, op = 'area-pilot', comparison = 'fixed'] = process.argv.slice(2);
 const capture = op === 'area-pilot' || op === 'gallery-path-capture';
 const gallery = op.startsWith('gallery-');
+const spherical = op === 'gallery-spherical';
+const liveSpherical = spherical && comparison === 'live';
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
-    || !['area-pilot', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built GI page> <new output> [gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise] [baseline|fixed]');
+    || !['area-pilot', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical'].includes(op)) {
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built GI page> <new output> [gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical] [baseline|fixed|live]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
@@ -38,12 +40,19 @@ const server = createServer(async (request, response) => {
   }
 });
 await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+const url = liveSpherical ? 'http://127.0.0.1:8081/' : `http://127.0.0.1:${server.address().port}/`;
 const profile = await mkdtemp(path.join(tmpdir(), 'raa-area-pilot-'));
 let browser;
 let socket;
 let launchError;
 const stderr = [];
 try {
+  if (liveSpherical) {
+    const response = await fetch(new URL('build.json', url), { signal: AbortSignal.timeout(10000) });
+    if (!response.ok || !receiptBytes.equals(Buffer.from(await response.arrayBuffer()))) {
+      throw new Error('The live 8081 receipt does not match the staged spherical build');
+    }
+  }
   browser = spawn(chrome, [
     '--headless=new', '--do-not-de-elevate', '--enable-logging=stderr', '--enable-unsafe-webgpu', '--enable-webgpu-developer-features', '--disable-software-rasterizer',
     '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
@@ -103,7 +112,7 @@ try {
     return result.value;
   };
   await send('Runtime.enable');
-  await send('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
+  await send('Page.navigate', { url });
   let ready;
   for (let attempt = 0; attempt < 100; attempt++) {
     ready = await evalPage(`typeof window.nmcGpu?.ops?.[${JSON.stringify(op)}] === 'function'`);
@@ -130,7 +139,7 @@ try {
     throw new Error(`Expected native RTX 3090 WebGPU, got ${JSON.stringify(webgpu)}`);
   }
   console.log(`Windows ${version.Browser}: ${renderer}; WebGPU ${JSON.stringify(webgpu)}`);
-  const result = await evalPage(`(async () => {
+  const result = liveSpherical ? null : await evalPage(`(async () => {
     const result = await window.nmcGpu.ops[${JSON.stringify(op)}](${JSON.stringify({ buildId: receipt.buildId, remainingMs: 280000, requireFixed: comparison !== 'baseline' })});
     const files = await Promise.all(result.files.map(async ({ name, blob, base64 }) => {
       if (base64) return { name, base64 };
@@ -141,56 +150,77 @@ try {
     }));
     return { json: result.json, files };
   })()`, 300000);
-  const data = result.json;
-  const facts = gallery ? data.source?.facts : data.facts;
-  const adapter = facts?.adapter;
-  if (!facts?.hardware || !/Windows/.test(facts.browser) ||
-      adapter?.isFallbackAdapter !== false || !/3090|2204/i.test(adapter.device) || (gallery ? data.source.buildId : data.buildId) !== receipt.buildId) {
-    throw new Error(`WebGPU adapter or build provenance mismatch: ${JSON.stringify(facts)}`);
-  }
-  await mkdir(path.dirname(output), { recursive: true });
-  await mkdir(output);
-  const files = new Map(result.files.map(file => [file.name, Buffer.from(file.base64, 'base64')]));
-  if (capture) {
-    for (const frame of data.frames) {
-      const records = gallery ? Object.values(frame.signals).flatMap(signal => [signal.input, signal.reference])
-        : [frame.input, frame.reference, ...Object.values(frame.native)];
-      for (const record of records) {
+  const ui = spherical ? await evalPage(`import('/lib/gallery-spherical-evidence.js').then(module => module.verifyGallerySphericalUi())`, 120000) : null;
+  if (spherical && browserErrors.length) throw new Error(browserErrors.join('\n'));
+  const windows = { browser: version.Browser, renderer, device: nvidia, webgpu };
+  if (liveSpherical) {
+    await mkdir(path.dirname(output), { recursive: true });
+    await mkdir(output);
+    const manifest = path.join(output, 'live-ui.json');
+    await writeFile(manifest, JSON.stringify({ revision: receipt.inputs.revision, buildId: receipt.buildId,
+      url, windows, ui }, null, 2) + '\n', { flag: 'wx' });
+    console.log(manifest);
+  } else {
+    const data = result.json;
+    const facts = gallery ? data.source?.facts : data.facts;
+    const adapter = facts?.adapter;
+    if (!facts?.hardware || !/Windows/.test(facts.browser) ||
+        adapter?.isFallbackAdapter !== false || !/3090|2204/i.test(adapter.device) || (gallery ? data.source.buildId : data.buildId) !== receipt.buildId) {
+      throw new Error(`WebGPU adapter or build provenance mismatch: ${JSON.stringify(facts)}`);
+    }
+    await mkdir(path.dirname(output), { recursive: true });
+    await mkdir(output);
+    const files = new Map(result.files.map(file => [file.name, Buffer.from(file.base64, 'base64')]));
+    if (capture) {
+      for (const frame of data.frames) {
+        const records = gallery ? Object.values(frame.signals).flatMap(signal => [signal.input, signal.reference])
+          : [frame.input, frame.reference, ...Object.values(frame.native)];
+        for (const record of records) {
+          const bytes = files.get(record.file);
+          if (!/^[a-z0-9-]+\.bin$/.test(record.file) || !bytes ||
+              bytes.length !== record.byteLength || createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
+            throw new Error(`Capture length or hash mismatch: ${record.file}`);
+          }
+          await writeFile(path.join(output, record.file), bytes, { flag: 'wx' });
+        }
+      }
+    } else if (op === 'gallery-panel-noise') {
+      for (const { planes } of data.frames) {
+        for (const plane of Object.values(planes)) {
+          const bytes = files.get(plane.file);
+          if (!/^pan-[0-9]+-[a-z]+\.bin$/.test(plane.file) || !bytes ||
+              bytes.length !== plane.byteLength || createHash('sha256').update(bytes).digest('hex') !== plane.sha256) {
+            throw new Error(`Panel plane length or hash mismatch: ${plane.file}`);
+          }
+          await writeFile(path.join(output, plane.file), bytes, { flag: 'wx' });
+        }
+      }
+    } else if (op === 'gallery-path-measure') {
+      for (const row of data.cases) {
+        const bytes = files.get(row.file);
+        if (!/^[a-z0-9-]+\.png$/.test(row.file) || !bytes?.length) throw new Error(`Missing measurement image ${row.file}`);
+        row.sha256 = createHash('sha256').update(bytes).digest('hex');
+        await writeFile(path.join(output, row.file), bytes, { flag: 'wx' });
+      }
+    } else if (spherical) {
+      for (const record of data.captures) {
         const bytes = files.get(record.file);
-        if (!/^[a-z0-9-]+\.bin$/.test(record.file) || !bytes ||
-            bytes.length !== record.byteLength || createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
-          throw new Error(`Capture length or hash mismatch: ${record.file}`);
+        if (!/^[a-z0-9-]+\.rgba16f$/.test(record.file) || !bytes || bytes.length !== record.byteLength
+            || createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
+          throw new Error(`Spherical capture length or hash mismatch: ${record.file}`);
         }
         await writeFile(path.join(output, record.file), bytes, { flag: 'wx' });
       }
     }
-  } else if (op === 'gallery-panel-noise') {
-    for (const { planes } of data.frames) {
-      for (const plane of Object.values(planes)) {
-        const bytes = files.get(plane.file);
-        if (!/^pan-[0-9]+-[a-z]+\.bin$/.test(plane.file) || !bytes ||
-            bytes.length !== plane.byteLength || createHash('sha256').update(bytes).digest('hex') !== plane.sha256) {
-          throw new Error(`Panel plane length or hash mismatch: ${plane.file}`);
-        }
-        await writeFile(path.join(output, plane.file), bytes, { flag: 'wx' });
-      }
-    }
-  } else if (op === 'gallery-path-measure') {
-    for (const row of data.cases) {
-      const bytes = files.get(row.file);
-      if (!/^[a-z0-9-]+\.png$/.test(row.file) || !bytes?.length) throw new Error(`Missing measurement image ${row.file}`);
-      row.sha256 = createHash('sha256').update(bytes).digest('hex');
-      await writeFile(path.join(output, row.file), bytes, { flag: 'wx' });
-    }
+    const source = {
+      ...(gallery ? data.source : {}), revision: receipt.inputs.revision,
+      receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'),
+    };
+    const manifest = path.join(output, capture ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
+      : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : 'measurement.json');
+    await writeFile(manifest, JSON.stringify({ ...data, source, windows, ...(ui && { ui }) }, null, 2) + '\n', { flag: 'wx' });
+    console.log(manifest);
   }
-  const source = {
-    ...(gallery ? data.source : {}), revision: receipt.inputs.revision,
-    receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'),
-  };
-  const manifest = path.join(output, capture ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
-    : op === 'gallery-panel-noise' ? 'panel-noise.json' : 'measurement.json');
-  await writeFile(manifest, JSON.stringify({ ...data, source, windows: { browser: version.Browser, renderer, device: nvidia, webgpu } }, null, 2) + '\n', { flag: 'wx' });
-  console.log(manifest);
 } catch (error) {
   if (stderr.length) console.error(stderr.join('').trim());
   throw error;

@@ -2,6 +2,7 @@ import { box, enclosedRoomShell, panel, sphere, volumeRoom } from './content.js'
 
 import { loadGalleryFit } from './gallery-path-model.js';
 import { lightingOptions } from './gallery-lighting.js';
+import { applySpherical, isSphericalOption, sphericalOptions } from './gallery-spherical.js';
 
 const identity = [0, 0, 0, 1];
 const unitScale = [1, 1, 1];
@@ -23,6 +24,7 @@ const options = [
   { id: 'path-reference', label: 'Path-traced reference', enabled: false },
   { id: 'path-bounces', label: 'Reference path bounces', value: 2, min: 0, max: 6, step: 1 },
   ...lightingOptions,
+  ...sphericalOptions,
   { id: 'ssr', label: 'SSR on other surfaces', enabled: true },
   { id: 'dof', label: 'Depth of field', enabled: true },
   { id: 'bloom', label: 'Bloom', enabled: true },
@@ -67,6 +69,7 @@ function setGi(engine, state, update = {}) {
     environmentDiffuse: 0,
     historyMax: 16,
   });
+  applySpherical(engine, state, settings);
 }
 
 function fixtureSurface(color, enabled) {
@@ -271,6 +274,7 @@ function setOption(engine, state, id, enabled) {
     }
     if (state.values[id] !== enabled) {
       if (id === 'indirect-solver') setGi(engine, state, { [id]: enabled });
+      else if (isSphericalOption(id)) applySpherical(engine, state, { ...state.enabled, ...state.values, [id]: enabled });
       else if (id !== 'bounce-depth' || state.values['lighting-view'] === 'bounce') {
         setTracing(engine, state, { [id]: enabled });
       }
@@ -298,6 +302,9 @@ function setOption(engine, state, id, enabled) {
     case 'model-assisted-path':
     case 'path-reference':
       state.values['lighting-view'] = setTracing(engine, state, { [id]: enabled });
+      if (id !== 'geometry-reflections') {
+        applySpherical(engine, state, { ...state.enabled, ...state.values, [id]: enabled });
+      }
       break;
     case 'ssr':
     case 'dof':
