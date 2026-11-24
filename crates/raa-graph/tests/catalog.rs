@@ -14,6 +14,7 @@ const M09: &str = include_str!("../../../packages/raa/types/m09-shadows-ao.d.ts"
 const M10: &str = include_str!("../../../packages/raa/types/m10-materials.d.ts");
 const M11: &str = include_str!("../../../packages/raa/types/m11-transmission.d.ts");
 const M14: &str = include_str!("../../../packages/raa/types/m14-camera-effects.d.ts");
+const M23: &str = include_str!("../../../packages/raa/types/m23-sdf-trace.d.ts");
 const M27: &str = include_str!("../../../packages/raa/types/m27-cel.d.ts");
 const M28: &str = include_str!("../../../packages/raa/types/m28-lights.d.ts");
 const M29: &str = include_str!("../../../packages/raa/types/m29-virtual-geometry.d.ts");
@@ -31,6 +32,7 @@ const SCENE_SETTERS: &str = "setSky setTimeOfDay setWeather setEnvironmentLighti
 const EXCLUDED: &[(&str, &str, &str)] = &[
     ("GlobalIlluminationSettings", "enabled", "node presence: a pass.gi.* node sets it"),
     ("GlobalIlluminationSettings", "screenSpace", "node presence: pass.gi.ssgi sets it"),
+    ("SphericalGiSettings", "enabled", "node presence: pass.gi.spherical sets it"),
     ("VirtualGeometrySettings", "enabled", "node presence: a pass.vg.* node sets it"),
     ("FogSettings", "preset", "preset name applied first, not a Setting key"),
     ("GradingSettings", "preset", "preset name applied first, not a Setting key"),
@@ -73,6 +75,8 @@ fn features() -> Vec<Feature> {
         row(FeatureId::Vg, "setVirtualGeometry", M29, "VirtualGeometrySettings"),
         row(FeatureId::Gi, "setGlobalIllumination", M30, "GlobalIlluminationSettings"),
         row(FeatureId::GiQuality, "setGiQuality", M30, "GiQuality"),
+        row(FeatureId::Other("sphericalGi"), "setSphericalGi", M30, "SphericalGiSettings"),
+        row(FeatureId::Other("lightingIsolation"), "setMeshTracing", M23, "MeshTracingSettings"),
     ]
 }
 
@@ -199,6 +203,14 @@ fn setting_keys_match_the_typings_both_ways() {
 
     // Direction B: every member is a catalog key, or excluded with a reason.
     for row in &features {
+        if row.feature == FeatureId::Other("lightingIsolation") {
+            // Forward lighting uses a single field from the legacy mesh trace setter.
+            assert_eq!(
+                catalog_keys(&params, &row.feature),
+                BTreeSet::from(["lightingOutput"])
+            );
+            continue;
+        }
         let keys = catalog_keys(&params, &row.feature);
         for member in members(row.typings, row.interface) {
             let excluded = EXCLUDED
