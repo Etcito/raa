@@ -283,8 +283,11 @@ impl SphericalScheduler {
         {
             return false;
         }
-        self.reflected_candidates = reflected::candidates(&self.grid, receivers);
-        self.reflected_cursor = 0;
+        let candidates = reflected::candidates(&self.grid, receivers);
+        if candidates != self.reflected_candidates {
+            self.reflected_candidates = candidates;
+            self.reflected_cursor = 0;
+        }
         true
     }
 

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{cmp::Ordering, collections::BTreeMap};
 
 use super::grid::{Surface, dot, sub};
 use super::{CellKey, SphericalGrid};
@@ -13,7 +13,7 @@ pub struct ReflectedReceiver {
     pub priority: u32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(super) struct Candidate {
     pub key: CellKey,
     receiver: ReflectedReceiver,
@@ -63,7 +63,9 @@ pub(super) fn candidates(grid: &SphericalGrid, receivers: &[ReflectedReceiver]) 
                 },
             ));
             *score += contribution;
-            if contribution > *strongest {
+            if contribution > *strongest
+                || (contribution == *strongest && receiver_order(receiver, best.receiver).is_lt())
+            {
                 *strongest = contribution;
                 best.receiver = receiver;
             }
@@ -75,4 +77,15 @@ pub(super) fn candidates(grid: &SphericalGrid, receivers: &[ReflectedReceiver]) 
         .into_iter()
         .map(|(_, _, candidate)| candidate)
         .collect()
+}
+
+// GPU append order may vary between otherwise identical captures.
+fn receiver_order(a: ReflectedReceiver, b: ReflectedReceiver) -> Ordering {
+    a.position
+        .into_iter()
+        .chain(a.normal)
+        .zip(b.position.into_iter().chain(b.normal))
+        .map(|(a, b)| a.total_cmp(&b))
+        .find(|order| !order.is_eq())
+        .unwrap_or(Ordering::Equal)
 }

@@ -770,3 +770,34 @@ fn reflected_wrong_side_and_empty_space_do_not_displace_primary() {
     assert_eq!(scheduler.stats().reflected_cells, 0);
     assert_eq!(scheduler.cells().copied().collect::<Vec<_>>(), before);
 }
+
+#[test]
+fn reordered_identical_reflected_feedback_does_not_requery_the_bvh() {
+    let scene = reflected_scene();
+    let mut scheduler = reflected_scheduler();
+    let origin = [0.0; 3];
+    advance_reflected(&mut scheduler, &scene, origin, 20);
+    let wrong_side = ReflectedReceiver {
+        normal: [-1.0, 0.0, 0.0],
+        ..REFLECTED_RECEIVER
+    };
+    let nearby_wrong_side = ReflectedReceiver {
+        position: [-3.0, 0.12, 0.03],
+        ..wrong_side
+    };
+    let epoch = scheduler.stats().origin_epoch;
+    assert!(scheduler.set_reflected_receivers(
+        epoch,
+        scene.geometry.revision,
+        &[wrong_side, nearby_wrong_side]
+    ));
+    scheduler.update(&scene, origin, 1);
+    assert!(scheduler.stats().last_cell_queries > 0);
+    assert!(scheduler.set_reflected_receivers(
+        epoch,
+        scene.geometry.revision,
+        &[nearby_wrong_side, wrong_side]
+    ));
+    scheduler.update(&scene, origin, 1);
+    assert_eq!(scheduler.stats().last_cell_queries, 0);
+}
