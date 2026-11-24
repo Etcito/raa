@@ -36,8 +36,8 @@ use raa_pipeline::Pipeline;
 use raa_scene::{NodeId, OrbitController, RenderList, Scene, Transform};
 use raa_tonemap::{ToneMapping, TonemapPass};
 use raa_web::{
-    FrameCounters, FrameInput, FrameTiming, PredictionKey, PresentTarget, RuntimeOptions, WebApp, WebRuntime, error_to_js,
-    stats_to_js,
+    FrameCounters, FrameInput, FrameTiming, PredictionKey, PresentTarget, RuntimeOptions, WebApp,
+    WebRuntime, error_to_js, stats_to_js,
 };
 use wasm_bindgen::prelude::*;
 
@@ -442,7 +442,14 @@ impl Engine {
             return Ok(false);
         };
         self.runtime()?
-            .submit_prediction(key, source_id, deadline_ms, measured_cost_ms, texture, commands)
+            .submit_prediction(
+                key,
+                source_id,
+                deadline_ms,
+                measured_cost_ms,
+                texture,
+                commands,
+            )
             .map_err(|e| js_err(&e))
     }
 
@@ -516,7 +523,9 @@ fn present_target(snapshot: &JsValue) -> Result<PresentTarget, RaaError> {
         if (0.0..=9_007_199_254_740_991.0).contains(&value) && value.fract() == 0.0 {
             Ok(value as u64)
         } else {
-            Err(invalid(format!("'{name}' must be a nonnegative safe integer")))
+            Err(invalid(format!(
+                "'{name}' must be a nonnegative safe integer"
+            )))
         }
     }
     let target = js_sys::Reflect::get(snapshot, &JsValue::from_str("target"))
@@ -534,15 +543,14 @@ fn present_target(snapshot: &JsValue) -> Result<PresentTarget, RaaError> {
 
 /// Missing or unconfirmed evidence disables speculation while preserving real fallback.
 fn prediction_key(snapshot: &JsValue, target: PresentTarget) -> Option<PredictionKey> {
-    let field = |object: &JsValue, name: &str| {
-        js_sys::Reflect::get(object, &JsValue::from_str(name)).ok()
-    };
-    let array = |object: &JsValue, name: &str| {
-        field(object, name)?.dyn_into::<js_sys::Array>().ok()
-    };
+    let field =
+        |object: &JsValue, name: &str| js_sys::Reflect::get(object, &JsValue::from_str(name)).ok();
+    let array =
+        |object: &JsValue, name: &str| field(object, name)?.dyn_into::<js_sys::Array>().ok();
     let inputs = field(snapshot, "inputs")?;
     let cutoff_ms = js::required_f64(&inputs, "cutoffMs").ok()?;
-    if cutoff_ms < 0.0 || js::required_f64(snapshot, "observedAtMs").ok()? != cutoff_ms
+    if cutoff_ms < 0.0
+        || js::required_f64(snapshot, "observedAtMs").ok()? != cutoff_ms
         || js::required_f64(&inputs, "inputTick").ok()? != target.tick.checked_sub(1)? as f64
         || array(snapshot, "discontinuities")?.length() != 0
     {
@@ -559,7 +567,10 @@ fn prediction_key(snapshot: &JsValue, target: PresentTarget) -> Option<Predictio
     for i in 0..ids.length() {
         if confirmed.get(i).as_bool() != Some(true)
             || ids.get(i).as_string().is_none_or(|id| id.is_empty())
-            || receipts.get(i).as_f64().is_none_or(|ms| !(0.0..=cutoff_ms).contains(&ms))
+            || receipts
+                .get(i)
+                .as_f64()
+                .is_none_or(|ms| !(0.0..=cutoff_ms).contains(&ms))
         {
             return None;
         }
@@ -755,7 +766,10 @@ impl Engine {
             return Ok(None);
         }
         self.begin_scene_invocation().map_err(|e| js_err(&e))?;
-        let result = self.runtime.as_mut().ok_or_else(disposed_error)
+        let result = self
+            .runtime
+            .as_mut()
+            .ok_or_else(disposed_error)
             .and_then(|runtime| runtime.produce_real(now_ms, target));
         self.finish_scene_invocation(result.is_ok());
         result.map(|id| Some(id as f64)).map_err(|e| js_err(&e))
@@ -767,12 +781,19 @@ impl Engine {
     pub fn present_ready(&mut self, snapshot: JsValue) -> Result<JsValue, JsValue> {
         let target = present_target(&snapshot).map_err(|e| js_err(&e))?;
         let key = prediction_key(&snapshot, target);
-        let selection = self.runtime()?.present_ready(target, key.as_ref()).map_err(|e| js_err(&e))?;
+        let selection = self
+            .runtime()?
+            .present_ready(target, key.as_ref())
+            .map_err(|e| js_err(&e))?;
         let Some((id, predicted)) = selection else {
             return Ok(JsValue::UNDEFINED);
         };
         let result = js_sys::Object::new();
-        js_sys::Reflect::set(&result, &"realFrameId".into(), &JsValue::from_f64(id as f64))?;
+        js_sys::Reflect::set(
+            &result,
+            &"realFrameId".into(),
+            &JsValue::from_f64(id as f64),
+        )?;
         js_sys::Reflect::set(&result, &"predicted".into(), &JsValue::from_bool(predicted))?;
         Ok(result.into())
     }
@@ -894,7 +915,10 @@ impl Engine {
         let (size, light, generation, textures) = self.with_state(|_, s| {
             let pipeline = s.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
             let submission = pipeline.scene_submission();
-            if submission.pending_mask != 1 || submission.submitted_mask != 0 {
+            if submission.record_failed
+                || submission.submitted_mask != 1
+                || submission.pending_mask != 0
+            {
                 return Err(invalid(
                     "area capture requires one submitted primary view".into(),
                 ));
