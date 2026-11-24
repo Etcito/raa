@@ -11,7 +11,7 @@ use area_model::{AreaModelFrame, SharedAreaFrame};
 #[path = "real_model.rs"]
 mod real_model;
 pub use real_model::{RealModelHeads, RealModelPackage, RealModelSelection, RealModelStats};
-use real_model::{RealModelFrame, SharedRealFrame};
+use real_model::{NeuralRoutes, RealModelFrame, SharedNeuralRoutes, SharedRealFrame};
 
 use raa_core::RaaError;
 use raa_pipeline::{PassInfo, PassRole, Pipeline};
@@ -77,6 +77,7 @@ pub struct GraphExecutor {
     last_issues: Vec<Issue>,
     area_model: Option<Rc<RefCell<AreaModelFrame>>>,
     real_model: Option<Rc<RefCell<RealModelFrame>>>,
+    neural_routes: Option<Rc<RefCell<NeuralRoutes>>>,
 }
 
 impl Default for GraphExecutor {
@@ -102,6 +103,7 @@ impl GraphExecutor {
             last_issues: Vec::new(),
             area_model: None,
             real_model: None,
+            neural_routes: None,
         }
     }
 
@@ -124,6 +126,13 @@ impl GraphExecutor {
         h: &mut FeatureHandles<'_>,
         model: Option<AreaGraphModel>,
     ) -> SetResult {
+        self.set_graph_with_models(doc, ctx, h, model, None)
+    }
+
+    pub fn set_graph_with_models(
+        &mut self, doc: GraphDoc, ctx: &ValidateCtx<'_>, h: &mut FeatureHandles<'_>,
+        area: Option<AreaGraphModel>, real: Option<RealModelSelection>,
+    ) -> SetResult {
         match plan_from_doc(&doc, ctx) {
             Err(issues) => {
                 self.last_issues.clone_from(&issues);
@@ -135,7 +144,7 @@ impl GraphExecutor {
             }
             Ok((plan, warnings)) => {
                 let canonical = canonical_doc(&doc, &self.catalog);
-                let mut result = self.set_plan_with_area_model(plan, Some(canonical), h, model);
+                let mut result = self.set_plan_with_models(plan, Some(canonical), h, area, real);
                 result.issues.extend(warnings);
                 self.last_issues.clone_from(&result.issues);
                 result
@@ -162,19 +171,38 @@ impl GraphExecutor {
         h: &mut FeatureHandles<'_>,
         model: Option<AreaGraphModel>,
     ) -> SetResult {
-        let result = self.activate_with_area_model(plan, doc, h, model);
+        self.set_plan_with_models(plan, doc, h, model, None)
+    }
+
+    pub fn set_plan_with_models(
+        &mut self, plan: GraphPlan, doc: Option<GraphDoc>, h: &mut FeatureHandles<'_>,
+        area: Option<AreaGraphModel>, real: Option<RealModelSelection>,
+    ) -> SetResult {
+        let result = self.activate_with_models(plan, doc, h, area, real);
         self.last_issues.clone_from(&result.issues);
         result
     }
 
-    fn activate_with_area_model(
+    fn activate_with_models(
         &mut self,
         plan: GraphPlan,
         doc: Option<GraphDoc>,
         h: &mut FeatureHandles<'_>,
         model: Option<AreaGraphModel>,
+        real: Option<RealModelSelection>,
     ) -> SetResult {
         const FRAME: &str = "area_model";
+        let routes = match NeuralRoutes::from_plan(&plan) {
+            Ok(routes) => routes,
+            Err(error) => return area_model::refused(area_model::issue("graph.neural_route", error.to_string())),
+        };
+        if model.is_some() && real.as_ref().is_some_and(|r| r.heads.area) {
+            return area_model::refused(area_model::issue("graph.neural_route", "choose one area reconstruction operator"));
+        }
+        let real = match real.map(|model| RealModelFrame::prepare(model, &plan, h)).transpose() {
+            Ok(real) => real,
+            Err(error) => return area_model::refused(area_model::issue(error.code(), error.to_string())),
+        };
         let candidate = match model
             .map(|model| AreaModelFrame::prepare(model, &plan, h))
             .transpose()
@@ -192,7 +220,13 @@ impl GraphExecutor {
             return area_model::refused(area_model::issue("graph.model_device", error.to_string()));
         }
         let result = self.activate(plan, doc, h);
-        if result.ok { self.clear_real_model(h); }
+        if result.ok {
+            self.clear_real_model(h);
+            self.install_neural_routes(h, routes);
+            if let Some(real) = real {
+                self.install_real_model(h, real).expect("executor owns neural frame name");
+            }
+        }
         match (result.ok, candidate, &self.area_model) {
             (true, Some(candidate), Some(active)) => {
                 std::mem::swap(&mut *active.borrow_mut(), &mut *candidate.borrow_mut());
@@ -209,7 +243,6 @@ impl GraphExecutor {
 
     /// Select a validated model on the active editable or frozen graph.
     pub fn select_real_model(&mut self, h: &mut FeatureHandles<'_>, selection: Option<RealModelSelection>) -> Result<(), RaaError> {
-        const FRAME: &str = "neural.real-frame";
         let Some(selection) = selection else {
             self.clear_real_model(h);
             return Ok(());
@@ -225,11 +258,15 @@ impl GraphExecutor {
             });
         }
         let candidate = RealModelFrame::prepare(selection, plan, h)?;
+        self.install_real_model(h, candidate)
+    }
+
+    fn install_real_model(&mut self, h: &mut FeatureHandles<'_>, candidate: RealModelFrame) -> Result<(), RaaError> {
         if let Some(active) = &self.real_model {
             *active.borrow_mut() = candidate;
         } else {
             let frame = Rc::new(RefCell::new(candidate));
-            h.pipeline.borrow_mut().add_graph_frame(FRAME, Box::new(SharedRealFrame(frame.clone())))?;
+            h.pipeline.borrow_mut().add_graph_frame("neural.real-frame", Box::new(SharedRealFrame(frame.clone())))?;
             self.real_model = Some(frame);
         }
         if let Some(taa) = &h.handles.taa { taa.invalidate(); }
@@ -241,6 +278,20 @@ impl GraphExecutor {
             let frame = frame.borrow();
             (frame.heads(), frame.stats())
         })
+    }
+
+    fn install_neural_routes(&mut self, h: &mut FeatureHandles<'_>, routes: NeuralRoutes) {
+        const FRAME: &str = "neural.native-inputs";
+        if let Some(active) = self.neural_routes.take() {
+            h.pipeline.borrow_mut().remove_graph_frame(FRAME);
+            drop(active);
+        }
+        if routes.active() {
+            let routes = Rc::new(RefCell::new(routes));
+            h.pipeline.borrow_mut().add_graph_frame(FRAME, Box::new(SharedNeuralRoutes(routes.clone())))
+                .expect("executor owns neural bypass frame name");
+            self.neural_routes = Some(routes);
+        }
     }
 
     fn clear_real_model(&mut self, h: &mut FeatureHandles<'_>) {
@@ -268,6 +319,9 @@ impl GraphExecutor {
         }
         self.clear_area_model(h);
         self.clear_real_model(h);
+        if self.neural_routes.take().is_some() {
+            h.pipeline.borrow_mut().remove_graph_frame("neural.native-inputs");
+        }
         self.no_graph = None;
         self.doc = None;
         self.plan = None;

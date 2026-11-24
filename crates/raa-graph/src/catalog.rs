@@ -430,6 +430,11 @@ pub fn port_signals(node: &str, port: &str, output: bool) -> &'static [SignalCon
             usage: LEGACY_MASK,
             ..MASK
         }],
+        ("neural.area-reconstruction", "pairs", true) => &[SignalContract {
+            usage: AREA_OUTPUT,
+            ..PAIRS
+        }],
+        ("neural.area-reconstruction", "pairs", false) => &[PAIRS],
         ("area.temporal", "raw", false) | ("area.spatial", "src", false) => &[PAIRS],
         ("area.temporal", "history", false) => &[SignalContract {
             cadence: SignalCadence::Previous,
@@ -732,7 +737,7 @@ fn starters_json(starters: &[Starter]) -> JsonValue {
 }
 
 fn node_json(node: &NodeTypeSpec, available: bool) -> JsonValue {
-    JsonValue::Object(vec![
+    let mut fields = vec![
         ("id".to_string(), JsonValue::String(node.id.to_string())),
         (
             "version".to_string(),
@@ -790,9 +795,25 @@ fn node_json(node: &NodeTypeSpec, available: bool) -> JsonValue {
         ),
         (
             "params".to_string(),
-            JsonValue::Array(node.params.iter().map(param_json).collect()),
+            JsonValue::Array(node.params.iter().map(|param| {
+                let mut value = param_json(param);
+                if node.family == "neural" && param.key == "model"
+                    && let JsonValue::Object(fields) = &mut value
+                {
+                    fields.push(("asset".into(), JsonValue::String("neural-model".into())));
+                }
+                value
+            }).collect()),
         ),
-    ])
+    ];
+    let capability = match node.id {
+        "neural.area-reconstruction" | "neural.super-resolution" => "experimental-learned",
+        "neural.reflection-reconstruction" => "experimental-operator",
+        "neural.frame-generation" => "experimental-analytic",
+        _ => return JsonValue::Object(fields),
+    };
+    fields.push(("capability".into(), JsonValue::String(capability.into())));
+    JsonValue::Object(fields)
 }
 
 fn port_json(node: &str, port: &PortSpec, output: bool) -> JsonValue {

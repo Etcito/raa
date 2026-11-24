@@ -39,7 +39,8 @@ fn validate_prediction_shaders() {
     let warp = "src/prediction_warp.wgsl";
     let refresh = "src/prediction_refresh.wgsl";
     let browser = "src/prediction_browser.wgsl";
-    for path in [reproject, warp, refresh, browser] {
+    let camera = "src/prediction_camera.wgsl";
+    for path in [reproject, warp, refresh, browser, camera] {
         println!("cargo:rerun-if-changed={path}");
     }
     let read = |path| fs::read_to_string(path).expect("read prediction shader");

@@ -237,7 +237,7 @@ impl WiringExtension {
                 .map_or(wgpu::TextureFormat::Rgba16Float, |f| {
                     f.to_wgpu(wgpu::TextureFormat::Rgba16Float)
                 });
-            let taa = if consumer_spec.id == "pass.taa" {
+            let taa = if matches!(consumer_spec.id, "pass.taa" | "neural.super-resolution") {
                 self.instances
                     .iter()
                     .find_map(|(id, _, handle)| match handle {
@@ -384,7 +384,7 @@ impl ExecExtension for WiringExtension {
                 dst,
                 source_free,
                 tonemap: node.type_id == "pass.tonemap",
-                resolve_display: node.type_id == "pass.taa",
+                resolve_display: matches!(node.type_id.as_str(), "pass.taa" | "neural.super-resolution"),
                 display_post: matches!(node.type_id.as_str(), "pass.bloom" | "pass.grading"),
             });
         }
@@ -603,7 +603,7 @@ fn feature_of(type_id: &str) -> Option<FeatureId> {
         "pass.bloom" => FeatureId::Bloom,
         "pass.grading" => FeatureId::Grading,
         "pass.cel.resolve" => FeatureId::Cel,
-        "pass.taa" => FeatureId::Taa,
+        "pass.taa" | "neural.super-resolution" => FeatureId::Taa,
         _ => return None,
     })
 }

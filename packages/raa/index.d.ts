@@ -441,6 +441,12 @@ export interface Engine {
   renderInstrumented(nowMs: number, context: FrameTraceContext): FrameTrace;
   /** Warm this device's optional native-resolution prediction passes. */
   preparePrediction(): boolean;
+  /** Prewarms analytic camera reprojection for the selected frame-generation graph node. */
+  prepareCameraPrediction(): boolean;
+  /** True only when a static, fully covered same-eye target was admitted before the deadline. */
+  submitCameraPrediction(snapshot: unknown, sourceId: number, deadlineMs: number, measuredCostMs: number): boolean;
+  disablePrediction(): void;
+
   /** Submit cutoff-time target depth, RGBA32F motion, lighting mask and RGBA32F repair HDR. */
   submitPrediction(snapshot: { revision: number; target: { tick: number; phase: number } },
     sourceId: number, deadlineMs: number, measuredCostMs: number, depthTolerance: number,

@@ -313,6 +313,7 @@ pub(crate) mod web {
                     ("model".into(), JsonValue::String(id.clone())),
                     ("weightsSha256".into(), JsonValue::String(package.digest().to_owned())),
                     ("kind".into(), JsonValue::String(package.kind().to_owned())),
+                    ("trainedHeads".into(), JsonValue::Array(package.trained_heads().iter().cloned().map(JsonValue::String).collect())),
                     ("selected".into(), heads(selected)),
                     ("ran".into(), heads(stats.ran)),
                     ("realFrame".into(), stats.submitted_frame.map_or(JsonValue::Null, |i| JsonValue::Number(i as f64))),
@@ -322,6 +323,16 @@ pub(crate) mod web {
                     ("dispatches".into(), JsonValue::Number(f64::from(stats.dispatches))),
                     ("historyFrames".into(), JsonValue::Number(f64::from(stats.history_frames))),
                 ])))
+            })
+        }
+    }
+
+    impl Engine {
+        pub(crate) fn camera_graph_selected(st: &EngineState) -> bool {
+            graph_state(st).ok().is_some_and(|graph| {
+                graph.explicit_scene_size.is_none() && graph.executor.active_plan().is_some_and(|plan| {
+                    plan.nodes.iter().any(|node| node.type_id == "neural.frame-generation")
+                })
             })
         }
     }
@@ -420,6 +431,44 @@ pub(crate) mod web {
         })
     }
 
+    pub(crate) type SelectedRealModel = (String, raa_graph::exec::RealModelPackage);
+
+    pub(crate) fn graph_model(
+        st: &EngineState, doc: &GraphDoc, size: (u32, u32),
+    ) -> Result<Option<(SelectedRealModel, raa_graph::exec::RealModelSelection)>, SetResult> {
+        use raa_graph::exec::{RealModelHeads, RealModelSelection};
+        let mut name: Option<&str> = None;
+        let mut heads = RealModelHeads::default();
+        let issue = |message| refusal("graph.neural_package", message, "Register one compatible real-frame package for the selected heads, or clear the model fields for native processing.");
+        for node in &doc.nodes {
+            let head = match node.type_id.as_str() {
+                "neural.area-reconstruction" => &mut heads.area,
+                "neural.reflection-reconstruction" => &mut heads.reflection,
+                "neural.super-resolution" => &mut heads.sr,
+                _ => continue,
+            };
+            let Some((_, JsonValue::String(id))) = node.params.iter().find(|param| param.0 == "model") else { continue; };
+            if id.is_empty() { continue; }
+            if name.is_some_and(|old| old != id) {
+                return Err(issue("the joint real-frame nodes require the same registered model ID"));
+            }
+            name = Some(id);
+            *head = true;
+        }
+        let Some(name) = name else { return Ok(None); };
+        let graph = graph_state(st).map_err(|_| issue("render graph state is missing"))?;
+        let package = graph.real_models.get(name).cloned().ok_or_else(|| issue("a named neural package is not registered"))?;
+        if st.features.get::<ViewsState>().is_some_and(|v| v.viewports() != [ViewRect::FULL]) {
+            return Err(issue("real-frame model selection requires a full-canvas viewport"));
+        }
+        Ok(Some(((name.to_owned(), package.clone()), RealModelSelection { package, heads, scene_size: size })))
+    }
+
+    pub(crate) fn remember_graph_model(st: &mut EngineState, selected: Option<SelectedRealModel>) -> Result<(), RaaError> {
+        st.features.require_mut::<RenderGraphState>("render graph")?.selected_real_model = selected;
+        Ok(())
+    }
+
     /// `setRenderGraph`: clears, refuses or applies the argument and returns its `RenderGraphResult`.
     /// The call replaces `last_set_issues` once it returns; a throw leaves it unchanged.
     fn apply_render_graph(
@@ -427,6 +476,7 @@ pub(crate) mod web {
         st: &mut EngineState,
         graph: &JsValue,
         area_model: Option<AreaGraphModel>,
+        scene_size: (u32, u32),
     ) -> Result<SetResult, RaaError> {
         Ok(match graph_argument(graph)? {
             GraphArgument::Clear => {
@@ -443,9 +493,14 @@ pub(crate) mod web {
                 rebuilt: 0,
             },
             GraphArgument::Document(doc) => {
+                let (selected, real_model) = match graph_model(st, &doc, scene_size) {
+                    Ok(Some((selected, model))) => (Some(selected), Some(model)),
+                    Ok(None) => (None, None),
+                    Err(result) => return Ok(result),
+                };
                 let names = entry_names(st)?;
                 let limits = graph_limits(gpu);
-                with_handles(st, gpu, |executor, catalog, h, viewports| {
+                let result = with_handles(st, gpu, |executor, catalog, h, viewports| {
                     let installed = |name: &str| names.iter().any(|entry| entry == name);
                     let engine_options = [("msaa", ParamValue::Int(i64::from(h.msaa)))];
                     let ctx = ValidateCtx {
@@ -455,8 +510,10 @@ pub(crate) mod web {
                         viewports,
                         engine_options: &engine_options,
                     };
-                    executor.set_graph_with_area_model(doc, &ctx, h, area_model)
-                })?
+                    executor.set_graph_with_models(doc, &ctx, h, area_model, real_model)
+                })?;
+                if result.ok { remember_graph_model(st, selected)?; }
+                result
             }
         })
     }
@@ -480,7 +537,7 @@ pub(crate) mod web {
             }
             state.frozen_name = frozen_name;
             state.area_model = area_model;
-            state.selected_real_model = None;
+            if state.executor.real_model_stats().is_none() { state.selected_real_model = None; }
         }
         state.last_set_issues = result.issues;
         Ok(json_to_js(&json))
@@ -535,9 +592,10 @@ pub(crate) mod web {
         /// nothing; any other value throws `api.invalid_argument`.
         #[wasm_bindgen(js_name = setRenderGraph)]
         pub fn set_render_graph(&mut self, graph: JsValue) -> Result<JsValue, JsValue> {
+            let viewport = self.viewport;
             self.with_state(|gpu, st| {
                 check_pipeline_available(st)?;
-                let result = apply_render_graph(gpu, st, &graph, None)?;
+                let result = apply_render_graph(gpu, st, &graph, None, viewport)?;
                 finish_selection(st, result, None, None, None)
             })
         }
@@ -616,8 +674,8 @@ pub(crate) mod web {
                         package, scene_size: size.unwrap_or(viewport),
                     });
                     match &frozen {
-                        Some(name) => super::super::m33_frozen_render_graph::web::apply_frozen(name, gpu, st, model)?,
-                        None => apply_render_graph(gpu, st, &graph, model)?,
+                        Some(name) => super::super::m33_frozen_render_graph::web::apply_frozen(name, gpu, st, model, size.unwrap_or(viewport))?,
+                        None => apply_render_graph(gpu, st, &graph, model, size.unwrap_or(viewport))?,
                     }
                 };
                 finish_selection(st, result, size, frozen, area_model)

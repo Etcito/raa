@@ -54,6 +54,7 @@ pub(super) fn refused(issue: Issue) -> SetResult {
 pub(super) struct AreaRoute {
     pub(super) trace: String,
     pub(super) mask: String,
+    pub(super) alias: Option<String>,
 }
 
 impl AreaRoute {
@@ -87,7 +88,12 @@ impl AreaRoute {
             .iter()
             .find(|node| node.type_id == "pass.forward")?;
         let mask = producer(plan, forward, "areaShadow", "areaShadow")?;
-        let trace = producer(plan, mask, "src", "raw")?;
+        let neural = producer(plan, mask, "src", "pairs")
+            .filter(|node| node.type_id == "neural.area-reconstruction");
+        let trace = match neural {
+            Some(neural) => producer(plan, neural, "pairs", "raw")?,
+            None => producer(plan, mask, "src", "raw")?,
+        };
         if mask.type_id != "area.mask"
             || trace.type_id != "area.trace"
             || mask.params.iter().any(|(name, value)| {
@@ -102,6 +108,7 @@ impl AreaRoute {
         Some(Self {
             trace: stage_entry(GiStageKind::AreaTrace, &trace.id),
             mask: stage_entry(GiStageKind::AreaMask, &mask.id),
+            alias: neural.map(|node| format!("neural.area-reconstruction#{}", node.id)),
         })
     }
 }

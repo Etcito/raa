@@ -14,7 +14,7 @@ pub fn family() -> Box<dyn NodeFamily> {
 }
 
 /// The chain passes whose `color` input and output become generic.
-const CHAIN: [&str; 12] = [
+const CHAIN: [&str; 13] = [
     "pass.gi.history",
     "pass.ssr",
     "pass.fog",
@@ -23,6 +23,7 @@ const CHAIN: [&str; 12] = [
     "pass.transparent.oit",
     "pass.particles.blend",
     "pass.taa",
+    "neural.super-resolution",
     "pass.dof",
     "pass.bloom",
     "pass.grading",
@@ -62,9 +63,11 @@ impl NodeFamily for Wiring {
         let tonemap = node_mut(types, "pass.tonemap");
         port_mut(&mut tonemap.inputs, "color", "pass.tonemap").generic = true;
 
-        let taa = node_mut(types, "pass.taa");
-        taa.inputs.push(history_input());
-        port_mut(&mut taa.outputs, "history", "pass.taa").history = true;
+        for id in ["pass.taa", "neural.super-resolution"] {
+            let taa = node_mut(types, id);
+            taa.inputs.push(history_input());
+            port_mut(&mut taa.outputs, "history", id).history = true;
+        }
         let gi_history = node_mut(types, "pass.gi.history");
         port_mut(&mut gi_history.outputs, "history", "pass.gi.history").history = true;
 

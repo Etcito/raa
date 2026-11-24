@@ -238,6 +238,7 @@ export interface RenderGraphCatalogParam {
   /** The inspector group label. */
   group: string;
   kind: RenderGraphParamKind;
+  asset?: 'neural-model';
   default: RenderGraphParamValue;
   /** The lower bound, or null when the code states none (`unstatedRange`). */
   min: number | null;
@@ -266,6 +267,7 @@ export interface RenderGraphCatalogNode {
   category: RenderGraphCategory;
   label: string;
   description: string;
+  capability?: 'experimental-learned' | 'experimental-operator' | 'experimental-analytic';
   /** The pipeline entry name the node drives, or null for view, compute and output nodes. */
   pass: string | null;
   contributor: boolean;
@@ -388,6 +390,7 @@ export interface NeuralModelSelection extends Partial<NeuralModelHeads> {
 export interface NeuralModelStats {
   model: string;
   kind: string;
+  trainedHeads: ('area' | 'reflection' | 'display')[];
   weightsSha256: string;
   selected: NeuralModelHeads;
   ran: NeuralModelHeads;

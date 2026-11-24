@@ -377,6 +377,8 @@ pub struct Engine {
     runtime: Option<WebRuntime>,
     prediction_warp: Option<crate::prediction_warp::PredictionWarp>,
     prediction_real: Option<(u64, raa_tonemap::TonemapSource)>,
+    prediction_camera: Option<(u64, u64, raa_scene::Camera)>,
+    camera_prediction: Option<crate::prediction_camera::CameraPrediction>,
     browser_prediction: Option<crate::prediction_browser::BrowserPrediction>,
     state: Shared,
     pub(crate) viewport: (u32, u32),
@@ -778,6 +780,8 @@ impl Engine {
             runtime: Some(runtime),
             prediction_warp: None,
             prediction_real: None,
+            prediction_camera: None,
+            camera_prediction: None,
             browser_prediction: None,
             state,
             viewport,
@@ -829,6 +833,62 @@ impl Engine {
             })?);
         }
         Ok(true)
+    }
+
+    /// Prewarm the graph-selected optical presentation prototype on the engine's device.
+    #[wasm_bindgen(js_name = prepareCameraPrediction)]
+    pub fn prepare_camera_prediction(&mut self) -> Result<bool, JsValue> {
+        let declared = self.with_state(|_, st| Ok(Self::camera_graph_selected(st)))?;
+        if !declared || !self.prepare_prediction()? { return Ok(false); }
+        if self.camera_prediction.is_none() {
+            self.camera_prediction = Some(crate::prediction_camera::CameraPrediction::new(self.runtime()?.gpu()));
+        }
+        Ok(true)
+    }
+
+    /// Admit a predicted image for the latest camera in a host-confirmed static scene.
+    #[wasm_bindgen(js_name = submitCameraPrediction)]
+    pub fn submit_camera_prediction(
+        &mut self, snapshot: JsValue, source_id: f64, deadline_ms: f64, measured_cost_ms: f64,
+    ) -> Result<bool, JsValue> {
+        let target = present_target(&snapshot).map_err(|e| js_err(&e))?;
+        let Some(key) = prediction_key(&snapshot, target) else { return Ok(false); };
+        if js_sys::Reflect::get(&snapshot, &"staticScene".into())?.as_bool() != Some(true) {
+            return Ok(false);
+        }
+        let Some((id, source)) = &self.prediction_real else { return Ok(false); };
+        let Some((camera_id, revision, old_camera)) = self.prediction_camera else { return Ok(false); };
+        if *id != camera_id || *id as f64 != source_id || revision != target.revision { return Ok(false); }
+        let Some(camera_stage) = &self.camera_prediction else { return Ok(false); };
+        let Some(browser) = &mut self.browser_prediction else { return Ok(false); };
+        let (camera, tone, env) = {
+            let guard = self.state.borrow();
+            let st = guard.as_ref().ok_or_else(disposed)?;
+            if !Self::camera_graph_selected(st) { return Ok(false); }
+            let pipeline = st.pipeline.try_borrow().map_err(|_| js_err(&pipeline_busy()))?;
+            (st.scene.camera, st.tonemap.get(), pipeline.lighting().env().clone())
+        };
+        let Some(warp) = crate::prediction_camera::CameraWarp::new(old_camera, camera) else { return Ok(false); };
+        let width = self.viewport.0;
+        let height = self.viewport.1;
+        if source.hdr.width() != width || source.hdr.height() != height
+            || source.depth.width() != width || source.depth.height() != height
+        { return Ok(false); }
+        self.runtime.as_mut().ok_or_else(disposed)?.record_checked_prediction(
+            key, *id, deadline_ms, measured_cost_ms,
+            |gpu, output| camera_stage.record(gpu, source, warp, output, browser, tone, &env),
+        ).map_err(|e| js_err(&e))
+    }
+
+    /// Release the opt-in presentation renderer and invalidate its retained images.
+    #[wasm_bindgen(js_name = disablePrediction)]
+    pub fn disable_prediction(&mut self) -> Result<(), JsValue> {
+        self.reset_presentation()?;
+        self.prediction_warp = None;
+        self.browser_prediction = None;
+        self.prediction_camera = None;
+        self.camera_prediction = None;
+        Ok(())
     }
 
     /// Submit target guides on the native display grid. Repair HDR alpha is one
@@ -979,12 +1039,12 @@ impl Engine {
         self.finish_scene_invocation(result.is_ok());
         let source = capture.and_then(|control| control.take_source_capture());
         if let Ok(id) = result {
-            let clean = self
-                .state
-                .borrow()
-                .as_ref()
-                .is_some_and(|state| state.lit.handle().camera_jitter_ndc() == [0.0; 2]);
-            self.prediction_real = source.filter(|_| clean).map(|source| (id, source));
+            let camera = self.state.borrow().as_ref().and_then(|state| {
+                (state.lit.handle().camera_jitter_ndc() == [0.0; 2]).then_some(state.scene.camera)
+            });
+            self.prediction_real = source.filter(|_| camera.is_some()).map(|source| (id, source));
+            self.prediction_camera = camera.filter(|_| self.prediction_real.is_some())
+                .map(|camera| (id, target.revision, camera));
         }
         result.map(|id| Some(id as f64)).map_err(|e| js_err(&e))
     }

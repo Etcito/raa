@@ -126,6 +126,7 @@ pub fn chain_type(ty: &str) -> bool {
                 | "pass.transparent.oit"
                 | "pass.particles.blend"
                 | "pass.taa"
+                | "neural.super-resolution"
                 | "pass.dof"
                 | "pass.bloom"
                 | "ssr.composite"
@@ -170,6 +171,8 @@ pub fn node_entries(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> Vec<(Stri
                         | "ssr.composite"
                         | "ssr.incident"
                         | "ssr.replace"
+                        | "neural.area-reconstruction"
+                        | "neural.reflection-reconstruction"
                         | "bloom.down"
                         | "bloom.up"
                         | "compute.wgsl"
@@ -378,7 +381,7 @@ pub fn history_refusals(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> Vec<(
 /// producers `gi.accumulate.output/meta`, `area.temporal.filtered/depth`,
 /// `ssgi.resolve.accumulated` and every compute output are accepted as well.
 pub fn history_source(ty: &str, port: &str) -> bool {
-    (ty == "pass.taa" && port == "history")
+    (matches!(ty, "pass.taa" | "neural.super-resolution") && port == "history")
         || (port == "color" && chain_type(ty))
         || matches!(
             (ty, port),

@@ -31,6 +31,8 @@ mod prediction_warp;
 #[cfg(target_arch = "wasm32")]
 mod prediction_browser;
 #[cfg(target_arch = "wasm32")]
+mod prediction_camera;
+#[cfg(target_arch = "wasm32")]
 pub use prediction_warp::{
     PREDICTION_REFRESH_WGSL, PredictionGuides, PredictionRefresh, PredictionRenderer,
 };

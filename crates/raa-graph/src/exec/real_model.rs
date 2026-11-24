@@ -70,6 +70,7 @@ pub struct RealModelPackage {
     bytes: Rc<[u8]>,
     digest: String,
     kind: String,
+    trained_heads: Vec<String>,
 }
 
 impl RealModelPackage {
@@ -122,11 +123,25 @@ impl RealModelPackage {
             }
             end = offset + bytes;
         }
+        let mut trained_heads = Vec::new();
+        for head in m["trainedHeads"].as_array().ok_or_else(|| invalid("trainedHeads must be an array"))? {
+            let head = head.as_str().filter(|head| matches!(*head, "area" | "reflection" | "display"))
+                .ok_or_else(|| invalid("unknown trained head in manifest"))?;
+            if trained_heads.iter().any(|existing| existing == head) {
+                return Err(invalid("duplicate trained head in manifest"));
+            }
+            trained_heads.push(head.to_owned());
+        }
         Ok(Self {
             bytes: weights.into(),
             digest,
             kind: kind.to_owned(),
+            trained_heads,
         })
+    }
+
+    pub fn trained_heads(&self) -> &[String] {
+        &self.trained_heads
     }
 
     pub fn digest(&self) -> &str {
@@ -170,6 +185,8 @@ pub struct RealModelStats {
 struct ReflectionRoute {
     replace: String,
     trace: String,
+    incident: String,
+    alias: Option<String>,
 }
 
 fn linked<'a>(
@@ -198,12 +215,75 @@ fn linked<'a>(
 impl ReflectionRoute {
     fn find(plan: &GraphPlan) -> Option<Self> {
         let replace = plan.nodes.iter().find(|n| n.type_id == "ssr.replace")?;
-        let incident = linked(plan, replace, "incident", "incident", "ssr.incident")?;
+        let neural = linked(plan, replace, "incident", "incident", "neural.reflection-reconstruction");
+        let incident = linked(plan, neural.unwrap_or(replace), "incident", "incident", "ssr.incident")?;
         let trace = linked(plan, incident, "trace", "trace", "ssr.trace")?;
         Some(Self {
             replace: format!("ssr.replace#{}", replace.id),
             trace: format!("ssr.trace#{}", trace.id),
+            incident: format!("ssr.incident#{}", incident.id),
+            alias: neural.map(|n| format!("neural.reflection-reconstruction#{}", n.id)),
         })
+    }
+}
+
+pub(super) struct NeuralRoutes {
+    area: Option<AreaRoute>,
+    reflection: Option<ReflectionRoute>,
+}
+
+impl NeuralRoutes {
+    pub(super) fn from_plan(plan: &GraphPlan) -> Result<Self, RaaError> {
+        let has = |name| plan.nodes.iter().any(|node| node.type_id == name);
+        let area = AreaRoute::from_plan(plan).filter(|route| route.alias.is_some());
+        let reflection = ReflectionRoute::find(plan).filter(|route| route.alias.is_some());
+        if has("neural.area-reconstruction") && area.is_none() {
+            return Err(refusal("graph.neural_route", "wire area.trace.raw → neural area pairs → area.mask.src → forward"));
+        }
+        if has("neural.reflection-reconstruction") && reflection.is_none() {
+            return Err(refusal("graph.neural_route", "wire SSR trace → incident → neural incident → SSR replace"));
+        }
+        if has("pass.taa") && has("neural.super-resolution") {
+            return Err(refusal("graph.neural_route", "use one temporal resolve owner per HDR branch"));
+        }
+        if let Some(generation) = plan.nodes.iter().find(|node| node.type_id == "neural.frame-generation") {
+            let color = |node: &PlanNode| node.inputs.iter().find(|input| input.port == "color").map(|input| input.source.clone());
+            let endpoint = color(generation);
+            let display = plan.nodes.iter().find(|node| node.type_id == "pass.tonemap").and_then(color);
+            if endpoint.is_none() || endpoint != display {
+                return Err(refusal("graph.neural_route", "frame generation must read the same real HDR endpoint as tonemap"));
+            }
+        }
+        Ok(Self { area, reflection })
+    }
+
+    pub(super) fn active(&self) -> bool { self.area.is_some() || self.reflection.is_some() }
+}
+
+pub(super) struct SharedNeuralRoutes(pub Rc<RefCell<NeuralRoutes>>);
+
+impl GraphFrame for SharedNeuralRoutes {
+    fn before_record(&mut self, pass: &str, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let routes = self.0.borrow();
+        if let Some(route) = &routes.area
+            && route.mask == pass
+            && let Some(image) = ctx.resources.get(&route.trace, "raw")
+        {
+            if let Some(alias) = &route.alias {
+                ctx.resources.publish(alias, "pairs", &image.view, image.desc);
+            }
+            ctx.resources.bind_input(pass, "src", image);
+        }
+        if let Some(route) = &routes.reflection
+            && route.replace == pass
+            && let Some(image) = ctx.resources.get(&route.incident, "incident")
+        {
+            if let Some(alias) = &route.alias {
+                ctx.resources.publish(alias, "incident", &image.view, image.desc);
+            }
+            ctx.resources.bind_input(pass, "incident", image);
+        }
+        Ok(())
     }
 }
 
@@ -245,7 +325,7 @@ impl RealModelFrame {
                 "reflection reconstruction requires SSR trace → incident → replace",
             ));
         }
-        if heads.sr && !plan.nodes.iter().any(|node| node.type_id == "pass.taa") {
+        if heads.sr && !plan.nodes.iter().any(|node| matches!(node.type_id.as_str(), "pass.taa" | "neural.super-resolution")) {
             return Err(fail("SR requires the typed TAA resolve boundary"));
         }
         if !heads.any() || h.viewports != 1 || !h.gpu.summary().is_hardware() {
@@ -378,7 +458,7 @@ impl RealModelFrame {
         let Some(raw) = ctx.resources.get(&route.trace, "raw") else {
             return;
         };
-        if !matches_size(&raw.view, ctx.size) || raw.desc.layers != AREA_LAYERS {
+        if !matches_size(&raw.view, ctx.size) || !(1..=AREA_LAYERS).contains(&raw.desc.layers) {
             return;
         }
         if !self.encode(pass, ctx) {
@@ -401,16 +481,19 @@ impl RealModelFrame {
                 v(10, output),
             ],
             ctx.size,
-            AREA_LAYERS,
+            raw.desc.layers,
         );
-        ctx.resources.bind_input(
-            pass,
-            "src",
-            PublishedImage {
-                view: output.clone(),
-                desc: raw.desc,
-            },
-        );
+        let view = if raw.desc.layers == AREA_LAYERS { output.clone() } else {
+            output.texture().create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                array_layer_count: Some(raw.desc.layers),
+                ..Default::default()
+            })
+        };
+        if let Some(alias) = self.area.as_ref().and_then(|route| route.alias.as_ref()) {
+            ctx.resources.publish(alias, "pairs", &view, raw.desc);
+        }
+        ctx.resources.bind_input(pass, "src", PublishedImage { view, desc: raw.desc });
         self.pending.ran.area = true;
         self.pending.dispatches += 1;
     }
@@ -469,9 +552,9 @@ impl RealModelFrame {
     }
 
     fn run_reflection(&mut self, pass: &str, ctx: &mut RecordCtx<'_>) {
-        let incident = ctx
-            .resources
-            .input(pass, "incident")
+        let incident = self.reflection.as_ref()
+            .and_then(|route| ctx.resources.get(&route.incident, "incident"))
+            .or_else(|| ctx.resources.input(pass, "incident"))
             .filter(|i| matches_size(&i.view, ctx.size));
         if !self.run_recurrent(pass, ctx, incident.as_ref()) || !self.model.heads.reflection {
             return;
@@ -502,6 +585,9 @@ impl RealModelFrame {
                 desc: incident.desc,
             },
         );
+        if let Some(alias) = self.reflection.as_ref().and_then(|route| route.alias.as_ref()) {
+            ctx.resources.publish(alias, "incident", output, incident.desc);
+        }
         self.pending.ran.reflection = true;
         self.pending.dispatches += 1;
     }

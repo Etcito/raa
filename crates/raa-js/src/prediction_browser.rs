@@ -80,6 +80,15 @@ impl BrowserPrediction {
         }
     }
 
+    pub(crate) fn display_camera(
+        &mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, settings: ToneMapping,
+        env: &EnvGpu, hdr: &wgpu::TextureView, depth: wgpu::TextureView, output: &wgpu::Texture,
+    ) -> Result<(), RaaError> {
+        self.settings.set(settings)?;
+        self.display.record_external(gpu, encoder, hdr, depth, env, &output.create_view(&Default::default()));
+        Ok(())
+    }
+
     pub(crate) fn frame<'a>(
         &'a mut self,
         settings: ToneMapping,

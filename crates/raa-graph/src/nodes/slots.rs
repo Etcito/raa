@@ -30,12 +30,13 @@ const FORWARD_SLOTS: [&str; 9] = [
 
 /// The G-buffer inputs whose pass reads the bound image (contract slots-family, row 2). The
 /// overlay's depth input is pushed by `overlay_depth`.
-const GBUFFER_GENERIC: [(&str, &[&str]); 13] = [
+const GBUFFER_GENERIC: [(&str, &[&str]); 14] = [
     ("pass.ao.gtao", &["depth", "normal"]),
     ("pass.shadow.contact", &["depth"]),
     ("pass.light.tiles", &["depth"]),
     ("pass.ssr", &["depth", "normal", "material"]),
     ("pass.taa", &["depth", "motion"]),
+    ("neural.super-resolution", &["depth", "motion"]),
     ("pass.gi.screen", &["depth", "normal", "motion"]),
     ("pass.gi.ssgi", &["depth", "normal", "motion"]),
     ("pass.gi.area-shadow", &["depth", "normal", "motion"]),

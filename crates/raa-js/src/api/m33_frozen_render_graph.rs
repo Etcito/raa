@@ -138,24 +138,24 @@ pub(crate) mod web {
         gpu: &GpuContext,
         st: &mut EngineState,
         model: Option<AreaGraphModel>,
+        scene_size: (u32, u32),
     ) -> Result<SetResult, RaaError> {
-        with_handles(
-            st,
-            gpu,
-            |executor, catalog, handles, _| match select_frozen(name, catalog) {
-                Err(issues) => SetResult {
-                    ok: false,
-                    issues,
-                    rebuilt: 0,
-                },
-                Ok(selection) => executor.set_plan_with_area_model(
-                    selection.plan,
-                    Some(selection.doc),
-                    handles,
-                    model,
-                ),
-            },
-        )
+        use crate::api::m32_render_graph::web::{graph_model, remember_graph_model, graph_state};
+        let graph = graph_state(st)?;
+        let selection = match select_frozen(name, &graph.catalog) {
+            Ok(selection) => selection,
+            Err(issues) => return Ok(SetResult { ok: false, issues, rebuilt: 0 }),
+        };
+        let (selected, real) = match graph_model(st, &selection.doc, scene_size) {
+            Ok(Some((selected, real))) => (Some(selected), Some(real)),
+            Ok(None) => (None, None),
+            Err(result) => return Ok(result),
+        };
+        let result = with_handles(st, gpu, |executor, _, handles, _| {
+            executor.set_plan_with_models(selection.plan, Some(selection.doc), handles, model, real)
+        })?;
+        if result.ok { remember_graph_model(st, selected)?; }
+        Ok(result)
     }
 
     #[wasm_bindgen(js_class = Engine)]
@@ -166,6 +166,7 @@ pub(crate) mod web {
         /// `graph.frozen_stale` and nothing is applied.
         #[wasm_bindgen(js_name = setFrozenRenderGraph)]
         pub fn set_frozen_render_graph(&mut self, name: JsValue) -> Result<JsValue, JsValue> {
+            let viewport = self.viewport;
             self.with_state(|gpu, st| {
                 let name = name.as_string().ok_or_else(|| {
                     api_error(
@@ -174,7 +175,7 @@ pub(crate) mod web {
                     )
                 })?;
                 check_pipeline_available(st)?;
-                let result = apply_frozen(&name, gpu, st, None)?;
+                let result = apply_frozen(&name, gpu, st, None, viewport)?;
                 finish_selection(st, result, None, Some(name), None)
             })
         }

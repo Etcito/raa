@@ -63,7 +63,7 @@
     },
     {
       "id": "resolve",
-      "type": "pass.taa"
+      "type": "neural.super-resolution"
     },
     {
       "id": "tonemap",
@@ -72,6 +72,18 @@
     {
       "id": "out",
       "type": "output.display"
+    },
+    {
+      "id": "areaModel",
+      "type": "neural.area-reconstruction"
+    },
+    {
+      "id": "reflectionModel",
+      "type": "neural.reflection-reconstruction"
+    },
+    {
+      "id": "frameGeneration",
+      "type": "neural.frame-generation"
     }
   ],
   "links": [
@@ -80,7 +92,7 @@
       "to": "trace.pyramid"
     },
     {
-      "from": "trace.raw",
+      "from": "areaModel.pairs",
       "to": "mask.src"
     },
     {
@@ -128,7 +140,7 @@
       "to": "replace.material"
     },
     {
-      "from": "incident.incident",
+      "from": "reflectionModel.incident",
       "to": "replace.incident"
     },
     {
@@ -150,6 +162,18 @@
     {
       "from": "tonemap.color",
       "to": "out.color"
+    },
+    {
+      "from": "trace.raw",
+      "to": "areaModel.pairs"
+    },
+    {
+      "from": "incident.incident",
+      "to": "reflectionModel.incident"
+    },
+    {
+      "from": "resolve.color",
+      "to": "frameGeneration.color"
     }
   ]
 }
