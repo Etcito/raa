@@ -38,3 +38,49 @@ The candidate weighs 6,560 bytes. Its weights SHA-256 is
 and its package SHA-256 is
 `1d2d02260fe464129a754aa78f9398bb4b166ba3e261eaa434f65f0f7897b3f3`.
 The candidate remains experimental and is stored alongside the original checkpoint.
+
+## Independent final score
+
+The package was committed in `701eccc` before opening either final trajectory.
+The final set contained 43 Windows RTX 3090 captures over two independently
+seeded camera, motion, and light-event replays. Every source and teacher plane
+passed its stored SHA-256. These numbers are CPU replays of the frozen model on
+the actual GPU-captured inputs. They isolate reconstruction with a fixed input
+composite at 160×90 → 320×180.
+
+| Held-out signal | Bilinear / raw | Prior `df4c0ace` | Candidate `d6b8d80` |
+|---|---:|---:|---:|
+| Matched raster display PSNR (dB) | 25.842 | 23.928 | 26.024 |
+| Matched raster display SSIM | 0.90617 | 0.78951 | 0.90756 |
+| Matched raster linear HDR RMSE | 0.06423 | 0.06525 | 0.06466 |
+| Matched raster warped log change MAE | 0.006240 | 0.006950 | 0.006217 |
+| Matched raster light-event log MAE | 0.006791 | 0.010924 | 0.006777 |
+| Path-traced display PSNR (dB) | 14.824 | 14.412 | 14.825 |
+| Path-traced display SSIM | 0.47314 | 0.41546 | 0.47208 |
+| Path-traced linear HDR RMSE | 0.17447 | 0.17438 | 0.17510 |
+| Path-traced warped log change MAE | 0.011790 | 0.012006 | 0.011765 |
+| Accepted SSR incident linear HDR RMSE | 0.08645 | 0.07779 | 0.06492 |
+| Accepted SSR incident log MAE | 0.04911 | 0.04492 | 0.03954 |
+| Accepted SSR incident warped log change MAE | 0.007624 | 0.008361 | 0.008547 |
+
+Both final trajectories gained matched-raster display PSNR, SSIM, and
+warped-change quality over both baselines. Bilinear kept the lower matched
+raster HDR RMSE. The candidate reduced accepted-SSR HDR RMSE by 16.6% over the
+prior fit and 24.9% over raw, with a 2.2% increase in SSR temporal error over
+the prior fit. Path-traced disocclusion log MAE was 0.09485 vs 0.09231 for the
+prior fit. These differences keep the checkpoint opt-in.
+
+Area visibility RMSE on the six auxiliary fitting frames was 0.14033, compared
+with 0.14148 for the prior checkpoint and 0.20046 for the raw pairs. A separate
+CPU development replay of two gallery area slots yielded 0.07744 for the
+candidate, 0.07758 for the prior fit, 0.11304 for one raw ray, and 0.03686 for
+nine actual rays. That diagnostic replay used the recorded forward guides
+and no incident history input. The corresponding earlier GPU diagnostic had
+zero area output support because the typed area receiver was prepared too late.
+The runtime fix is distinct from the model fit. Area lacks a final checkpoint
+qualification here.
+
+Machine-readable selection, fit and final reports are under
+`out/joint-real-frame-d6b8d80`. The native candidate composed replay, paired 720p GPU timing, and physical
+input-to-photon gate remain unverified. The currently shipped
+gallery continues loading the prior checkpoint on its existing opt-in path.
