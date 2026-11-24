@@ -252,15 +252,6 @@ export interface RaaError extends Error {
  * `scene.stale_instance`. After {@link Engine.dispose} every method throws `api.disposed`.
  */
 export interface Engine {
-  /** Offline single-view area trace. Planes are tightly packed little-endian raw RGBA16F
-   * plus metric R32F, normal RGBA16F and motion RGBA16F when guides are requested. */
-  captureAreaSample(nowMs: number, seed: number, guides: boolean): Promise<{
-    size: [width: number, height: number];
-    lightIndex: number;
-    lightGeneration: number;
-    planes: Uint8Array[];
-  }>;
-
   /**
    * Adds a material and returns its handle.
    * @throws RaaError `material.invalid`, `api.invalid_argument`, `render.too_many_materials`.
