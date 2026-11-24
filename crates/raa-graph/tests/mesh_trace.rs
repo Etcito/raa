@@ -39,7 +39,7 @@ fn geometry_reflections_depend_on_ssr_and_own_the_hdr_output() {
         .find(|resource| resource.producer.node == "mirrors")
         .unwrap();
     assert_eq!(color.producer.port, "color");
-    assert_eq!(color.format, GraphFormat::Rgba16Float);
+    assert_eq!(color.format, Some(GraphFormat::Rgba16Float));
     assert_eq!(color.size, SizeSpec::Scale(1.0));
 
     let mut missing = fixture();

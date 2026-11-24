@@ -31,14 +31,12 @@ impl MeshTraceFeature {
 
     /// Install the legacy pass on the same scene used by graph passes and spherical GI.
     pub fn install_legacy(pipeline: &mut Pipeline, state: MeshTraceHandle) -> Result<(), RaaError> {
-        if pipeline.entry_enabled(MESH_TRACE_NAME).is_none() {
-            pipeline.add(Box::new(MeshTracePass::new(
-                MESH_TRACE_NAME.into(),
-                state,
-                None,
-            )))?;
-            pipeline.set_enabled(MESH_TRACE_NAME, false)?;
-        }
+        pipeline.add(Box::new(MeshTracePass::new(
+            MESH_TRACE_NAME.into(),
+            state,
+            None,
+        )))?;
+        pipeline.set_enabled(MESH_TRACE_NAME, false)?;
         Ok(())
     }
 
@@ -120,10 +118,16 @@ impl FeaturePass for MeshTracePass {
         if !settings.active() {
             return Ok(());
         }
-        let [nodes, triangles, materials] = scene.geometry_buffers(ctx.gpu);
-        let Some(frame) = scene.frame.as_ref() else {
+        let Some(frame) = scene.frame.clone() else {
+            if graph.is_some() {
+                return Err(RaaError::FrameGraph {
+                    code: "trace.scene_missing",
+                    message: format!("{} requires a prepared mesh trace scene", self.entry),
+                });
+            }
             return Ok(());
         };
+        let [nodes, triangles, materials] = scene.geometry_buffers(ctx.gpu);
         let device = ctx.gpu.device();
         let gpu = self.gpu.get_or_insert_with(|| Pipelines::new(device));
         if self
@@ -219,7 +223,7 @@ impl FeaturePass for MeshTracePass {
             label: Some(MESH_TRACE_NAME),
             layout: &gpu.compute_layout,
             entries: &[
-                buffer_entry(0, frame),
+                buffer_entry(0, &frame),
                 buffer_entry(1, &gpu.options),
                 buffer_entry(2, &nodes),
                 buffer_entry(3, &triangles),

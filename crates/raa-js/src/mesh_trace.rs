@@ -37,7 +37,9 @@ fn shared_handle(
         .get::<MeshTraceHandle>()
         .cloned()
         .unwrap_or_default();
-    MeshTraceFeature::install_legacy(pipeline, handle.clone())?;
+    if pipeline.entry_enabled(MESH_TRACE_NAME).is_none() {
+        MeshTraceFeature::install_legacy(pipeline, handle.clone())?;
+    }
     st.features.insert(handle.clone());
     Ok(handle)
 }
