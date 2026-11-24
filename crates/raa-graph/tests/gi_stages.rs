@@ -84,6 +84,118 @@ fn compact_graph(spatial: bool, atrous: &[u32]) -> String {
 }
 
 #[test]
+fn area_signal_encodings_and_cadence_are_checked_during_planning() {
+    use raa_graph::catalog::SignalEncoding;
+    use raa_graph::format::{LinkDoc, PortRef, parse_graph, write_graph};
+
+    let baseline = parse_graph(full_gi_stages()).unwrap();
+    let mask_signal = |plan: &GraphPlan| {
+        plan.input_signal(node(plan, "areaMask"), "src")
+            .unwrap()
+            .encoding
+    };
+    assert_eq!(
+        mask_signal(&starter_plan()),
+        SignalEncoding::PackedVisibility
+    );
+
+    let mut pairs = baseline.clone();
+    let mask = pairs
+        .links
+        .iter_mut()
+        .find(|link| link.to.node == "areaMask")
+        .unwrap();
+    mask.from = PortRef {
+        node: "areaTrace".into(),
+        port: "raw".into(),
+    };
+    assert_eq!(
+        mask_signal(&plan_from_json(&write_graph(&pairs)).unwrap()),
+        SignalEncoding::StratifiedPairs
+    );
+
+    let mut restir = pairs.clone();
+    let restir_nodes = parse_graph(
+        r#"{
+        "format":"raa.render-graph","version":1,"name":"Area ReSTIR",
+        "nodes":[
+            {"id":"initial","type":"area.restir.initial"},
+            {"id":"reuse","type":"area.restir.temporal"},
+            {"id":"aggregate","type":"area.restir.spatial"}
+        ],
+        "links":[
+            {"from":"initial.reservoirs","to":"reuse.initial"},
+            {"from":"reuse.reservoirs","to":"aggregate.reservoirs"}
+        ]
+    }"#,
+    )
+    .unwrap();
+    restir.nodes.extend(restir_nodes.nodes);
+    restir.links.extend(restir_nodes.links);
+    let aggregate = PortRef {
+        node: "aggregate".into(),
+        port: "raw".into(),
+    };
+    restir
+        .links
+        .iter_mut()
+        .find(|link| link.to.node == "areaMask")
+        .unwrap()
+        .from = aggregate.clone();
+    assert_eq!(
+        mask_signal(&plan_from_json(&write_graph(&restir)).unwrap()),
+        SignalEncoding::RestirAggregate
+    );
+
+    let temporal_raw = PortRef {
+        node: "areaTemporal".into(),
+        port: "raw".into(),
+    };
+    for producer in [
+        aggregate,
+        PortRef {
+            node: "areaSpatial".into(),
+            port: "mask".into(),
+        },
+    ] {
+        let mut wrong = restir.clone();
+        wrong
+            .links
+            .iter_mut()
+            .find(|link| link.to == temporal_raw)
+            .unwrap()
+            .from = producer;
+        let issues = plan_from_json(&write_graph(&wrong)).unwrap_err();
+        assert!(issues.iter().any(|issue| issue.code == "graph.link_type"
+            && issue.node.as_deref() == Some("areaTemporal")
+            && issue.port.as_deref() == Some("raw")
+            && issue.message.contains("stratifiedPairs v1")));
+    }
+
+    let history = baseline
+        .links
+        .iter()
+        .find(|link| link.to.node == "areaTemporal" && link.to.port == "history")
+        .unwrap();
+    let mut current_history = baseline.clone();
+    current_history.links.retain(|link| link.to != history.to);
+    current_history.links.push(LinkDoc {
+        from: PortRef {
+            node: "areaTrace".into(),
+            port: "raw".into(),
+        },
+        to: history.to.clone(),
+        history: false,
+    });
+    let issues = plan_from_json(&write_graph(&current_history)).unwrap_err();
+    assert!(
+        issues.iter().any(
+            |issue| issue.code == "graph.link_type" && issue.port.as_deref() == Some("history")
+        )
+    );
+}
+
+#[test]
 fn stage_catalog_and_history_inputs() {
     let catalog = Catalog::build();
     let ids = [
@@ -717,6 +829,36 @@ fn restir_stages_render_frames_without_panic() {
         executor.set_plan(plan, None, &mut h)
     };
     assert!(applied.ok, "refused: {:?}", applied.issues);
+    let before = executor.active_plan().unwrap().clone();
+    let invalid = GRAPH.replace(
+        r#"{"from":"areaMask.areaShadow","to":"forward.areaShadow"}"#,
+        r#"{"from":"areaSpatial.raw","to":"forward.areaShadow"}"#,
+    );
+    assert_ne!(invalid, GRAPH);
+    let catalog = Catalog::build();
+    let result = executor.set_graph(
+        raa_graph::format::parse_graph(&invalid).unwrap(),
+        &raa_graph::validate::ValidateCtx {
+            catalog: &catalog,
+            limits: raa_graph::validate::GraphLimits::CORE,
+            installed: &|_| true,
+            viewports: 1,
+            engine_options: &[],
+        },
+        &mut raa_graph::exec::FeatureHandles {
+            gpu: &gpu,
+            pipeline: &pipeline,
+            handles: &mut handles,
+            viewports: 1,
+            msaa: 1,
+            lit: Some(&mut lit),
+        },
+    );
+    assert!(!result.ok);
+    assert!(result.issues.iter().any(
+        |issue| issue.code == "graph.link_type" && issue.port.as_deref() == Some("areaShadow")
+    ));
+    assert_eq!(executor.active_plan(), Some(&before));
     let mut graph = FrameGraph::new(SURFACE);
     raa_pipeline::Pipeline::install(&pipeline, &mut graph);
     graph.compile().expect("compile pipeline graph");
@@ -731,6 +873,7 @@ fn restir_stages_render_frames_without_panic() {
         ("areaInitial", "area.restir.initial"),
         ("areaTemporal", "area.restir.temporal"),
         ("areaSpatial", "area.restir.spatial"),
+        ("areaMask", "area.mask"),
     ];
     let mut recorded = Vec::new();
     for frame in 0..3 {
@@ -788,7 +931,11 @@ fn restir_stages_render_frames_without_panic() {
             }
         }
     }
-    assert_eq!(recorded.len(), 6, "recorded ReSTIR stages: {recorded:?}");
+    assert_eq!(
+        recorded.len(),
+        expected.len(),
+        "recorded ReSTIR stages: {recorded:?}"
+    );
 }
 
 /// Post nodes whose features these tests do not install: the colour chain skips them.

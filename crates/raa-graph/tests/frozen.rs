@@ -43,6 +43,28 @@ fn frozen_plans_match_source_and_current_versions() {
 }
 
 #[test]
+fn frozen_area_shadow_signals_match_editable_plans() {
+    use raa_graph::catalog::SignalEncoding;
+    let mut area_signals = 0;
+    for (_, make_plan, source_json) in registry::frozen_all() {
+        let frozen = make_plan();
+        let editable = plan_from_json(source_json).unwrap();
+        for (frozen_node, editable_node) in frozen.nodes.iter().zip(&editable.nodes) {
+            for input in &frozen_node.inputs {
+                let expected = editable.input_signal(editable_node, &input.port);
+                assert_eq!(frozen.input_signal(frozen_node, &input.port), expected);
+                if let Some(signal) = expected {
+                    assert_eq!(signal.encoding, SignalEncoding::PackedVisibility);
+                    assert_eq!(signal.version, 1);
+                    area_signals += 1;
+                }
+            }
+        }
+    }
+    assert!(area_signals > 0);
+}
+
+#[test]
 fn frozen_registry_has_three_starters() {
     let catalog = Catalog::build();
     let frozen = registry::frozen_all();

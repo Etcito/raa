@@ -20,6 +20,26 @@ pub struct GraphPlan {
     pub output: PlanPortRef,
 }
 
+impl GraphPlan {
+    /// Resolves the current-frame producer contract of a planned input by instance and port.
+    /// Frozen plans retain the same endpoints and catalog type versions as editable plans.
+    pub fn input_signal(
+        &self,
+        node: &PlanNode,
+        input: &str,
+    ) -> Option<&'static crate::catalog::SignalContract> {
+        let source = &node.inputs.iter().find(|feed| feed.port == input)?.source;
+        let (id, port) = match source {
+            InputSource::Link { node, port, .. } | InputSource::Default { node, port } => {
+                (node, port)
+            }
+            InputSource::Absent => return None,
+        };
+        let producer = self.nodes.iter().find(|node| node.id == *id)?;
+        crate::catalog::port_signals(&producer.type_id, port, true).first()
+    }
+}
+
 /// One executed node of a plan.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlanNode {

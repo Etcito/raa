@@ -176,6 +176,18 @@ export type RenderGraphPortSize =
   | { param: string }
   | { input: string };
 
+/** Versioned texture contract for an area shadow signal. */
+export interface RenderGraphSignalContract {
+  version: number;
+  encoding: 'stratifiedPairs' | 'restirAggregate' | 'packedVisibility';
+  usage: ('textureBinding' | 'storageBinding' | 'copySrc' | 'copyDst')[];
+  samples: number;
+  minLayers: number;
+  maxLayers: number;
+  cadence: 'current' | 'previous';
+  activeRect: 'fullScene';
+}
+
 /** One input port of a catalog node type (S51). */
 export interface RenderGraphCatalogInput {
   /** Port key, `/^[a-z][A-Za-z0-9]{0,31}$/`. */
@@ -184,6 +196,8 @@ export interface RenderGraphCatalogInput {
   type: RenderGraphPortType;
   /** The accepted texture format, or null for any format of the port type. */
   format: RenderGraphFormat | null;
+  /** Accepted signal contracts, when the input requires a specific encoding. */
+  signals?: RenderGraphSignalContract[];
   /** A required input must be linked; absent must be false for an optional one. */
   required: boolean;
   /**
@@ -209,6 +223,8 @@ export interface RenderGraphCatalogOutput {
   type: RenderGraphPortType;
   /** The format the port produces, or null when the port type leaves it open. */
   format: RenderGraphFormat | null;
+  /** Published signal contract, when the output has a defined encoding. */
+  signals?: RenderGraphSignalContract[];
   size: RenderGraphPortSize;
   mips: number;
   layers: number;

@@ -1,7 +1,7 @@
 //! Device-free plan mapping for GI stage nodes and the placeholder executor extension.
 #![allow(dead_code)] // The next extension share consumes these plan helpers.
 
-use crate::catalog::{Catalog, NodeTypeSpec, ParamBinding, ParamValue, PortType};
+use crate::catalog::{Catalog, NodeTypeSpec, ParamBinding, ParamValue, PortType, SignalEncoding};
 use crate::error::{Issue, Severity, Stage};
 use crate::exec::{ExecExtension, FeatureHandles};
 use crate::exec::{NodeStats, ResourceStat};
@@ -133,8 +133,12 @@ impl ExecExtension for GiStagesExtension {
                 let mut values = stage_values(node, spec);
                 if node.type_id == "area.mask" {
                     values.push((
-                        "srcPairs".to_owned(),
-                        f64::from(u8::from(mask_reads_pairs(plan, node))),
+                        "srcEncoding".to_owned(),
+                        match plan.input_signal(node, "src").map(|signal| signal.encoding) {
+                            Some(SignalEncoding::StratifiedPairs) => 1.0,
+                            Some(SignalEncoding::RestirAggregate) => 2.0,
+                            _ => 0.0,
+                        },
                     ));
                 }
                 handle
@@ -690,35 +694,6 @@ fn image_stat(port: &str, desc: &ImageDesc) -> ResourceStat {
     }
 }
 
-/// True when area mask `node` reads its `src` straight from `area.temporal.filtered` or
-/// `area.trace.raw`: those hold the ratio estimator's (S, U) pairs, which the mask must turn into
-/// visibility V = S / U itself (raw and unfiltered), because no `area.spatial` stage sits between.
-/// A mask fed by `area.spatial` or the ReSTIR stages reads visibility already and copies it.
-pub(crate) fn mask_reads_pairs(plan: &GraphPlan, node: &PlanNode) -> bool {
-    if node.type_id != "area.mask" {
-        return false;
-    }
-    let Some(InputSource::Link {
-        node: producer,
-        port,
-        history: false,
-    }) = node
-        .inputs
-        .iter()
-        .find(|i| i.port == "src")
-        .map(|i| &i.source)
-    else {
-        return false;
-    };
-    plan.nodes.iter().any(|n| {
-        n.id == *producer
-            && matches!(
-                (n.type_id.as_str(), port.as_str()),
-                ("area.temporal", "filtered") | ("area.trace", "raw")
-            )
-    })
-}
-
 pub(crate) fn carried_histories(
     mut old: Vec<StageHistory>,
     plan: &GraphPlan,
@@ -1009,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn mask_reads_pairs_only_when_linked_straight_to_the_ratio_producers() {
+    fn mask_input_signal_distinguishes_packed_visibility_from_stratified_pairs() {
         use crate::format::{LinkDoc, PortRef, parse_graph, write_graph};
         let starter = crate::registry::STARTERS
             .iter()
@@ -1019,7 +994,12 @@ mod tests {
         let mask_of = |plan: &GraphPlan| plan.nodes.iter().find(|n| n.id == "areaMask").cloned();
         // The complete chain feeds area.mask from area.spatial: visibility, copied.
         let full = plan_from_json(starter).unwrap();
-        assert!(!mask_reads_pairs(&full, &mask_of(&full).unwrap()));
+        assert_eq!(
+            full.input_signal(&mask_of(&full).unwrap(), "src")
+                .unwrap()
+                .encoding,
+            SignalEncoding::PackedVisibility
+        );
         // Without area.spatial the mask reads the (S, U) pairs of area.temporal.
         let mut doc = parse_graph(starter).unwrap();
         doc.nodes.retain(|n| n.id != "areaSpatial");
@@ -1038,7 +1018,12 @@ mod tests {
         });
         let plan = plan_from_json(&write_graph(&doc)).unwrap();
         assert!(plan.nodes.iter().all(|n| n.type_id != "area.spatial"));
-        assert!(mask_reads_pairs(&plan, &mask_of(&plan).unwrap()));
+        assert_eq!(
+            plan.input_signal(&mask_of(&plan).unwrap(), "src")
+                .unwrap()
+                .encoding,
+            SignalEncoding::StratifiedPairs
+        );
     }
 
     /// The device-free half of the raw-row binding: the forward slot sources of the complete

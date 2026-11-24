@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 
 use raa_graph::catalog::{GraphFormat, ParamValue, PortType, SizeSpec};
-use raa_graph::format::ComputePortDecl;
+use raa_graph::format::{ComputePortDecl, ExtentBasis};
 use raa_graph::plan::{
     GraphPlan, InputSource, PlanCompute, PlanHistory, PlanLink, PlanNode, PlanPortRef, PlanResource,
 };
@@ -248,6 +248,24 @@ fn write_compute_port(out: &mut String, port: &ComputePortDecl) {
             out.push(')');
         }
         None => out.push_str("None"),
+    }
+    out.push_str(", extent: ");
+    if let Some(extent) = &port.extent {
+        out.push_str("Some(crate::format::ComputeExtent { basis: crate::format::ExtentBasis::");
+        match &extent.basis {
+            ExtentBasis::Display => out.push_str("Display"),
+            ExtentBasis::Scene => out.push_str("Scene"),
+            ExtentBasis::Parent(input) => {
+                let _ = write!(out, "Parent({}.to_string())", string_literal(input));
+            }
+        }
+        let _ = write!(
+            out,
+            ", numerator: {}, denominator: std::num::NonZeroU32::new({}).unwrap() }})",
+            extent.numerator, extent.denominator
+        );
+    } else {
+        out.push_str("None");
     }
     out.push_str(" }");
 }
@@ -756,12 +774,18 @@ mod tests {
                 ty: PortType::Image2d,
                 format: Some(GraphFormat::Rgba16Float),
                 size: Some(SizeSpec::Scale(1.0)),
+                extent: None,
             }],
             outputs: vec![ComputePortDecl {
                 key: "dst".to_string(),
                 ty: PortType::Image2d,
                 format: Some(GraphFormat::Rgba32Float),
                 size: None,
+                extent: Some(raa_graph::format::ComputeExtent {
+                    basis: ExtentBasis::Parent("src".into()),
+                    numerator: 2,
+                    denominator: std::num::NonZeroU32::new(3).unwrap(),
+                }),
             }],
             workgroup: [8, 8],
         });
@@ -774,6 +798,7 @@ mod tests {
             r#"key: "src".to_string(), ty: crate::catalog::PortType::Image2d, format: Some(crate::catalog::GraphFormat::Rgba16Float), size: Some(crate::catalog::SizeSpec::Scale(1.0))"#
         ));
         assert!(text.contains(r#"key: "dst".to_string(), ty: crate::catalog::PortType::Image2d, format: Some(crate::catalog::GraphFormat::Rgba32Float), size: None"#));
+        assert!(text.contains(r#"extent: Some(crate::format::ComputeExtent { basis: crate::format::ExtentBasis::Parent("src".to_string()), numerator: 2, denominator: std::num::NonZeroU32::new(3).unwrap() })"#));
         assert!(text.contains("workgroup: [8, 8],"));
     }
 

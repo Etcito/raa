@@ -15,6 +15,8 @@ use crate::format::{GraphDoc, LinkDoc, NodeDoc, PortRef};
 struct EndPort {
     ty: PortType,
     format: Option<GraphFormat>,
+    size: Option<crate::catalog::SizeSpec>,
+    signals: &'static [crate::catalog::SignalContract],
     history: bool,
     generic: bool,
     default_source: &'static [&'static str],
@@ -476,7 +478,8 @@ fn check_links(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
         let from = link_end(doc, ctx.catalog, &link.from, true, at, issues);
         let to = link_end(doc, ctx.catalog, &link.to, false, at, issues);
         if let (Some(from), Some(to)) = (&from, &to)
-            && let Some((problem, fix)) = mismatch(from, to)
+            && let Some((problem, fix)) =
+                mismatch(from, to).or_else(|| signal_mismatch(from, to, link.history))
         {
             issues.push(Issue {
                 node: Some(link.to.node.clone()),
@@ -610,6 +613,8 @@ fn link_end(
             return Some(EndPort {
                 ty: port.ty.clone(),
                 format: port.format.clone(),
+                size: port.size.clone(),
+                signals: &[],
                 history: !outputs,
                 generic: !outputs,
                 default_source: &[],
@@ -646,6 +651,8 @@ fn link_end(
     found.map(|port| EndPort {
         ty: port.ty.clone(),
         format: port.format.clone(),
+        size: Some(port.size.clone()),
+        signals: crate::catalog::port_signals(&node.type_id, port.key, outputs),
         history: port.history,
         generic: port.generic,
         default_source: port.default_source,
@@ -688,6 +695,54 @@ fn mismatch(from: &EndPort, to: &EndPort) -> Option<(String, String)> {
             wanted.name()
         ),
         format!("an output with format {}", wanted.name()),
+    ))
+}
+
+/// History copies require COPY_SRC on the current-frame image before it can be sampled.
+fn signal_mismatch(from: &EndPort, to: &EndPort, history: bool) -> Option<(String, String)> {
+    use crate::catalog::SignalCadence;
+    if to.signals.is_empty() {
+        return None;
+    }
+    let cadence = if history {
+        SignalCadence::Previous
+    } else {
+        SignalCadence::Current
+    };
+    let compatible = from.signals.first().is_some_and(|source| {
+        to.signals.iter().any(|target| {
+            let usage = if history {
+                target.usage | wgpu::TextureUsages::COPY_SRC
+            } else {
+                target.usage
+            };
+            source.version == target.version
+                && source.encoding == target.encoding
+                && source.usage.contains(usage)
+                && source.samples == target.samples
+                && source.min_layers >= target.min_layers
+                && source.max_layers <= target.max_layers
+                && target.cadence == cadence
+                && source.active_rect == target.active_rect
+                && from.size == to.size
+        })
+    });
+    if compatible {
+        return None;
+    }
+    let expected = to
+        .signals
+        .iter()
+        .map(|signal| format!("{} v{}", signal.encoding.name(), signal.version))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let actual = from
+        .signals
+        .first()
+        .map_or("untyped", |signal| signal.encoding.name());
+    Some((
+        format!("has signal {actual}, incompatible with the input contract ({expected})"),
+        format!("an output providing {expected} with matching extent, cadence and resource layout"),
     ))
 }
 

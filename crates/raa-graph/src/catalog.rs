@@ -327,6 +327,127 @@ const CATEGORIES: [Category; 8] = [
     Category::Output,
 ];
 
+/// The physical encoding of an area shadow signal, independent of its texture format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalEncoding {
+    /// Two per-slot (weighted visibility, weight) pairs per layer.
+    StratifiedPairs,
+    /// One (weighted visibility, weight) aggregate for all slots in layer zero.
+    RestirAggregate,
+    /// Four resolved per-slot visibility values per layer.
+    PackedVisibility,
+}
+
+impl SignalEncoding {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::StratifiedPairs => "stratifiedPairs",
+            Self::RestirAggregate => "restirAggregate",
+            Self::PackedVisibility => "packedVisibility",
+        }
+    }
+}
+
+/// Which frame supplies the signal to an input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalCadence {
+    Current,
+    Previous,
+}
+
+/// Coordinates used by the valid texels of an area shadow signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalRect {
+    FullScene,
+}
+
+/// Physical contract projected before resources are allocated. Output usage is provisioned
+/// usage, while input usage is the subset the consumer needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignalContract {
+    pub version: u32,
+    pub encoding: SignalEncoding,
+    pub usage: wgpu::TextureUsages,
+    pub samples: u32,
+    pub min_layers: u32,
+    pub max_layers: u32,
+    pub cadence: SignalCadence,
+    pub active_rect: SignalRect,
+}
+
+/// Signal contracts accepted at a port. Outputs publish exactly one contract.
+/// Incompatible contract revisions must also bump the corresponding node type version
+/// so older frozen plans are refused by the existing version check.
+pub fn port_signals(node: &str, port: &str, output: bool) -> &'static [SignalContract] {
+    use SignalEncoding::{PackedVisibility, RestirAggregate, StratifiedPairs};
+    const SAMPLE: wgpu::TextureUsages = wgpu::TextureUsages::TEXTURE_BINDING;
+    const COPY: wgpu::TextureUsages = wgpu::TextureUsages::COPY_SRC;
+    const STORAGE: wgpu::TextureUsages = wgpu::TextureUsages::STORAGE_BINDING;
+    const SAMPLE_COPY: wgpu::TextureUsages = SAMPLE.union(COPY);
+    const AREA_OUTPUT: wgpu::TextureUsages = SAMPLE_COPY.union(STORAGE);
+    const SPATIAL_MASK: wgpu::TextureUsages = COPY.union(STORAGE);
+    const LEGACY_MASK: wgpu::TextureUsages = SAMPLE.union(STORAGE);
+    const PUBLISHED_MASK: wgpu::TextureUsages = AREA_OUTPUT.union(wgpu::TextureUsages::COPY_DST);
+    const PAIRS: SignalContract = SignalContract {
+        version: 1,
+        encoding: StratifiedPairs,
+        usage: SAMPLE,
+        samples: 1,
+        min_layers: 2,
+        max_layers: (raa_pipeline::MAX_STOCHASTIC_LIGHTS as u32).div_ceil(2),
+        cadence: SignalCadence::Current,
+        active_rect: SignalRect::FullScene,
+    };
+    const AGGREGATE: SignalContract = SignalContract {
+        encoding: RestirAggregate,
+        ..PAIRS
+    };
+    const MASK: SignalContract = SignalContract {
+        encoding: PackedVisibility,
+        min_layers: raa_pipeline::AREA_SHADOW_MASK_LAYERS,
+        max_layers: raa_pipeline::AREA_SHADOW_MASK_LAYERS,
+        ..PAIRS
+    };
+
+    match (node, port, output) {
+        ("area.trace", "raw", true) | ("area.temporal", "filtered", true) => &[SignalContract {
+            usage: AREA_OUTPUT,
+            ..PAIRS
+        }],
+        ("area.restir.spatial", "raw", true) => &[SignalContract {
+            usage: AREA_OUTPUT,
+            ..AGGREGATE
+        }],
+        ("area.spatial", "mask", true) => &[SignalContract {
+            usage: SPATIAL_MASK,
+            ..MASK
+        }],
+        ("area.mask", "areaShadow", true) => &[SignalContract {
+            usage: PUBLISHED_MASK,
+            ..MASK
+        }],
+        ("pass.gi.area-shadow", "areaShadow" | "mask", true) => &[SignalContract {
+            usage: LEGACY_MASK,
+            ..MASK
+        }],
+        ("area.temporal", "raw", false) | ("area.spatial", "src", false) => &[PAIRS],
+        ("area.temporal", "history", false) => &[SignalContract {
+            cadence: SignalCadence::Previous,
+            ..PAIRS
+        }],
+        ("area.mask", "src", false) => &[
+            PAIRS,
+            AGGREGATE,
+            SignalContract {
+                usage: COPY,
+                ..MASK
+            },
+        ],
+        ("pass.forward", "areaShadow", false) => &[MASK],
+        _ => &[],
+    }
+}
+
 /// An input or output port of a node type.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PortSpec {
@@ -650,15 +771,94 @@ fn node_json(node: &NodeTypeSpec, available: bool) -> JsonValue {
         ("available".to_string(), JsonValue::Bool(available)),
         (
             "inputs".to_string(),
-            JsonValue::Array(node.inputs.iter().map(input_json).collect()),
+            JsonValue::Array(
+                node.inputs
+                    .iter()
+                    .map(|port| port_json(node.id, port, false))
+                    .collect(),
+            ),
         ),
         (
             "outputs".to_string(),
-            JsonValue::Array(node.outputs.iter().map(output_json).collect()),
+            JsonValue::Array(
+                node.outputs
+                    .iter()
+                    .map(|port| port_json(node.id, port, true))
+                    .collect(),
+            ),
         ),
         (
             "params".to_string(),
             JsonValue::Array(node.params.iter().map(param_json).collect()),
+        ),
+    ])
+}
+
+fn port_json(node: &str, port: &PortSpec, output: bool) -> JsonValue {
+    let mut json = if output {
+        output_json(port)
+    } else {
+        input_json(port)
+    };
+    let signals = port_signals(node, port.key, output);
+    if let JsonValue::Object(fields) = &mut json
+        && !signals.is_empty()
+    {
+        fields.push((
+            "signals".to_string(),
+            JsonValue::Array(signals.iter().map(signal_json).collect()),
+        ));
+    }
+    json
+}
+
+fn signal_json(signal: &SignalContract) -> JsonValue {
+    let usage = [
+        (wgpu::TextureUsages::TEXTURE_BINDING, "textureBinding"),
+        (wgpu::TextureUsages::STORAGE_BINDING, "storageBinding"),
+        (wgpu::TextureUsages::COPY_SRC, "copySrc"),
+        (wgpu::TextureUsages::COPY_DST, "copyDst"),
+    ]
+    .into_iter()
+    .filter(|(flag, _)| signal.usage.contains(*flag))
+    .map(|(_, name)| JsonValue::String(name.to_string()))
+    .collect();
+    let cadence = match signal.cadence {
+        SignalCadence::Current => "current",
+        SignalCadence::Previous => "previous",
+    };
+    let active_rect = match signal.active_rect {
+        SignalRect::FullScene => "fullScene",
+    };
+    JsonValue::Object(vec![
+        (
+            "version".to_string(),
+            JsonValue::Number(f64::from(signal.version)),
+        ),
+        (
+            "encoding".to_string(),
+            JsonValue::String(signal.encoding.name().to_string()),
+        ),
+        ("usage".to_string(), JsonValue::Array(usage)),
+        (
+            "samples".to_string(),
+            JsonValue::Number(f64::from(signal.samples)),
+        ),
+        (
+            "minLayers".to_string(),
+            JsonValue::Number(f64::from(signal.min_layers)),
+        ),
+        (
+            "maxLayers".to_string(),
+            JsonValue::Number(f64::from(signal.max_layers)),
+        ),
+        (
+            "cadence".to_string(),
+            JsonValue::String(cadence.to_string()),
+        ),
+        (
+            "activeRect".to_string(),
+            JsonValue::String(active_rect.to_string()),
         ),
     ])
 }
