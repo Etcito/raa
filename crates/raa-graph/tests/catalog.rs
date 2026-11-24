@@ -322,13 +322,24 @@ fn nodes_are_listed_by_rank_default_order_and_id() {
         .filter(|node| node.category == Category::Output && node.pass.is_none())
         .map(|node| node.id)
         .collect();
-    assert_eq!(unpassed, ["output.display"]);
+    assert_eq!(unpassed, ["output.display", "neural.frame-generation"]);
+    let display = catalog.node("output.display").unwrap();
+    assert!(
+        display
+            .inputs
+            .iter()
+            .any(|port| port.key == "color" && port.required)
+    );
+    let generation = catalog.node("neural.frame-generation").unwrap();
+    assert!(generation.side_effect);
+    assert!(generation.outputs.is_empty());
 }
 
 #[test]
 fn to_json_has_the_s51_shape() {
     let catalog = Catalog::build();
-    let JsonValue::Object(top) = catalog.to_json(&|_: &NodeTypeSpec| true) else {
+    // The engine advertises both resolves as unavailable when its TAA pass is absent.
+    let JsonValue::Object(top) = catalog.to_json(&|node| node.pass != Some("taa")) else {
         panic!("the catalog JSON is not an object")
     };
     let format = JsonValue::String("raa.render-graph-catalog".to_string());
@@ -348,20 +359,85 @@ fn to_json_has_the_s51_shape() {
         panic!("the catalog JSON nodes are not an array")
     };
     assert_eq!(nodes.len(), catalog.nodes.len());
-    let keys: Vec<&str> = NODE_KEYS.split(' ').collect();
-    for node in nodes {
+    for (node, spec) in nodes.iter().zip(&catalog.nodes) {
         let JsonValue::Object(entries) = node else {
-            panic!("a catalog node is not an object")
+            panic!("a catalog node is not an object");
         };
+        assert_eq!(field(entries, "id"), &JsonValue::String(spec.id.into()));
+        let (capability, model_asset) = match spec.id {
+            "neural.area-reconstruction" | "neural.super-resolution" => {
+                (Some("experimental-learned"), Some("neural-model"))
+            }
+            "neural.reflection-reconstruction" => {
+                (Some("experimental-operator"), Some("neural-model"))
+            }
+            "neural.frame-generation" => {
+                (Some("experimental-learned"), Some("generated-frame-model"))
+            }
+            _ => (None, None),
+        };
+        let mut expected_keys: BTreeSet<_> = NODE_KEYS.split_whitespace().collect();
+        if let Some(capability) = capability {
+            expected_keys.insert("capability");
+            assert_eq!(
+                field(entries, "capability"),
+                &JsonValue::String(capability.into())
+            );
+        }
+        let actual_keys: BTreeSet<_> = entries.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(actual_keys, expected_keys, "{} JSON keys", spec.id);
         assert_eq!(
             entries.len(),
-            keys.len(),
-            "a node has extra or missing keys"
+            expected_keys.len(),
+            "{} has duplicate keys",
+            spec.id
         );
-        for key in &keys {
+        assert_eq!(
+            field(entries, "available"),
+            &JsonValue::Bool(!matches!(spec.id, "pass.taa" | "neural.super-resolution")),
+            "{} availability",
+            spec.id,
+        );
+
+        let JsonValue::Array(params) = field(entries, "params") else {
+            panic!("{} params are not an array", spec.id);
+        };
+        let tagged: Vec<_> = params
+            .iter()
+            .filter_map(|param| {
+                let JsonValue::Object(fields) = param else {
+                    panic!("{} param is not an object", spec.id);
+                };
+                fields
+                    .iter()
+                    .find(|(name, _)| name == "asset")
+                    .map(|(_, asset)| {
+                        (
+                            field(fields, "key"),
+                            field(fields, "kind"),
+                            field(fields, "default"),
+                            asset,
+                        )
+                    })
+            })
+            .collect();
+        if let Some(asset) = model_asset {
+            assert_eq!(
+                tagged,
+                [(
+                    &JsonValue::String("model".into()),
+                    &JsonValue::String("string".into()),
+                    &JsonValue::String(String::new()),
+                    &JsonValue::String(asset.into()),
+                )],
+                "{} model asset metadata",
+                spec.id
+            );
+        } else {
             assert!(
-                entries.iter().any(|(name, _)| name == key),
-                "a node has no `{key}`"
+                tagged.is_empty(),
+                "{} has an unexpected asset parameter",
+                spec.id
             );
         }
     }
@@ -371,12 +447,27 @@ fn to_json_has_the_s51_shape() {
 fn pass_names_and_default_sources_resolve() {
     let catalog = Catalog::build();
     for node in &catalog.nodes {
-        assert_eq!(
-            node.pass,
-            node.id.strip_prefix("pass."),
-            "`{}`: pass != id",
-            node.id
-        );
+        let expected_pass = match node.id {
+            // The neural resolve drives the installed TAA path, including its analytic fallback.
+            "neural.super-resolution" => Some("taa"),
+            id => id.strip_prefix("pass."),
+        };
+        assert_eq!(node.pass, expected_pass, "{} pipeline entry", node.id);
+        if node.id == "neural.super-resolution" {
+            let native = catalog.node("pass.taa").unwrap();
+            assert_eq!(
+                node.default_order, native.default_order,
+                "{} pass order",
+                node.id
+            );
+            assert_eq!(
+                node.contributor, native.contributor,
+                "{} pass role",
+                node.id
+            );
+            assert_eq!(node.inputs, native.inputs, "{} input ports", node.id);
+            assert_eq!(node.outputs, native.outputs, "{} output ports", node.id);
+        }
         for port in &node.inputs {
             for entry in port.default_source {
                 let (type_id, key) = entry

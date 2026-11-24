@@ -209,32 +209,20 @@ fn full_gi_is_the_no_graph_export_of_the_full_gi_engine() {
 
 #[test]
 fn starters_are_named_from_their_files_in_file_stem_order() {
-    let names: Vec<&str> = registry::STARTERS
+    let entries: Vec<_> = registry::STARTERS
         .iter()
-        .map(|&(name, _, _)| name)
-        .collect();
-    let stems: Vec<&str> = registry::STARTERS
-        .iter()
-        .map(|&(_, stem, _)| stem)
+        .map(|&(name, stem, _)| (stem, name))
         .collect();
     assert_eq!(
-        names,
+        entries,
         [
-            "Custom denoise",
-            "Debug",
-            "Full GI",
-            "Full GI stages",
-            "Simple forward"
-        ]
-    );
-    assert_eq!(
-        stems,
-        [
-            "custom-denoise",
-            "debug",
-            "full-gi",
-            "full-gi-stages",
-            "simple-forward"
+            ("area-learned", "Area inference pilot"),
+            ("custom-denoise", "Custom denoise"),
+            ("debug", "Debug"),
+            ("full-gi", "Full GI"),
+            ("full-gi-stages", "Full GI stages"),
+            ("real-frame-model", "Real-frame neural reconstruction"),
+            ("simple-forward", "Simple forward"),
         ]
     );
 }

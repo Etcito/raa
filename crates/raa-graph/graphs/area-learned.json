@@ -3,12 +3,30 @@
   "version": 1,
   "name": "Area inference pilot",
   "nodes": [
-    { "id": "skin", "type": "pass.skin" },
-    { "id": "prepass", "type": "pass.prepass" },
-    { "id": "lightTiles", "type": "pass.light.tiles" },
-    { "id": "volume", "type": "pass.gi.volume" },
-    { "id": "pyramid", "type": "gi.pyramid" },
-    { "id": "trace", "type": "area.trace" },
+    {
+      "id": "skin",
+      "type": "pass.skin"
+    },
+    {
+      "id": "prepass",
+      "type": "pass.prepass"
+    },
+    {
+      "id": "lightTiles",
+      "type": "pass.light.tiles"
+    },
+    {
+      "id": "volume",
+      "type": "pass.gi.volume"
+    },
+    {
+      "id": "pyramid",
+      "type": "gi.pyramid"
+    },
+    {
+      "id": "trace",
+      "type": "area.trace"
+    },
     {
       "id": "mask",
       "type": "area.mask",
@@ -20,15 +38,42 @@
         "stochasticMode": "stratified"
       }
     },
-    { "id": "forward", "type": "pass.forward", "params": { "mode": "ltc" } },
-    { "id": "tonemap", "type": "pass.tonemap" },
-    { "id": "out", "type": "output.display" }
+    {
+      "id": "forward",
+      "type": "pass.forward",
+      "params": {
+        "mode": "ltc"
+      }
+    },
+    {
+      "id": "tonemap",
+      "type": "pass.tonemap"
+    },
+    {
+      "id": "out",
+      "type": "output.display"
+    }
   ],
   "links": [
-    { "from": "pyramid.pyramid", "to": "trace.pyramid" },
-    { "from": "trace.raw", "to": "mask.src" },
-    { "from": "mask.areaShadow", "to": "forward.areaShadow" },
-    { "from": "forward.color", "to": "tonemap.color" },
-    { "from": "tonemap.color", "to": "out.color" }
+    {
+      "from": "pyramid.pyramid",
+      "to": "trace.pyramid"
+    },
+    {
+      "from": "trace.raw",
+      "to": "mask.src"
+    },
+    {
+      "from": "mask.areaShadow",
+      "to": "forward.areaShadow"
+    },
+    {
+      "from": "forward.color",
+      "to": "tonemap.color"
+    },
+    {
+      "from": "tonemap.color",
+      "to": "out.color"
+    }
   ]
 }

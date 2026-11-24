@@ -273,12 +273,17 @@ keep today's per-view post pipelines and add a `graph.multi_view` warning to
 
 `renderGraphCatalog().starters` returns `{ name, file, json }` entries: `json` is the complete
 document text, `name` its display name and `file` the catalog-relative file it was loaded from.
-Pass `json` (or the parsed object) to `setRenderGraph` to install it. The two starters are:
+Pass `json` (or the parsed object) to `setRenderGraph` to install a starter.
 
-| starter | what it configures |
+| Starter | Pipeline |
 |---|---|
-| `Simple forward` | the pass graph of the lit room: shadow cascades, prepass, light tiles, the forward pass, the sky background and tone mapping with AgX at 0 EV, so the room renders lit with sun shadows under the boxes |
-| `Full GI` | the same room with the global-illumination passes enabled at their catalog defaults (GI volume and screen irradiance, area-light shadows, screen-space GI, contact shadows, fog and TAA), matching an engine configured the same way without a graph |
+| Area inference pilot | Stratified area visibility wired through the area mask. The engine can apply a compatible registered pilot package to this branch. |
+| Custom denoise | Full GI stages with a custom WGSL denoiser on the GI resolve branch. |
+| Debug | A grid of render taps including depth, normals, AO, area shadow, GI and final color. |
+| Full GI | Volume and screen irradiance, area-light shadows, screen-space GI, contact shadows, fog and TAA. |
+| Full GI stages | Explicit probe, accumulation, filtering, area shadow and screen-space GI stages. |
+| Real-frame neural reconstruction | Area, SSR incident radiance, temporal resolve and frame-generation routing. Empty model IDs keep native or analytic processing. Frame generation also needs a compatible presentation host and opt-in. |
+| Simple forward | Shadow cascades, prepass, light tiles, forward shading, sky background and AgX tone mapping. |
 
 `presets` lists the compute-node presets and `frozen` the names of the frozen pipelines for the
 same installation.

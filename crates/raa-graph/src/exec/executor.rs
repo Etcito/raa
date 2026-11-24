@@ -1127,7 +1127,32 @@ fn pipeline_issue(error: &RaaError) -> Issue {
 
 #[cfg(test)]
 mod tests {
-    use super::merge_owned;
+    use super::{NeuralRoutes, merge_owned};
+    use crate::format::{parse_graph, write_graph};
+    use crate::plan::plan_from_json;
+
+    #[test]
+    fn neural_starter_passes_runtime_route_admission() {
+        let source = include_str!("../../graphs/real-frame-model.json");
+        let plan = plan_from_json(source).expect("neural starter plans");
+        let routes = NeuralRoutes::from_plan(&plan).expect("runtime accepts the starter's routes");
+        assert!(routes.active());
+
+        // The alternate feed has the right image type, but is upstream of the HDR endpoint.
+        let mut doc = parse_graph(source).unwrap();
+        let generation = doc
+            .links
+            .iter_mut()
+            .find(|link| link.to.node == "frameGeneration" && link.to.port == "color")
+            .unwrap();
+        generation.from.node = "forward".into();
+        let plan = plan_from_json(&write_graph(&doc)).expect("alternate feed still plans");
+        let error = NeuralRoutes::from_plan(&plan)
+            .err()
+            .expect("runtime rejects a mismatched endpoint");
+        assert_eq!(error.code(), "graph.neural_route");
+        assert!(error.message().contains("same real HDR endpoint as tonemap"));
+    }
 
     /// Owned names of string slices.
     fn names(entries: &[&str]) -> Vec<String> {
