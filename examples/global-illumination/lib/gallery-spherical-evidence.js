@@ -216,16 +216,6 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
     beforeLightChange = after;
   }
 
-  const beforeGeometry = live();
-  engine.setTransform(state.sphereNode, [0.1, 0.56, -3.2], [0, 0, 0, 1], [1, 1, 1]);
-  await frame();
-  const geometry = record('geometry-moved', live());
-  check(geometry.originEpoch === beforeGeometry.originEpoch && geometry.lightRevision === beforeGeometry.lightRevision
-    && (geometry.readyFaces < beforeGeometry.readyFaces || geometry.capturedFaces > beforeGeometry.capturedFaces),
-  'moving geometry did not refresh its captures', { beforeGeometry, geometry });
-  await warm();
-  engine.setTransform(state.sphereNode, [-1.1, 0.56, -3.2], [0, 0, 0, 1], [1, 1, 1]);
-
   translate(48);
   await frame();
   const empty = record('empty', live());
@@ -233,14 +223,26 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
     'empty origin retained occupied cells', empty);
   await capture('empty');
   const cube = engine.addMesh(box([0, 0, 0], [0.3, 0.3, 0.3]));
-  const cubeNode = engine.addNode(null, [camera.eye[0] + 48, 1.25, -2.1], [0, 0, 0, 1], [1, 1, 1]);
+  const cubeX = camera.eye[0] + 48;
+  const cubeNode = engine.addNode(null, [cubeX, 1.25, -2.1], [0, 0, 0, 1], [1, 1, 1]);
   const cubeInstance = engine.addMeshInstance(cubeNode, cube);
-  record('isolated-geometry', await warm(1));
+  const beforeGeometry = record('isolated-geometry', await warm(1));
   const isolatedProbe = await readProbe();
   check(isolatedProbe.faceValidMisses.some(count => count > 0), 'isolated geometry did not retain valid sky misses', isolatedProbe);
+  engine.setTransform(cubeNode, [cubeX, 1.25, -4.2], [0, 0, 0, 1], [1, 1, 1]);
+  await frame();
+  const geometry = record('geometry-moved', live());
+  check(geometry.originEpoch === beforeGeometry.originEpoch && geometry.lightRevision === beforeGeometry.lightRevision
+    && (geometry.readyFaces < beforeGeometry.readyFaces || geometry.capturedFaces > beforeGeometry.capturedFaces),
+  'moving occupied geometry did not refresh its captures', { beforeGeometry, geometry });
+  await warm(1);
   engine.removeInstance(cubeInstance);
   engine.removeNode(cubeNode);
   engine.removeMesh(cube);
+  await frame();
+  const cleared = record('geometry-removed', live());
+  check(cleared.originEpoch === geometry.originEpoch && cleared.cells === 0 && cleared.readyFaces === 0,
+    'removed geometry retained occupied cells', cleared);
   translate(0);
   record('occupied-again', await warm());
 
