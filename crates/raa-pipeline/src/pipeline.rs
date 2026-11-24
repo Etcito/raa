@@ -11,7 +11,8 @@ use raa_core::{
 };
 
 use crate::pass::{FeaturePass, PassInfo, PassRole, PrepareCtx, RecordCtx};
-use crate::{GraphFrame, ImageDesc, ImageDim, LightingResources, ResourceTable, Targets};
+use crate::pass_timings::{MAX_TIMED_PASSES, PassTimings};
+use crate::{GraphFrame, ImageDesc, ImageDim, LightingResources, PassGpuTimings, ResourceTable, Targets};
 
 /// Name of the frame graph pass `Pipeline::install` adds.
 const PASS_NAME: &str = "raa.pipeline";
@@ -613,6 +614,7 @@ pub struct Pipeline {
     submission: ViewSubmission,
     output: Option<crate::output::Output>,
     resources: ResourceTable,
+    pass_timings: PassTimings,
     /// Graph frames (S55) in insertion order, each under its name.
     graph_frames: Vec<(String, Box<dyn GraphFrame>)>,
 }
@@ -642,6 +644,7 @@ impl Pipeline {
             submission: ViewSubmission::default(),
             output: None,
             resources: ResourceTable::new(),
+            pass_timings: PassTimings::default(),
             graph_frames: Vec::new(),
         }
     }
@@ -649,6 +652,21 @@ impl Pipeline {
     /// The resource table of the latest frame.
     pub fn resources(&self) -> &ResourceTable {
         &self.resources
+    }
+
+    /// Returns the latest GPU sample and requests a new one when no readback is pending.
+    pub fn pass_gpu_timings(&mut self, gpu: &GpuContext) -> PassGpuTimings<'_> {
+        if !gpu.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return PassGpuTimings::Unavailable("timestamp queries unsupported");
+        }
+        if !self.view_rects.is_empty() {
+            return PassGpuTimings::Unavailable("requires a single full-canvas view");
+        }
+        let count = self.config.passes.iter().filter(|entry| entry.enabled).count();
+        if count == 0 || count > MAX_TIMED_PASSES {
+            return PassGpuTimings::Unavailable("unsupported pass count");
+        }
+        self.pass_timings.request()
     }
 
     /// Adds a graph frame under `name`, after the frames already added; its hooks run around
@@ -1167,17 +1185,32 @@ impl Pipeline {
             backbuffer_format,
             surface_is_srgb: self.surface_is_srgb,
         };
+        let mut capture = if self.view_rects.is_empty() && self.pass_timings.is_requested() {
+            let count = self.config.passes.iter().filter(|entry| entry.enabled).count();
+            self.pass_timings.begin(ctx.gpu, count)
+        } else {
+            None
+        };
         for entry in self.config.passes.iter_mut().filter(|e| e.enabled) {
             for (_, frame) in &mut self.graph_frames {
                 frame.before_record(&entry.name, &mut record)?;
             }
+            if let Some(capture) = &capture {
+                capture.begin_pass(record.encoder);
+            }
             entry.pass.record(&mut record)?;
+            if let Some(capture) = &mut capture {
+                capture.end_pass(record.encoder, &entry.name);
+            }
             for (_, frame) in &mut self.graph_frames {
                 frame.after_record(&entry.name, &mut record)?;
             }
         }
         for (_, frame) in &mut self.graph_frames {
             frame.end(&self.resources);
+        }
+        if let Some(capture) = capture {
+            capture.resolve(record.encoder, ctx.frame, ctx.size);
         }
         Ok(())
     }

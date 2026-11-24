@@ -9,6 +9,7 @@ mod graph_frame;
 mod lighting;
 mod output;
 mod pass;
+mod pass_timings;
 mod pipeline;
 mod resource_table;
 mod targets;
@@ -25,6 +26,7 @@ pub use lighting::{
     WeatherLightingGpu,
 };
 pub use pass::{FeaturePass, PassInfo, PassRole, PrepareCtx, RecordCtx};
+pub use pass_timings::{PassGpuTimingSample, PassGpuTimings};
 pub use pipeline::{Pipeline, PipelineConfig, SubmissionState};
 pub use resource_table::{
     ImageDesc, ImageDim, PublishedImage, ResourceTable, SampleKind, sample_kind_for,

@@ -578,3 +578,6 @@ impl EngineState {
 
 #[path = "m07_pipeline/pass_resolutions.rs"]
 mod pass_resolutions;
+
+#[path = "m07_pipeline/pass_timings.rs"]
+mod pass_timings;

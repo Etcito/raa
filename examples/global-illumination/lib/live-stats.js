@@ -26,6 +26,22 @@ function passLines(images, width, height) {
   return Array.from(passes, ([pass, ports]) => `${pass}  ${ports.join(' · ')}`);
 }
 
+function gpuTimingLines(timing) {
+  if (timing?.status === 'pending') return ['GPU timings pending'];
+  if (timing?.status !== 'sample') {
+    const reason = timing?.reason ?? 'timestamp data unavailable';
+    return [`GPU timings unavailable (${reason})`];
+  }
+  const { frame, width, height, passes } = timing;
+  if (!passes.some(({ ms }) => Number.isFinite(ms) && ms >= 0)) {
+    return ['GPU timings unavailable (invalid timestamp data)'];
+  }
+  return [
+    `GPU timings · frame ${frame} · ${extent(width, height)}`,
+    ...passes.map(({ pass, ms }) => `${pass}  ${Number.isFinite(ms) && ms >= 0 ? `${number(ms, 3)} ms` : 'unavailable'}`),
+  ];
+}
+
 export function createLiveStats(container) {
   let currentEngine;
   let sample;
@@ -72,6 +88,7 @@ export function createLiveStats(container) {
       const state = gi.active ? (gi.pendingRebuild ? 'rebuilding' : 'active') : (gi.inactiveReason ?? 'inactive');
       lines.push(`GI volume ${state}  ·  GI memory ${number(gi.allocatedBytes / (1024 * 1024), 1)} MiB`);
     }
+    lines.push(...gpuTimingLines(optional(() => engine.passGpuTimings())));
     const images = passLines(optional(() => engine.passImageExtents()), width, height);
     if (images.length) lines.push('Internal pass textures', ...images);
     container.textContent = lines.join('\n');

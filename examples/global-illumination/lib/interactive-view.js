@@ -171,17 +171,21 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
       let previousTime;
       let nextDue = 0;
       let previousCap;
+      let framePending = false;
 
       async function frame(timestamp) {
         request = null;
+        if (signal.aborted) return;
+        const firstFrame = previousTime === undefined;
         try {
+          // Request the next refresh before the fence resolves. Skip it if the GPU still
+          // has a frame outstanding so input latency and queued resources stay bounded.
+          if (!firstFrame) request = target.requestAnimationFrame(frame);
+          if (framePending) return;
           const cap = display.maxFps;
           if (cap !== previousCap) nextDue = timestamp;
           previousCap = cap;
-          if (cap && timestamp + 0.1 < nextDue) {
-            request = target.requestAnimationFrame(frame);
-            return;
-          }
+          if (cap && timestamp + 0.1 < nextDue) return;
           if (cap) {
             const period = 1000 / cap;
             nextDue += Math.max(1, Math.floor((timestamp + 0.1 - nextDue) / period) + 1) * period;
@@ -204,13 +208,19 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
           engine.render(timeMs);
           // Some scenes finish setup only after their first GPU frames.
           if (!sceneReady) sceneReady = scene.ready(engine, state, variant).ready;
-          if (previousTime === undefined) onReady(state);
+          if (firstFrame) onReady(state);
           previousTime = timestamp;
-          await engine.submittedWorkDone();
-          if (!signal.aborted) {
-            onFrame?.(engine, target.performance.now(), canvas.width, canvas.height);
-            request = target.requestAnimationFrame(frame);
+          if (signal.aborted) return;
+          framePending = true;
+          try {
+            await engine.submittedWorkDone();
+          } finally {
+            framePending = false;
           }
+          if (signal.aborted) return;
+          onFrame?.(engine, target.performance.now(), canvas.width, canvas.height);
+          // Keep the first frame's completion boundary before starting steady-state pacing.
+          if (firstFrame && !signal.aborted) request = target.requestAnimationFrame(frame);
         } catch (error) {
           if (!signal.aborted) fail(error);
         }

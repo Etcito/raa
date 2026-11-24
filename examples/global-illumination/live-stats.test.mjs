@@ -62,3 +62,41 @@ test('reports actual engine counters and current internal texture dimensions', (
   update(engine, 500, 641, 361);
   assert.doesNotMatch(container.textContent, /Internal pass textures|gi\.screen/);
 });
+
+test('GPU timings distinguish unsupported, pending, sampled and invalid timestamp data', () => {
+  const container = {};
+  const { update } = createLiveStats(container);
+  let timings = { status: 'unavailable', reason: 'timestamp queries unsupported' };
+  let reads = 0;
+  const engine = {
+    stats: () => ({ frames: 1, cpuMsMedian: 2.1 }),
+    passGpuTimings: () => { reads++; return timings; },
+  };
+
+  update(engine, 0, 1280, 720);
+  assert.match(container.textContent, /GPU timings unavailable \(timestamp queries unsupported\)/);
+  timings = { status: 'pending' };
+  update(engine, 250, 1280, 720);
+  assert.equal(reads, 1);
+  update(engine, 500, 1280, 720);
+  assert.match(container.textContent, /GPU timings pending/);
+
+  timings = {
+    status: 'sample', frame: 17, width: 1280, height: 720,
+    passes: [
+      { pass: 'gi.area-shadow', ms: 2.3456 },
+      { pass: 'tonemap', ms: 0 },
+      { pass: 'forward', ms: null },
+    ],
+  };
+  update(engine, 1000, 640, 360);
+  assert.match(container.textContent, /Output 640 × 360/);
+  assert.match(container.textContent, /GPU timings · frame 17 · 1280 × 720/);
+  assert.match(container.textContent, /gi\.area-shadow +2\.346 ms\ntonemap +0\.000 ms\nforward +unavailable/);
+
+  timings.passes = [{ pass: 'gi.area-shadow', ms: null }];
+  update(engine, 1500, 640, 360);
+  assert.match(container.textContent, /GPU timings unavailable \(invalid timestamp data\)/);
+  update({ stats: engine.stats }, 1600, 640, 360);
+  assert.match(container.textContent, /GPU timings unavailable \(timestamp data unavailable\)/);
+});

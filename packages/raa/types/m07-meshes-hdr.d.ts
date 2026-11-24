@@ -118,6 +118,18 @@ export interface LitEngineOptions {
 /** {@link LitEngineOptions} merged into the v0 options of {@link RaaModule.createEngine}. */
 export interface EngineOptions extends LitEngineOptions {}
 
+/** One asynchronous measurement of the GPU intervals around enabled feature passes. */
+export type PassGpuTimings =
+  | { status: 'unavailable'; reason: string }
+  | { status: 'pending' }
+  | {
+      status: 'sample';
+      frame: number;
+      width: number;
+      height: number;
+      passes: Array<{ pass: string; ms: number | null }>;
+    };
+
 /** The chain milestone 1 methods, merged into the v0 Engine. */
 export interface Engine {
   /**
@@ -176,6 +188,12 @@ export interface Engine {
 
   /** Every pass and forward contributor, in execution order. */
   passes(): PassInfo[];
+
+  /**
+   * Reads the latest single-view GPU timestamp sample and requests another if idle.
+   * Durations are in milliseconds and can be quantized by the browser.
+   */
+  passGpuTimings(): PassGpuTimings;
 
   /**
    * Enables or disables a pass or contributor.
