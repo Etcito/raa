@@ -365,12 +365,9 @@ fn to_json_has_the_s51_shape() {
         };
         assert_eq!(field(entries, "id"), &JsonValue::String(spec.id.into()));
         let (capability, model_asset) = match spec.id {
-            "neural.area-reconstruction" | "neural.super-resolution" => {
-                (Some("experimental-learned"), Some("neural-model"))
-            }
-            "neural.reflection-reconstruction" => {
-                (Some("experimental-operator"), Some("neural-model"))
-            }
+            "neural.area-reconstruction"
+            | "neural.reflection-reconstruction"
+            | "neural.super-resolution" => (Some("experimental-learned"), Some("neural-model")),
             "neural.frame-generation" => {
                 (Some("experimental-learned"), Some("generated-frame-model"))
             }
