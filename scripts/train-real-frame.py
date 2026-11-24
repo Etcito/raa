@@ -9,10 +9,11 @@ from pathlib import Path
 import struct
 
 import torch
+from torch.nn import functional as F
 
 from real_frame_model import (
-    Frame, at, display_coordinates, export_weights, grid, json_bytes, sample_bilinear,
-    seeded, sha, write_package,
+    Frame, at, configure_cpu, display_coordinates, export_weights, grid, json_bytes, load_weights,
+    sample_bilinear, seeded, sha, write_package,
 )
 
 
@@ -27,6 +28,7 @@ class Sample:
     area_target: torch.Tensor | None
     reflection_target: torch.Tensor | None
     analytic: torch.Tensor | None
+    fingerprint: tuple
 
 
 @dataclass
@@ -100,7 +102,7 @@ def load_capture(path):
         seq_id = sequence["id"]
         group = sequence.get("groupId", seq_id)
         split = {"train": "train", "test": "held-out", "held-out": "held-out"}.get(sequence["split"])
-        if not isinstance(seq_id, str) or not seq_id or seq_id in sequence_ids or not group or split is None:
+        if not isinstance(seq_id, str) or not seq_id or seq_id in sequence_ids or not isinstance(group, str) or not group or split is None:
             raise ValueError("sequence IDs and split assignments must be explicit and unique")
         if occupied_groups.setdefault(group, split) != split:
             raise ValueError(f"split leakage for capture group {group}")
@@ -177,12 +179,13 @@ def load_capture(path):
             normal_roughness = torch.cat((guide[:, :3], guide[:, 4:5]), dim=1)
             frame = Frame(hdr, normal_roughness, depth, motion, reactive, history_valid,
                           jitter, target.shape[-2:], reset, areas, reflections)
-            samples.append(Sample(identity, frame, target, area_target, reflection_target, analytic))
+            samples.append(Sample(identity, frame, target, area_target, reflection_target,
+                                  analytic, fingerprint))
         if len(samples) < 2:
             raise ValueError(f"sequence {seq_id} needs at least two real frames")
         sequences.append(Sequence(seq_id, group, split, samples))
-    if {sequence.split for sequence in sequences} != {"train", "held-out"}:
-        raise ValueError("independent train and held-out sequences are required")
+    if not sequences:
+        raise ValueError("capture has no sequences")
     return sequences, {"sha256": sha(data), "source": manifest["source"]}
 
 
@@ -279,6 +282,33 @@ def losses(sample, result, previous):
     return parts
 
 
+def fixed_display(hdr):
+    mapped = hdr / (1 + hdr)
+    return torch.where(mapped <= 0.0031308, 12.92 * mapped,
+                       1.055 * mapped.pow(1 / 2.4) - 0.055)
+
+
+def display_metrics(prediction, target):
+    prediction, target = fixed_display(prediction), fixed_display(target)
+    mse = (prediction - target).square().mean().clamp_min(1e-12)
+    coordinates = torch.arange(-5, 6, dtype=torch.float32)
+    gaussian = (-0.5 * (coordinates / 1.5).square()).softmax(dim=0)
+    row = gaussian.reshape(1, 1, 1, 11).expand(3, 1, 1, 11).contiguous()
+    column = row.transpose(-1, -2).contiguous()
+
+    def filtered(image):
+        horizontal = F.conv2d(F.pad(image, (5, 5, 0, 0), mode="replicate"), row, groups=3)
+        return F.conv2d(F.pad(horizontal, (0, 0, 5, 5), mode="replicate"), column, groups=3)
+
+    left, right = filtered(prediction), filtered(target)
+    covariance = filtered(prediction * target) - left * right
+    variance = (filtered(prediction.square()) - left.square()).clamp_min(0)
+    variance += (filtered(target.square()) - right.square()).clamp_min(0)
+    score = ((2 * left * right + 0.01**2) * (2 * covariance + 0.03**2)
+             / ((left.square() + right.square() + 0.01**2) * (variance + 0.03**2)))
+    return float(-10 * mse.log10()), float(score.clamp(-1, 1).mean())
+
+
 def spatial_baseline(frame):
     x, y, _, _ = display_coordinates(frame.hdr.shape[-2:], frame.output_size, frame.jitter)
     return sample_bilinear(frame.hdr, x, y)
@@ -288,7 +318,7 @@ def spatial_baseline(frame):
 def evaluate(model, sequences):
     metrics = []
     for sequence in sequences:
-        previous, previous_display = None, None
+        previous, previous_display, previous_spatial = None, None, None
         frames = []
         for sample in sequence.samples:
             result, previous = model(sample.frame, previous)
@@ -297,8 +327,15 @@ def evaluate(model, sequences):
             spatial = spatial_baseline(sample.frame)
             values["spatialLinearRmse"] = float((spatial - sample.target).square().mean().sqrt())
             values["spatialLogMae"] = float((spatial.log1p() - sample.target.log1p()).abs().mean())
+            values["logMae"] = float((result["display"].log1p() - sample.target.log1p()).abs().mean())
+            values["displayPsnr"], values["displaySsim"] = display_metrics(result["display"], sample.target)
+            values["spatialDisplayPsnr"], values["spatialDisplaySsim"] = display_metrics(spatial, sample.target)
+            values["spatialWarpedChange"] = float(temporal_error(
+                sample.frame, spatial, sample.target, previous_spatial, result["historyValid"]))
+            previous_spatial = (spatial, sample.target)
             if sample.analytic is not None:
                 values["analyticLinearRmse"] = float((sample.analytic - sample.target).square().mean().sqrt())
+                values["analyticDisplayPsnr"], values["analyticDisplaySsim"] = display_metrics(sample.analytic, sample.target)
             values["historyValidFraction"] = float(result["historyValid"].float().mean())
             frames.append({"id": sample.id, **values})
         keys = sorted(set().union(*(frame.keys() for frame in frames)) - {"id"})
@@ -323,11 +360,15 @@ def train(capture, output, steps, unroll, learning_rate, seed, area_capture):
     sequences, source = load_capture(capture)
     fit = [sequence for sequence in sequences if sequence.split == "train"]
     test = [sequence for sequence in sequences if sequence.split == "held-out"]
+    if not fit:
+        raise ValueError("training requires explicitly labeled train sequences")
     area_records, area_source = load_area_capture(area_capture) if area_capture else ([], None)
     provenance = {
         "gallery": source, "areaPilot": area_source,
         "trainFrameIds": [sample.id for sequence in fit for sample in sequence.samples],
         "heldOutFrameIds": [sample.id for sequence in test for sample in sequence.samples],
+        "trainGroupIds": sorted({sequence.group for sequence in fit}),
+        "trainFingerprints": [list(sample.fingerprint) for sequence in fit for sample in sequence.samples],
         "areaTrainFrameIds": [identity for identity, _, _ in area_records],
     }
     trained = ["display"]
@@ -367,7 +408,7 @@ def train(capture, output, steps, unroll, learning_rate, seed, area_capture):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
         optimizer.step()
         if step == 0 or (step + 1) % 20 == 0:
-            print(f"step {step + 1}/{steps} objective {float(total):.8f}", flush=True)
+            print(f"step {step + 1}/{steps} objective {float(total.detach()):.8f}", flush=True)
 
     manifest, reloaded = write_package(output, model, kind="windows-capture-fit", seed=seed,
                                        trained_heads=trained, provenance=provenance)
@@ -391,9 +432,11 @@ def train(capture, output, steps, unroll, learning_rate, seed, area_capture):
         "learningRate": learning_rate, "torchVersion": str(torch.__version__), "device": "cpu",
         "initialWeightsSha256": start_weights, "weightsSha256": manifest["weightsSha256"],
         "trainedHeads": trained, "provenance": provenance, "cpuReloadMaxAbs": reload_peak,
+        "diagnosticDisplayTransform": "Reinhard x/(1+x), then sRGB",
         "overfit": {"initialLoss": train_start, "finalLoss": train_end,
                     "initial": initial, "final": final, "improved": train_end < train_start},
-        "heldOut": {"independentFit": False, "sequences": held_out,
+        "heldOut": {"usedForFit": False, "sequences": held_out,
+                    "status": "scored" if test else "pending-independent-capture",
                     "qualification": "pilot trajectory only"},
         "ticket10AreaAuxiliary": {"initialTrainMse": area_before, "finalTrainMse": area_after},
         "shippingQualification": {"status": "unverified", "physicalLatencyAB": "not-run",
@@ -402,6 +445,42 @@ def train(capture, output, steps, unroll, learning_rate, seed, area_capture):
     (output / "fit-report.json").write_bytes(json_bytes(report))
     if not report["overfit"]["improved"] or reload_peak != 0.0:
         raise ValueError("real-frame diagnostic did not improve fit loss or failed CPU reload")
+    return report
+
+
+def score_held_out(capture, package, output):
+    configure_cpu()
+    manifest = json.loads((package / "manifest.json").read_bytes())
+    if manifest["kind"] != "windows-capture-fit":
+        raise ValueError("held-out scoring requires a fitted Windows capture package")
+    weights = (package / "weights.fp32le").read_bytes()
+    golden = (package / "golden.json").read_bytes()
+    canonical = {k: v for k, v in manifest.items() if k != "packageSha256"}
+    canonical = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    if manifest["goldenSha256"] != sha(golden) or manifest["packageSha256"] != sha(canonical + weights + golden):
+        raise ValueError("real-frame package evidence hash mismatch")
+    model = load_weights(manifest, weights)
+    sequences, data = load_capture(capture)
+    test = [sequence for sequence in sequences if sequence.split == "held-out"]
+    if not test:
+        raise ValueError("held-out scoring requires an explicitly test-labeled sequence")
+    fit = manifest["provenance"]
+    trained_groups = set(fit["trainGroupIds"])
+    trained_ids = set(fit["trainFrameIds"])
+    trained_fingerprints = {tuple(item) for item in fit["trainFingerprints"]}
+    if any(seq.group in trained_groups for seq in test) or any(
+        sample.id in trained_ids or sample.fingerprint in trained_fingerprints
+        for seq in test for sample in seq.samples
+    ):
+        raise ValueError("held-out scoring overlaps the fitted groups, frames or plane fingerprints")
+    report = {
+        "format": "raa.real-frame-held-out-report/1", "weightsSha256": manifest["weightsSha256"],
+        "packageSha256": manifest["packageSha256"], "heldOutCapture": data, "usedForFit": False,
+        "diagnosticDisplayTransform": "Reinhard x/(1+x), then sRGB",
+        "sequences": evaluate(model, test), "shippingQualification": "unverified",
+    }
+    with output.open("xb") as file:
+        file.write(json_bytes(report))
     return report
 
 
@@ -419,11 +498,19 @@ def main():
     fit.add_argument("--unroll", type=int, default=4)
     fit.add_argument("--learning-rate", type=float, default=0.003)
     fit.add_argument("--seed", type=int, default=0)
+    score = action.add_parser("score-held-out")
+    score.add_argument("capture", type=Path)
+    score.add_argument("package", type=Path)
+    score.add_argument("output", type=Path)
     options = app.parse_args()
     if options.action == "seeded":
         manifest, _ = write_package(options.output, seeded(options.seed),
                                     kind="seeded-parity-only", seed=options.seed)
         print(manifest["weightsSha256"])
+    elif options.action == "score-held-out":
+        report = score_held_out(options.capture, options.package, options.output)
+        for sequence in report["sequences"]:
+            print(f"{sequence['id']}: held-out loss {sequence['mean']['loss']:.8f}")
     else:
         if options.steps < 1 or options.unroll < 2 or not math.isfinite(options.learning_rate) or options.learning_rate <= 0:
             app.error("fit requires positive steps, an unroll of at least two and a positive finite learning rate")

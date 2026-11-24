@@ -54,6 +54,13 @@ class RealFrameTests(unittest.TestCase):
         result = visibility_ratio(torch.tensor([0.0, 0.0, 0.5]), torch.tensor([0.0, 1.0, 1.0]))
         self.assertEqual(result.tolist(), [1.0, 0.0, 0.5])
 
+    def test_area_golden_contains_reconstructed_weighted_pairs(self):
+        output = golden_vectors(seeded(0))["vectors"][1]["outputs"]
+        pair = torch.tensor(output["areaPairs"]["data"]).reshape(-1, 2)
+        visible = torch.tensor(output["areaVisibility"]["data"])
+        torch.testing.assert_close(visible, visibility_ratio(pair[:, 0], pair[:, 1]))
+        self.assertTrue(bool((pair[:, 0] <= pair[:, 1]).all()))
+
     def test_seeded_export_package_is_exact(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "seeded"
@@ -63,6 +70,14 @@ class RealFrameTests(unittest.TestCase):
             self.assertEqual(len((path / "weights.fp32le").read_bytes()), 6560)
             self.assertEqual(golden_vectors(model), golden_vectors(reloaded))
             self.assertEqual(sha((path / "golden.json").read_bytes()), manifest["goldenSha256"])
+
+    def test_display_metrics_compare_with_a_fixed_tone_map(self):
+        reference = torch.rand((1, 3, 3, 5))
+        perfect_psnr, perfect_ssim = TRAIN["display_metrics"](reference, reference)
+        changed_psnr, changed_ssim = TRAIN["display_metrics"](0.5 * reference, reference)
+        self.assertGreater(perfect_psnr, changed_psnr)
+        self.assertAlmostEqual(perfect_ssim, 1.0)
+        self.assertLess(changed_ssim, perfect_ssim)
 
     def test_loader_rejects_torn_planes_and_non_windows_reports(self):
         with tempfile.TemporaryDirectory() as temp:

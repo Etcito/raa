@@ -96,6 +96,10 @@ class History:
     output_size: tuple
 
 
+def valid_geometry(depth, normal):
+    return (depth > 0) & (normal.square().sum(dim=1, keepdim=True) > 0.25)
+
+
 class RealFrame(nn.Module):
     def __init__(self):
         super().__init__()
@@ -111,7 +115,8 @@ class RealFrame(nn.Module):
         depth = frame.depth
         normal = frame.normal_roughness[:, :3]
         size = depth.shape[-2:]
-        geometry_valid = depth > 0
+        geometry_valid = valid_geometry(depth, normal)
+        normal = torch.where(geometry_valid, normal, 0.0)
         reactive = frame.reactive.clamp(0, 1)
         valid = torch.zeros_like(geometry_valid)
         warped = depth.new_zeros((1, 12, *size))
@@ -139,14 +144,17 @@ class RealFrame(nn.Module):
         encoded = (stem + self.mix(self.spatial(F.pad(stem, (1, 1, 1, 1), mode="replicate")))).relu()
         return encoded, warped, gate, valid
 
-    def visibility(self, encoded, history, pairs):
+    def reconstruct_area(self, encoded, history, pairs):
         height, width = pairs.shape[-2:]
         s, u = pairs[:, :1], pairs[:, 1:2]
         center = visibility_ratio(s, u)
         logits = self.area(torch.cat((encoded, history, center, u.log1p()), dim=1))
         weights = logits.softmax(dim=1).reshape(1, 1, 9, height, width)
         samples = F.unfold(F.pad(pairs, (1, 1, 1, 1), mode="replicate"), 3)
-        total = (samples.reshape(1, 2, 9, height, width) * weights).sum(dim=2)
+        return (samples.reshape(1, 2, 9, height, width) * weights).sum(dim=2)
+
+    def visibility(self, encoded, history, pairs):
+        total = self.reconstruct_area(encoded, history, pairs)
         return visibility_ratio(total[:, :1], total[:, 1:2])
 
     def forward(self, frame, previous=None):
@@ -171,9 +179,13 @@ class RealFrame(nn.Module):
             "display": decode_display(frame.hdr, coefficients, frame.output_size, frame.jitter),
         }
         if frame.area_pairs is not None:
-            output["areaVisibility"] = self.visibility(encoded, gated, frame.area_pairs)
-        return output, History(state, frame.depth, frame.normal_roughness[:, :3],
-                               frame.jitter, frame.output_size)
+            area = self.reconstruct_area(encoded, gated, frame.area_pairs)
+            output["areaPairs"] = area
+            output["areaVisibility"] = visibility_ratio(area[:, :1], area[:, 1:2])
+        normal = frame.normal_roughness[:, :3]
+        geometry = valid_geometry(frame.depth, normal)
+        return output, History(state, torch.where(geometry, frame.depth, 0.0),
+                               torch.where(geometry, normal, 0.0), frame.jitter, frame.output_size)
 
 
 def visibility_ratio(s, u):
@@ -202,10 +214,14 @@ def decode_display(hdr, coefficients, size, jitter):
     return residual(rgb_sum / weight_sum, residual_sum / weight_sum, 0.25)
 
 
-def seeded(seed):
-    torch.manual_seed(seed)
+def configure_cpu():
     torch.set_num_threads(1)
     torch.use_deterministic_algorithms(True)
+
+
+def seeded(seed):
+    configure_cpu()
+    torch.manual_seed(seed)
     return RealFrame()
 
 
@@ -282,7 +298,8 @@ def golden_vectors(model):
             normal[:, 2, 1, 1] = -1
         area = torch.stack((x * y * 0.2, x * y + 0.1))[None]
         area[:, :, 0] = 0
-        refl = torch.cat((hdr * 0.1, history_valid, depth, depth * 2), dim=1)
+        source_class = (x + 1).reshape(1, 1, *size)
+        refl = torch.cat((hdr * 0.1, history_valid, source_class, depth * 2), dim=1)
         frame = Frame(hdr, normal, depth, motion, reactive, history_valid, jitter,
                       (3, 5), reset=step == 0, area_pairs=area, reflection=refl)
         result, previous = model(frame, previous)
