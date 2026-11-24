@@ -114,11 +114,10 @@ fn raa_pass_shade_ctx(s: MaterialOutput, in: MaterialInput, ao: f32, shadow: f32
 fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
     let in = raa_pass_material_input(v, front_facing);
     let s = raa_pass_material(in, v.instance_index);
-    var shadow = 1.0;
+    let shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
     var ao = 1.0;
     let capture = raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE);
     if !capture {
-        shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
         ao = raa_slot_ao(in.frag_coord);
     }
     let c = raa_pass_shade_ctx(s, in, ao, shadow);

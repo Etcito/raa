@@ -50,10 +50,29 @@ fn raa_csm_cascade(
     return raa_shadow_pcf(i32(cascade_idx), uv, clip.z, penumbra_texels, res, raa_csm_rotation(frag.xy));
 }
 
+// The reflected view can see surfaces outside the main camera's frustum.
+// Choose a sun map by its light-space footprint, since the view-depth splits
+// describe the main camera. Keep a margin for the normal offset and PCSS taps.
+fn raa_csm_planar(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
+    let view_depth = max(-(raa_frame.view * vec4<f32>(world_pos, 1.0)).z, 0.0);
+    for (var index = 0u; index < 4u; index++) {
+        let clip = raa_shadow.cascade_view_proj[index] * vec4<f32>(world_pos, 1.0);
+        if all(abs(clip.xy) < vec2<f32>(0.95)) && clip.z > 0.0 && clip.z < 1.0 {
+            return raa_csm_cascade(world_pos, n, frag, index, view_depth);
+        }
+    }
+    return 1.0;
+}
+
 // S11 Shadow slot: contact and cloud terms when shadows are cleared, otherwise the cascade
 // shadow (blended across the 10% band, faded to 1 past the shadow distance) x contact,
 // times the shared cloud-shadow visibility. Disabled clouds return 1 from the helper.
 fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
+    if raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE) {
+        let cloud = raa_cloud_shadow(world_pos);
+        if raa_shadow.params.w < 0.5 { return cloud; }
+        return raa_csm_planar(world_pos, n, frag) * cloud;
+    }
     // Clamped like crates/raa-gi/src/wgsl/slots/slot_ao.wgsl:9-27: the 1x1 dummy reads 1, never out of bounds.
     let contact_size = vec2<i32>(textureDimensions(raa_contact_tex));
     let contact_px = clamp(vec2<i32>(frag.xy), vec2<i32>(0), contact_size - vec2<i32>(1));

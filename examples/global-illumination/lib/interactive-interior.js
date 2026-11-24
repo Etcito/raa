@@ -1,14 +1,19 @@
-import { box, enclosedRoomShell, sphere, volumeRoom } from './content.js';
+import { box, enclosedRoomShell, panel, sphere, volumeRoom } from './content.js';
 
 const identity = [0, 0, 0, 1];
 const unitScale = [1, 1, 1];
 const skylightWidth = 2;
 const shellThickness = 0.8;
+const mirrorCenter = [0.45, 1.5, -7.86];
+const mirrorSize = [4.25, 2.25];
+const mirrorPlane = [0, 0, 1, -mirrorCenter[2]];
+const entryExhibit = [2.15, 1.28, -1.15];
 const options = [
   { id: 'gi', label: 'Global illumination', enabled: true },
   { id: 'screen-gi', label: 'Screen-space GI detail', enabled: true },
   { id: 'area-lights', label: 'Area lights', enabled: true },
   { id: 'moving-objects', label: 'Moving objects', enabled: true },
+  { id: 'geometry-reflections', label: 'Geometry reflections', enabled: false },
   { id: 'ssr', label: 'Screen-space reflections', enabled: true },
   { id: 'dof', label: 'Depth of field', enabled: true },
   { id: 'bloom', label: 'Bloom', enabled: true },
@@ -58,6 +63,24 @@ function fixtureSurface(color, enabled) {
     color: [0.14, 0.15, 0.17],
     emissive: enabled ? color.map(channel => channel * 2) : [0, 0, 0],
   };
+}
+
+function setMirror(engine, instance, enabled) {
+  if (!enabled) {
+    engine.setPlanarReflection(null);
+    return;
+  }
+  const passes = engine.passes().filter(pass => pass.enabled).map(pass => pass.name);
+  const forward = passes.indexOf('forward');
+  if (forward < 0
+      || ['shadow.csm', 'prepass', 'light.tiles'].some(pass => {
+        const index = passes.indexOf(pass);
+        return index < 0 || index >= forward;
+      })
+      || ['ssr', 'taa', 'tonemap'].some(pass => passes.includes(pass) && passes.indexOf(pass) <= forward)) {
+    throw new Error('Geometry reflections require sun shadows, depth and light tiles before forward, with post effects afterward.');
+  }
+  engine.setPlanarReflection(instance, mirrorPlane);
 }
 
 function build(engine, _lib, selected = variant) {
@@ -116,10 +139,22 @@ function build(engine, _lib, selected = variant) {
   solid([2.32, 0.39, -4.9], [0.55, 0.39, 0.85], dark);
   solid([0.7, 0.24, -7.03], [1.9, 0.24, 0.57], wood);
   solid([-1.72, 0.98, -6.3], [0.12, 0.98, 0.85], plaster);
-  solid([0.9, 1.58, -7.89], [1.24, 0.49, 0.06], dark);
-  for (const x of [0.08, 0.9, 1.72]) {
-    solid([x, 1.58, -7.8], [0.31, 0.39, 0.045], copper);
+  const [mirrorX, mirrorY, mirrorZ] = mirrorCenter;
+  const [width, height] = mirrorSize;
+  const frameWidth = 0.065;
+  solid([mirrorX, mirrorY, mirrorZ - 0.055], [width / 2, height / 2, 0.045], dark);
+  for (const side of [-1, 1]) {
+    solid([mirrorX + side * (width / 2 + frameWidth / 2), mirrorY, mirrorZ],
+      [frameWidth / 2, height / 2, 0.04], copper);
+    solid([mirrorX, mirrorY + side * (height / 2 + frameWidth / 2), mirrorZ],
+      [width / 2 + frameWidth, frameWidth / 2, 0.04], copper);
   }
+  // The base stays visible when the capture is off. Its roughness keeps SSR
+  // below its cutoff on this surface while SSR can still affect the polished floor.
+  const mirrorSurface = material([0.22, 0.28, 0.33], 0.42, 0.72);
+  state.mirror = instance(withSurface(panel(width, height), mirrorSurface), mirrorCenter).id;
+  engine.setInstanceGlobalIllumination(state.mirror, false);
+  if (state.enabled['geometry-reflections']) setMirror(engine, state.mirror, true);
 
   for (const fixture of fixtures) {
     const { position, size, color } = fixture;
@@ -136,6 +171,15 @@ function build(engine, _lib, selected = variant) {
   const ball = sphere(room.sphere.radius * 0.72, room.sphere.segments);
   state.sphereNode = instance(withSurface(ball, ceramic), [-1.1, 0.56, -3.2]).node;
   state.blockNode = solid([0.85, 0.36, -4.95], [0.36, 0.36, 0.46], copper).node;
+
+  // A moving glazed exhibit beside the entry lies outside the home camera's
+  // frustum. The rear mirror can see it above its plinth.
+  const glaze = engine.addSurfaceMaterial({
+    color: [0.04, 0.65, 0.82], roughness: 0.24, metallic: 0.08,
+    emissive: [0.01, 0.28, 0.47],
+  });
+  solid([entryExhibit[0], 0.42, entryExhibit[2]], [0.46, 0.42, 0.38], dark);
+  state.entryNode = instance(withSurface(sphere(0.32, 32), glaze), entryExhibit).node;
   return state;
 }
 
@@ -156,6 +200,9 @@ function setOption(engine, state, id, enabled) {
         engine.updateLight(light, { intensity: enabled ? intensity : 0 });
         engine.setSurfaceMaterial(surface, fixtureSurface(color, enabled));
       }
+      break;
+    case 'geometry-reflections':
+      setMirror(engine, state.mirror, enabled);
       break;
     case 'ssr':
     case 'dof':
@@ -182,6 +229,9 @@ function frame(engine, timeMs, _variant, state) {
   engine.setTransform(state.blockNode,
     [0.85 + 0.26 * Math.sin(phase * 0.8), 0.36, -4.95 + 0.7 * Math.sin(phase * 0.7)],
     [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)], unitScale);
+  engine.setTransform(state.entryNode,
+    [entryExhibit[0] + 0.18 * Math.sin(phase),
+      entryExhibit[1] + 0.26 * Math.sin(phase), entryExhibit[2]], identity, unitScale);
 }
 
 // Add this namespace to the picker map after managed discovery. Pass the state
