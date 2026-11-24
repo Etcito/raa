@@ -96,3 +96,28 @@ golden vectors and reports. The training objective moved from 0.001155 to
 Each path has one eligible target packet. These measurements qualify a
 deterministic pilot only. The held-out log-error regression and pending
 physical latency gate keep the default analytic path and experimental gating.
+
+### First incident reflection diagnostic
+
+The Windows Chrome RTX 3090 capture at `8381760` supplied 12 training and
+12 held-out frames. Each frame had at least 2,301 accepted screen hits.
+Independent teacher batches agreed within 0.00363 log-HDR RMSE on those
+hits. Two 250-step CPU fits reproduced weights, manifest, golden vectors and
+report byte for byte. The train objective moved from 0.22985 to 0.15035,
+and captured-frame CPU outputs matched exactly after reload.
+
+| Held-out mean over accepted screen hits | Native incident input | Fitted reflection |
+|---|---:|---:|
+| Linear HDR RMSE | 0.08845 | 0.07797 |
+| Log-HDR MAE | 0.05062 | 0.04441 |
+
+The combined package keeps the trained area, display, and recurrent weights
+exactly as exported by the previous fit. The supported class is typed SSR
+screen hits. Mesh-traced offscreen hits, volume and sky fallbacks use their
+existing renderer paths.
+
+The learned generated-frame dispatch used the fitted `5db9c2d` package in
+the Windows A/B fixture at `246c570`. It changed 2,831 warped pixels while
+preserving all 132 fresh repairs and the real-frame history count. Turning
+the model off restored the analytic image byte for byte. This result covers
+the target-guide prediction route. The camera-only route remains analytic.
