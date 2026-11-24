@@ -320,7 +320,12 @@ fn records_match_contract_area_stochastic_gpu() {
     let reflection = Reflection::new(&trace_module_wgsl());
     let table = [("lights", 0), ("weights", 32), ("params", 64)];
     check_struct(&reflection.module, "RaaAreaStochasticGpu", 80, &table);
-    let params = [("frame_index", 0), ("pad0", 4), ("pad1", 8), ("pad2", 12)];
+    let params = [
+        ("frame_index", 0),
+        ("capture_seed_plus_one", 4),
+        ("pad1", 8),
+        ("pad2", 12),
+    ];
     check_struct(&reflection.module, "AreaShadowParamsGpu", 16, &params);
     assert_eq!(AREA_PARAMS_SIZE, 16);
     let sdf = [
@@ -341,7 +346,8 @@ fn denoise_modules_validate_and_hold_their_kernels() {
         "the module holds its entry"
     );
     for name in [
-        "fn raa_area_temporal_blend(",
+        "fn raa_area_blend_pair(",
+        "fn raa_area_sample_history(",
         "fn raa_area_depth_consistent(",
     ] {
         assert!(temporal.contains(name), "the temporal module holds {name}");
@@ -455,7 +461,7 @@ fn temporal_bindings_match_their_layout() {
 fn spatial_entries_match_their_layout() {
     let reflection = Reflection::new(&spatial_module_wgsl());
     let entries = spatial_group0_entries();
-    let allowed: [u32; 6] = [1, 2, 3, 4, 5, 7];
+    let allowed = [0, 1, 2, 3, 4, 5, 7];
     assert_eq!(numbers(&entries), allowed, "the shared layout");
     let horizontal = reflection.used(reflection.entry(AREA_SPATIAL_H_ENTRY), 0);
     let vertical = reflection.used(reflection.entry(AREA_SPATIAL_V_ENTRY), 0);
@@ -464,11 +470,11 @@ fn spatial_entries_match_their_layout() {
             used.iter().all(|binding| allowed.contains(binding)),
             "group-0 bindings {used:?}"
         );
-        for required in [1u32, 2, 3, 5, 7] {
+        for required in [0u32, 1, 2, 3, 5, 7] {
             assert!(used.contains(&required), "binding {required} is used");
         }
     }
-    assert_eq!(horizontal, [1, 2, 3, 5, 7], "the horizontal entry");
+    assert_eq!(horizontal, [0, 1, 2, 3, 5, 7], "the horizontal entry");
     assert!(vertical.contains(&4), "the vertical entry reads src_b");
     check_bindings(&reflection, AREA_SPATIAL_H_ENTRY, &entries, &horizontal);
     check_bindings(&reflection, AREA_SPATIAL_V_ENTRY, &entries, &vertical);
@@ -963,7 +969,7 @@ fn restir_temporal_module_validates_and_holds_its_kernel() {
     for name in [
         "raa_restir_unpack(raa_restir_current[",
         "raa_restir_surface(",
-        "raa_temporal_surface_uv(uv, textureLoad(raa_restir_motion,",
+        "raa_temporal_raster_uv(uv, motion, raa_restir_frame.camera_jitter)",
         "raa_restir_history[raa_restir_index(",
         "raa_restir_depth_similar(",
         "raa_restir_params.normal_cos",
@@ -1059,6 +1065,7 @@ fn restir_spatial_module_validates_and_holds_its_kernel() {
         "raa_restir_unpack(raa_restir_current[index])",
         "raa_restir_spatial_offset(pixel, frame, k, raa_restir_params.spatial_radius)",
         "raa_restir_depth_similar(surface_q.view_depth, surface_p.view_depth)",
+        "raa_area_receiver_weight(surface_q.position - surface_p.position,",
         "raa_restir_params.normal_cos",
         "raa_restir_target(surfaces[j], light, r.uv)",
         "raa_restir_wrs_accept(",

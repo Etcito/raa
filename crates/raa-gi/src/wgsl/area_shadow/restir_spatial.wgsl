@@ -2,8 +2,8 @@
 // of contract 'area-restir-wgsl'. Per viewport pixel p, the canonical reservoir of
 // raa_restir_current (written by the temporal stage) and up to raa_restir_params.spatial_samples
 // neighbour reservoirs within raa_restir_params.spatial_radius pixels (rejected on depth,
-// normal or an empty reservoir) are combined by GRIS with the generalized balance heuristic
-// (Lin et al. 2022): m_i = M_i T_i(y_i) / sum_j M_j T_j(y_i), every target at participant j's
+// normal, tangent-plane separation or an empty reservoir) are combined by GRIS with the
+// generalized balance heuristic (Lin et al. 2022): m_i = M_i T_i(y_i) / sum_j M_j T_j(y_i), every target at participant j's
 // own current-frame surface, and w_i = m_i T_p(y_i) W_i. The merged reservoir becomes the next
 // frame's temporal history in raa_restir_history. The resolve writes (S, U~, S, U~) into raw
 // layer 0 of raa_area_raw_out, the history group 0 (slots 0 and 1) of the M6 denoiser: U~ is
@@ -73,6 +73,10 @@ fn raa_gi_area_restir_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
         if !surface_q.valid
             || !raa_restir_depth_similar(surface_q.view_depth, surface_p.view_depth)
             || !(dot(surface_q.normal, surface_p.normal) >= raa_restir_params.normal_cos) {
+            continue;
+        }
+        if raa_area_receiver_weight(surface_q.position - surface_p.position,
+            surface_p.normal, surface_q.normal, surface_p.view_depth) <= 0.0 {
             continue;
         }
         let neighbour = raa_restir_unpack(raa_restir_current[raa_restir_index(vec2<u32>(q))]);

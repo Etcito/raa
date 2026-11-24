@@ -143,6 +143,7 @@ struct SpatialKey {
     src: wgpu::TextureView,
     linear_depth: wgpu::TextureView,
     normal: wgpu::TextureView,
+    frame: wgpu::Buffer,
 }
 
 #[derive(Clone, Copy)]
@@ -253,6 +254,7 @@ impl StageImpl for AreaSpatialStage {
             src: src.view.clone(),
             linear_depth: depth.view.clone(),
             normal: views.normal,
+            frame: cx.lit.frame_buffer(),
         };
         if self
             .binds
@@ -267,6 +269,7 @@ impl StageImpl for AreaSpatialStage {
                         ctx.gpu.device(),
                         &pipelines.spatial_layout,
                         &[
+                            (0, key.frame.as_entire_binding()),
                             (1, wgpu::BindingResource::TextureView(&depth.view)),
                             (2, wgpu::BindingResource::TextureView(&key.normal)),
                             (3, wgpu::BindingResource::TextureView(&source)),
@@ -288,6 +291,7 @@ impl StageImpl for AreaSpatialStage {
                         ctx.gpu.device(),
                         &pipelines.spatial_layout,
                         &[
+                            (0, key.frame.as_entire_binding()),
                             (1, wgpu::BindingResource::TextureView(&depth.view)),
                             (2, wgpu::BindingResource::TextureView(&key.normal)),
                             (3, wgpu::BindingResource::TextureView(&source_a)),

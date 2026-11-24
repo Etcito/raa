@@ -16,13 +16,12 @@ use super::passes::{
 use crate::parts::GBufferViews;
 
 /// The ray-trace inputs of one frame: the two frame uniforms, the `RaaAreaStochasticGpu` slot
-/// table, the shared clamp sampler, the all-mip depth pyramid `gi.screen` published this frame
+/// table, the all-mip depth pyramid `gi.screen` published this frame
 /// (or `None`) and the attached raa-sdf-trace volume (field and uniform, or `None`).
 pub(crate) struct AreaShadowInputs<'a> {
     pub(crate) gi_frame: &'a wgpu::Buffer,
     pub(crate) lit_frame: &'a wgpu::Buffer,
     pub(crate) table: &'a wgpu::Buffer,
-    pub(crate) sampler: &'a wgpu::Sampler,
     pub(crate) pyramid: Option<&'a wgpu::TextureView>,
     pub(crate) sdf: Option<(&'a wgpu::TextureView, &'a wgpu::Buffer)>,
 }
@@ -34,7 +33,6 @@ struct AreaShadowBindings {
     gi_frame: wgpu::Buffer,
     lit_frame: wgpu::Buffer,
     table: wgpu::Buffer,
-    sampler: wgpu::Sampler,
     pyramid: Option<wgpu::TextureView>,
     sdf_field: Option<wgpu::TextureView>,
     sdf_uniform: Option<wgpu::Buffer>,
@@ -477,7 +475,6 @@ impl AreaShadowResources {
                 || bindings.gi_frame != *inputs.gi_frame
                 || bindings.lit_frame != *inputs.lit_frame
                 || bindings.table != *inputs.table
-                || bindings.sampler != *inputs.sampler
                 || bindings.pyramid.as_ref() != inputs.pyramid
                 || bindings.sdf_field.as_ref() != inputs.sdf.map(|sdf| sdf.0)
                 || bindings.sdf_uniform.as_ref() != inputs.sdf.map(|sdf| sdf.1)
@@ -547,7 +544,7 @@ impl AreaShadowResources {
                         (5, texture_resource(self.depth.read_view())),
                         (6, texture_resource(pair.write_view())),
                         (7, self.dispatch[index].as_entire_binding()),
-                        (8, wgpu::BindingResource::Sampler(inputs.sampler)),
+                        (8, texture_resource(&views.normal)),
                     ],
                 )
             })
@@ -562,6 +559,7 @@ impl AreaShadowResources {
                     "raa-gi.area-shadow.spatial-h",
                     &pipelines.spatial_layout,
                     &[
+                        (0, inputs.lit_frame.as_entire_binding()),
                         (1, texture_resource(self.depth.write_view())),
                         (2, texture_resource(&views.normal)),
                         (3, texture_resource(pair.write_view())),
@@ -585,6 +583,7 @@ impl AreaShadowResources {
                     "raa-gi.area-shadow.spatial-v",
                     &pipelines.spatial_layout,
                     &[
+                        (0, inputs.lit_frame.as_entire_binding()),
                         (1, texture_resource(self.depth.write_view())),
                         (2, texture_resource(&views.normal)),
                         (3, texture_resource(&self.scratch[first])),
@@ -605,6 +604,7 @@ impl AreaShadowResources {
                     "raa-gi.area-shadow.spatial-v-broadcast",
                     &pipelines.spatial_layout,
                     &[
+                        (0, inputs.lit_frame.as_entire_binding()),
                         (1, texture_resource(self.depth.write_view())),
                         (2, texture_resource(&views.normal)),
                         (3, texture_resource(&self.scratch[0])),
@@ -619,7 +619,6 @@ impl AreaShadowResources {
             gi_frame: inputs.gi_frame.clone(),
             lit_frame: inputs.lit_frame.clone(),
             table: inputs.table.clone(),
-            sampler: inputs.sampler.clone(),
             pyramid: inputs.pyramid.cloned(),
             sdf_field: inputs.sdf.map(|sdf| sdf.0.clone()),
             sdf_uniform: inputs.sdf.map(|sdf| sdf.1.clone()),
@@ -701,12 +700,6 @@ mod tests {
         let gi_frame = uniform(&gpu, "raa-gi.area-shadow.test.frame", 432);
         let lit_frame = uniform(&gpu, "raa-gi.area-shadow.test.lit-frame", 768);
         let table = uniform(&gpu, "raa-gi.area-shadow.test.table", 80);
-        let sampler = gpu.device().create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("raa-gi.area-shadow.test.sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
 
         let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
         let mut resources = AreaShadowResources::new(&gpu, (64, 32), 2);
@@ -721,7 +714,6 @@ mod tests {
                 gi_frame: &gi_frame,
                 lit_frame: &lit_frame,
                 table: &table,
-                sampler: &sampler,
                 pyramid: None,
                 sdf: None,
             },
@@ -757,17 +749,10 @@ mod tests {
         let gi_frame = uniform(&gpu, "raa-gi.area-shadow.test.frame", 432);
         let lit_frame = uniform(&gpu, "raa-gi.area-shadow.test.lit-frame", 768);
         let table = uniform(&gpu, "raa-gi.area-shadow.test.table", 80);
-        let sampler = gpu.device().create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("raa-gi.area-shadow.test.sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
         let inputs = AreaShadowInputs {
             gi_frame: &gi_frame,
             lit_frame: &lit_frame,
             table: &table,
-            sampler: &sampler,
             pyramid: None,
             sdf: None,
         };
@@ -811,17 +796,10 @@ mod tests {
         let gi_frame = uniform(&gpu, "raa-gi.area-shadow.test.frame", 432);
         let lit_frame = uniform(&gpu, "raa-gi.area-shadow.test.lit-frame", 768);
         let table = uniform(&gpu, "raa-gi.area-shadow.test.table", 80);
-        let sampler = gpu.device().create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("raa-gi.area-shadow.test.sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
         let inputs = AreaShadowInputs {
             gi_frame: &gi_frame,
             lit_frame: &lit_frame,
             table: &table,
-            sampler: &sampler,
             pyramid: None,
             sdf: None,
         };

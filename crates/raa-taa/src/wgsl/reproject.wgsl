@@ -67,6 +67,13 @@ fn raa_temporal_surface_uv(uv: vec2<f32>, motion: vec4<f32>) -> vec3<f32> {
     return vec3<f32>(previous_uv, select(0.0, 1.0, usable));
 }
 
+// For histories on the render grid, remove the current jitter and add the previous jitter.
+// Motion itself is on the unjittered grid (the display TAA resolve uses it directly).
+fn raa_temporal_raster_uv(uv: vec2<f32>, motion: vec4<f32>, jitter: vec4<f32>) -> vec3<f32> {
+    let jitter_delta = (jitter.xy - jitter.zw) * vec2<f32>(0.5, -0.5);
+    return raa_temporal_surface_uv(uv - jitter_delta, motion);
+}
+
 // Sky reprojection through the camera alone: the sky has no stored motion. `inv_proj` is the
 // inverse of the jittered projection, so the jitter is added to the NDC before the unproject
 // and the previous NDC subtracts camera_jitter.zw, as raa_pass_motion does. The sky is a

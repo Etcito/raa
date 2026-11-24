@@ -497,6 +497,7 @@ struct TemporalKey {
     groups: u32,
     usable: u32,
     motion: wgpu::TextureView,
+    normal: wgpu::TextureView,
     raw: wgpu::TextureView,
     linear: wgpu::TextureView,
     history: Option<wgpu::TextureView>,
@@ -646,6 +647,7 @@ impl StageImpl for AreaTemporalStage {
             groups: frame.groups,
             usable: mask,
             motion: views.motion.clone(),
+            normal: views.normal.clone(),
             raw: raw.view.clone(),
             linear: linear.view.clone(),
             history: history.as_ref().map(|image| image.view.clone()),
@@ -676,10 +678,7 @@ impl StageImpl for AreaTemporalStage {
                             (5, wgpu::BindingResource::TextureView(&depth_view)),
                             (6, wgpu::BindingResource::TextureView(&filtered_layer)),
                             (7, outputs.dispatch[group as usize].as_entire_binding()),
-                            (
-                                8,
-                                wgpu::BindingResource::Sampler(ctx.lighting.linear_clamp()),
-                            ),
+                            (8, wgpu::BindingResource::TextureView(&views.normal)),
                         ],
                     )
                 })

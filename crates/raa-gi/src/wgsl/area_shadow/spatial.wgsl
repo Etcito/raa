@@ -13,7 +13,7 @@
 // constants.
 //
 // Group-0 binding registry (binding number to resource):
-// 1 raa_area_current_depth, 2 raa_area_normal, 3 raa_area_src, 4 raa_area_src_b,
+// 0 raa_area_frame, 1 raa_area_current_depth, 2 raa_area_normal, 3 raa_area_src, 4 raa_area_src_b,
 // 5 raa_area_dst, 7 raa_area_dispatch. The horizontal entry reads no `raa_area_src_b`; the
 // vertical entry reads both sources.
 
@@ -28,6 +28,7 @@ struct AreaDispatchGpu {
     limit: u32,
 }
 
+@group(0) @binding(0) var<uniform> raa_area_frame: RaaTemporalFrame;
 @group(0) @binding(1) var raa_area_current_depth: texture_2d<f32>;
 @group(0) @binding(2) var raa_area_normal: texture_2d<f32>;
 @group(0) @binding(3) var raa_area_src: texture_2d<f32>;
@@ -85,6 +86,7 @@ fn raa_area_bilateral(src: texture_2d<f32>, coord: vec2<i32>, axis: vec2<i32>) -
         return center;
     }
     let max_pixel = vec2<i32>(textureDimensions(raa_area_current_depth)) - vec2<i32>(1);
+    let center_position = raa_area_receiver_position(coord, center_depth, raa_area_frame);
     let center_normal = normalize(textureLoad(raa_area_normal, coord, 0).xyz);
     var sum = vec4<f32>(0.0);
     var weight_sum = 0.0;
@@ -96,7 +98,9 @@ fn raa_area_bilateral(src: texture_2d<f32>, coord: vec2<i32>, axis: vec2<i32>) -
             continue;
         }
         let tap_normal = normalize(textureLoad(raa_area_normal, sp, 0).xyz);
-        let weight = raa_area_bilateral_weight(
+        let delta = raa_area_receiver_position(sp, tap_depth, raa_area_frame) - center_position;
+        let receiver = raa_area_receiver_weight(delta, center_normal, tap_normal, center_depth);
+        let weight = receiver * raa_area_bilateral_weight(
             tap,
             center_depth,
             tap_depth,

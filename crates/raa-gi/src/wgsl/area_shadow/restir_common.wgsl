@@ -13,8 +13,8 @@
 // spherical-rectangle sampling, target and LTC luminance functions.
 //
 // Group-2 binding registry of contract 'area-restir-wgsl' (binding number to resource):
-// 12 raa_restir_motion (S12 motion), 13 raa_restir_frame: RaaTemporalFrame (only temporal.z is
-// read), 14 raa_restir_previous_depth (the depth pair's read view), 15 raa_restir_params:
+// 12 raa_restir_motion (S12 motion), 13 raa_restir_frame: RaaTemporalFrame (camera history validity and
+// jitter), 14 raa_restir_previous_depth (the depth pair's read view), 15 raa_restir_params:
 // RestirParamsGpu (64 B), 16 raa_restir_current (reservoir storage, read_write), 17
 // raa_restir_history (reservoir history, read_write), 18 raa_restir_ltc (filterable atlas),
 // 19 raa_restir_material (S12 material). Bindings 0-11 belong to the composed stage files
@@ -50,7 +50,7 @@ struct RaaRestirReservoir {
 
 // The S12 motion target of the pixel (the lit frame's reprojection input).
 @group(2) @binding(12) var raa_restir_motion: texture_2d<f32>;
-// The lit FrameGpu (S10) of this frame; only temporal.z (camera history valid) is read.
+// The lit FrameGpu (S10) of this frame (camera history validity and jitter).
 @group(2) @binding(13) var<uniform> raa_restir_frame: RaaTemporalFrame;
 // The previous frame's linear view depth (the depth pair's read view).
 @group(2) @binding(14) var raa_restir_previous_depth: texture_2d<f32>;

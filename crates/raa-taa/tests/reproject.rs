@@ -1,6 +1,6 @@
 //! Contract `raa-temporal-wgsl`: the shared reprojection WGSL validates in a compute module,
 //! its `RaaTemporalFrame` matches the raa-shader prelude `FrameGpu` layout, and each of its
-//! four functions is declared exactly once. The resolve `cs_taa` keeps the current colour of
+//! shared functions is declared exactly once. The resolve `cs_taa` keeps the current colour of
 //! a pixel whose motion carries the S43 history reject flag.
 
 use raa_shader::Composer;
@@ -16,6 +16,7 @@ const PROBE_WGSL: &str = "
 fn cs_reproject_probe(@builtin(global_invocation_id) id: vec3<u32>) {
     let uv = vec2<f32>(0.5, 0.5);
     let surface = raa_temporal_surface_uv(uv, vec4<f32>(0.0));
+    let raster = raa_temporal_raster_uv(uv, vec4<f32>(0.0), f.camera_jitter);
     let sky = raa_temporal_sky_uv(
         uv,
         f.inv_view,
@@ -23,7 +24,7 @@ fn cs_reproject_probe(@builtin(global_invocation_id) id: vec3<u32>) {
         f.previous_view_proj,
         f.camera_jitter,
     );
-    let on_screen = raa_temporal_on_screen(surface.xy);
+    let on_screen = raa_temporal_on_screen(raster.xy);
     let usable = raa_temporal_history_usable(f.temporal);
     probe_out[id.x] = vec4<f32>(
         surface.z,
@@ -86,6 +87,7 @@ fn each_reprojection_function_is_declared_once() {
     for name in [
         "raa_temporal_on_screen",
         "raa_temporal_surface_uv",
+        "raa_temporal_raster_uv",
         "raa_temporal_sky_uv",
         "raa_temporal_history_usable",
     ] {

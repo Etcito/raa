@@ -160,6 +160,14 @@ pub fn bilateral_weight(
     gauss * depth_term * normal_term
 }
 
+/// Additional bilateral gate for the maximum displacement off either receiver tangent plane.
+pub fn receiver_weight(delta: [f32; 3], normal: [f32; 3], tap_normal: [f32; 3], depth: f32) -> f32 {
+    let plane_distance = dot(delta, normal).abs().max(dot(delta, tap_normal).abs());
+    let tolerance = 0.001 * depth + 0.001;
+    let x = ((plane_distance - tolerance) / (2.0 * tolerance)).clamp(0.0, 1.0);
+    1.0 - x * x * (3.0 - 2.0 * x)
+}
+
 /// The ratio estimator (Heitz, Hill, McGuire, I3D 2018): visibility `s / u` clamped to [0, 1],
 /// where `s` is the weighted visible sum and `u` the weight sum. With no weight, full visibility.
 pub fn ratio_visibility(s: f32, u: f32) -> f32 {

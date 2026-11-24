@@ -414,7 +414,6 @@ impl FeaturePass for GiAreaShadowPass {
             gi_frame: &frame,
             lit_frame: &lit_frame,
             table: ctx.lighting.area_stochastic_buffer(),
-            sampler: ctx.lighting.linear_clamp(),
             pyramid: pyramid.as_ref(),
             sdf: sdf.as_ref().map(|(view, buffer)| (view, buffer)),
         };

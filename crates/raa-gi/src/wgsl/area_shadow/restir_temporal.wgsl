@@ -60,7 +60,8 @@ fn raa_restir_temporal_candidate(
     }
     let size = vec2<i32>(raa_gi_frame.viewport.xy);
     let uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) * raa_gi_frame.viewport.zw;
-    let rep = raa_temporal_surface_uv(uv, textureLoad(raa_restir_motion, vec2<i32>(pixel), 0));
+    let motion = textureLoad(raa_restir_motion, vec2<i32>(pixel), 0);
+    let rep = raa_temporal_raster_uv(uv, motion, raa_restir_frame.camera_jitter);
     if !(rep.z > 0.5) {
         return empty;
     }

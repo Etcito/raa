@@ -21,7 +21,9 @@ use wgpu::{
 
 use crate::tunables::GiTunables;
 
-use super::passes::{AreaShadowPipelines, AreaShadowWork, trace_module_wgsl, tuned_pipeline};
+use super::passes::{
+    AREA_RECEIVER_WGSL, AreaShadowPipelines, AreaShadowWork, trace_module_wgsl, tuned_pipeline,
+};
 use crate::parts::screen::passes::{
     depth_entry, dispatch, entry, float_entry, layout, module, storage_entry,
     storage_texture_entry, uniform_entry,
@@ -160,7 +162,7 @@ pub fn restir_temporal_module_wgsl() -> String {
 /// bindings of `restir_group2_entries`.
 pub fn restir_spatial_module_wgsl() -> String {
     format!(
-        "{}{REPROJECT_WGSL}{RESTIR_COMMON_WGSL}{RESTIR_SPATIAL_WGSL}",
+        "{}{REPROJECT_WGSL}{RESTIR_COMMON_WGSL}{AREA_RECEIVER_WGSL}{RESTIR_SPATIAL_WGSL}",
         trace_module_wgsl()
     )
 }

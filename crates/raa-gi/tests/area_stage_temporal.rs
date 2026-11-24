@@ -57,6 +57,37 @@ fn weighted_pair_resolve_preserves_black_umbra_and_empty_slot() {
 }
 
 #[test]
+fn area_receiver_plane_rejects_shallow_steps_and_preserves_sloped_receivers() {
+    use raa_gi::parts::area_shadow::cpu::{bilateral_weight, ratio_visibility, receiver_weight};
+
+    let depth = 10.0;
+    let n = std::f32::consts::FRAC_1_SQRT_2;
+    let normal = [0.0, n, -n];
+    let on_plane = [0.0, 0.05, 0.05];
+    let parallel_step = [0.0, 0.05, 0.1];
+    assert_eq!(receiver_weight(on_plane, normal, normal, depth), 1.0);
+    let original_tap = bilateral_weight(4, depth, depth + 0.1, normal, normal);
+    assert!(original_tap > 0.13);
+    let filtered_tap = original_tap * receiver_weight(parallel_step, normal, normal, depth);
+    assert_eq!(filtered_tap, 0.0);
+
+    // A fully lit tap on the raised receiver used to brighten a dark centre.
+    let center_weight = bilateral_weight(3, depth, depth, normal, normal);
+    assert!(ratio_visibility(original_tap, center_weight + original_tap) > 0.3);
+    assert_eq!(
+        ratio_visibility(filtered_tap, center_weight + filtered_tap),
+        0.0
+    );
+
+    // Check the other tangent plane too. This sample lies on the centre plane
+    // but its own plane would cross the centre.
+    assert_eq!(
+        receiver_weight(on_plane, normal, [0.0, 1.0, 0.0], depth),
+        0.0
+    );
+}
+
+#[test]
 fn seeded_area_trace_validates_as_wgsl() {
     use raa_gi::parts::area_shadow::passes::trace_module_wgsl;
 

@@ -307,17 +307,10 @@ mod tests {
         let gi_frame = uniform(&gpu, "raa-gi.area-restir.test.frame", 432);
         let lit_frame = uniform(&gpu, "raa-gi.area-restir.test.lit-frame", 768);
         let table = uniform(&gpu, "raa-gi.area-restir.test.table", 80);
-        let sampler = gpu.device().create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("raa-gi.area-restir.test.sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
         let inputs = AreaShadowInputs {
             gi_frame: &gi_frame,
             lit_frame: &lit_frame,
             table: &table,
-            sampler: &sampler,
             pyramid: None,
             sdf: None,
         };
