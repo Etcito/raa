@@ -508,6 +508,7 @@ impl RealModelFrame {
         pass: &str,
         ctx: &mut RecordCtx<'_>,
         incident: Option<&PublishedImage>,
+        emit_reflection: bool,
     ) -> bool {
         if self.recurrent {
             return true;
@@ -537,20 +538,26 @@ impl RealModelFrame {
                 0,
             ],
         );
-        k.recurrent.run(
-            ctx,
-            &[
-                b(0, &k.late_params),
-                b(1, &k.weights),
-                b(7, &t.guide),
-                v(11, &color),
-                v(12, incident.map_or(&k.zero, |image| &image.view)),
-                v(13, meta.as_ref().map_or(&k.zero, |image| &image.view)),
-                b(14, &t.state[self.history.write_index()]),
-            ],
-            ctx.size,
-            1,
-        );
+        let bindings = [
+            b(0, &k.late_params),
+            b(1, &k.weights),
+            b(7, &t.guide),
+            v(11, &color),
+            v(12, incident.map_or(&k.zero, |image| &image.view)),
+            v(13, meta.as_ref().map_or(&k.zero, |image| &image.view)),
+            b(14, &t.state[self.history.write_index()]),
+        ];
+        if emit_reflection {
+            let output = t.reflection.as_ref().expect("selected reflection");
+            k.recurrent_reflection.as_ref().expect("selected pipeline").run(
+                ctx,
+                &[bindings.as_slice(), &[v(15, output)]].concat(),
+                ctx.size,
+                1,
+            );
+        } else {
+            k.recurrent.run(ctx, &bindings, ctx.size, 1);
+        }
         self.recurrent = true;
         self.pending.dispatches += 1;
         true
@@ -561,33 +568,36 @@ impl RealModelFrame {
             .and_then(|route| ctx.resources.get(&route.incident, "incident"))
             .or_else(|| ctx.resources.input(pass, "incident"))
             .filter(|i| matches_size(&i.view, ctx.size));
-        if !self.run_recurrent(pass, ctx, incident.as_ref()) || !self.model.heads.reflection {
+        let meta = self.reflection.as_ref()
+            .and_then(|route| ctx.resources.get(&route.trace, "hitMeta"))
+            .filter(|image| matches_size(&image.view, ctx.size));
+        let emit = self.model.heads.reflection && incident.is_some() && meta.is_some();
+        let already_recurrent = self.recurrent;
+        if !self.run_recurrent(pass, ctx, incident.as_ref(), emit) || !emit {
             return;
         }
-        let Some(incident) = incident else {
-            return;
-        };
-        let Some(meta) = self.reflection.as_ref()
-            .and_then(|route| ctx.resources.get(&route.trace, "hitMeta"))
-            .filter(|image| matches_size(&image.view, ctx.size)) else {
-            return;
-        };
+        let incident = incident.expect("valid reflection input");
         let t = self.resources.as_ref().expect("encoded tensors");
-        let k = &self.kernels;
         let output = t.reflection.as_ref().expect("selected reflection");
-        k.reflection.as_ref().expect("selected pipeline").run(
-            ctx,
-            &[
-                b(0, &k.late_params),
-                b(1, &k.weights),
-                v(12, &incident.view),
-                v(13, &meta.view),
-                b(14, &t.state[self.history.write_index()]),
-                v(15, output),
-            ],
-            ctx.size,
-            1,
-        );
+        if already_recurrent {
+            // A graph can schedule TAA before replace. Reuse its state in that case.
+            let k = &self.kernels;
+            k.params(ctx.gpu, &k.reflection_params, ctx.size, [0, 0, 1, 1, 0, 0]);
+            k.reflection.as_ref().expect("selected pipeline").run(
+                ctx,
+                &[
+                    b(0, &k.reflection_params),
+                    b(1, &k.weights),
+                    v(12, &incident.view),
+                    v(13, &meta.expect("valid reflection metadata").view),
+                    b(14, &t.state[self.history.write_index()]),
+                    v(15, output),
+                ],
+                ctx.size,
+                1,
+            );
+            self.pending.dispatches += 1;
+        }
         ctx.resources.bind_input(
             pass,
             "incident",
@@ -600,7 +610,6 @@ impl RealModelFrame {
             ctx.resources.publish(alias, "incident", output, incident.desc);
         }
         self.pending.ran.reflection = true;
-        self.pending.dispatches += 1;
     }
 
     fn run_sr(&mut self, pass: &str, ctx: &mut RecordCtx<'_>) {
@@ -616,7 +625,7 @@ impl RealModelFrame {
                 .contains(TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC)
             || display.0 < ctx.size.0
             || display.1 < ctx.size.1
-            || !self.run_recurrent(pass, ctx, None)
+            || !self.run_recurrent(pass, ctx, None, false)
         {
             return;
         }
@@ -694,7 +703,7 @@ impl GraphFrame for SharedRealFrame {
     fn after_record(&mut self, pass: &str, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut model = self.0.borrow_mut();
         if pass == "forward" && model.reflection.is_none() && !model.model.heads.sr {
-            model.run_recurrent(pass, ctx, None);
+            model.run_recurrent(pass, ctx, None, false);
         }
         Ok(())
     }
@@ -911,11 +920,13 @@ struct Kernels {
     encode_params: Buffer,
     area_params: Buffer,
     late_params: Buffer,
+    reflection_params: Buffer,
     zero: TextureView,
     stem: Kernel,
     spatial: Kernel,
     area: Option<Kernel>,
     recurrent: Kernel,
+    recurrent_reflection: Option<Kernel>,
     reflection: Option<Kernel>,
     sr_head: Option<Kernel>,
     sr_resolve: Option<Kernel>,
@@ -1001,11 +1012,16 @@ impl Kernels {
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
         gpu.queue().write_buffer(&weights, 0, &package.bytes);
+        let recurrent_bindings = [
+            (0, uniform), (1, read), (7, write), (11, image),
+            (12, image), (13, image), (14, write),
+        ];
         Self {
             weights,
             encode_params: params("neural.guide.params"),
             area_params: params("neural.area.params"),
             late_params: params("neural.late.params"),
+            reflection_params: params("neural.reflection.params"),
             zero: texture(
                 gpu,
                 "neural.incident.empty",
@@ -1044,18 +1060,11 @@ impl Kernels {
                     ],
                 )
             }),
-            recurrent: kernel(
-                "recurrent",
-                &[
-                    (0, uniform),
-                    (1, read),
-                    (7, write),
-                    (11, image),
-                    (12, image),
-                    (13, image),
-                    (14, write),
-                ],
-            ),
+            recurrent: kernel("recurrent", &recurrent_bindings),
+            recurrent_reflection: heads.reflection.then(|| {
+                let output = [(15, storage(Format::Rgba32Float, D::D2))];
+                kernel("recurrent_reflection", &[recurrent_bindings.as_slice(), &output].concat())
+            }),
             reflection: heads.reflection.then(|| {
                 kernel(
                     "reconstruct_reflection",

@@ -149,48 +149,54 @@ fn encode_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
         guides[i].encoded[out] = max(0.0, stem[i][out] + sum);
     }
 }
-fn pair_at(p: vec2<i32>, layer: i32, second: bool) -> vec2<f32> {
-    let sample = textureLoad(pairs, clamp_scene(p), layer, 0);
-    return select(sample.xy, sample.zw, second);
-}
-fn filter_pair(p: vec2<i32>, layer: u32, second: bool, guide: Guide) -> vec2<f32> {
-    let center = pair_at(p, i32(layer), second);
-    let slot = layer * 2u + u32(second);
-    if (control.area_slots & (1u << slot)) == 0u { return center; }
-    let ratio = select(1.0, clamp(center.x / max(center.y, 1e-8), 0.0, 1.0), center.y > 1e-8);
-    var logits: array<f32, 9>;
-    var largest = -3.4e38;
-    for (var tap = 0u; tap < 9u; tap++) {
-        let row = AREA_W + tap * 26u;
-        var sum = weights[AREA_B + tap];
-        for (var c = 0u; c < 12u; c++) {
-            sum = fma(weights[row + c], guide.encoded[c], sum);
-        }
-        for (var c = 0u; c < 12u; c++) {
-            sum = fma(weights[row + 12u + c], guide.warped[c] * guide.gate, sum);
-        }
-        sum = fma(weights[row + 24u], ratio, sum);
-        sum = fma(weights[row + 25u], saturating_log(center.y), sum);
-        logits[tap] = sum;
-        largest = max(largest, sum);
-    }
-    var result = vec2<f32>(0.0);
-    var total = 0.0;
-    for (var tap = 0u; tap < 9u; tap++) {
-        let w = exp(logits[tap] - largest);
-        let q = p + vec2<i32>(i32(tap % 3u), i32(tap / 3u)) - 1;
-        result += w * pair_at(q, i32(layer), second);
-        total += w;
-    }
-    return result / total;
+fn area_ratio(pair: vec2<f32>) -> f32 {
+    return select(1.0, clamp(pair.x / max(pair.y, 1e-8), 0.0, 1.0), pair.y > 1e-8);
 }
 @compute @workgroup_size(8, 8)
 fn reconstruct_area(@builtin(global_invocation_id) id: vec3<u32>) {
     if !inside(id.xy) { return; }
     let p = vec2<i32>(id.xy);
-    let g = guides[index(p)];
-    textureStore(pairs_out, p, i32(id.z),
-        vec4<f32>(filter_pair(p, id.z, false, g), filter_pair(p, id.z, true, g)));
+    let layer = i32(id.z);
+    let slots = (control.area_slots >> (id.z * 2u)) & 3u;
+    let center = textureLoad(pairs, p, layer, 0);
+    if slots == 0u {
+        textureStore(pairs_out, p, layer, center);
+        return;
+    }
+
+    let guide = guides[index(p)];
+    let ratio = vec2<f32>(area_ratio(center.xy), area_ratio(center.zw));
+    let log_weight = vec2<f32>(saturating_log(center.y), saturating_log(center.w));
+    var warped: array<f32, 12>;
+    for (var c = 0u; c < 12u; c++) { warped[c] = guide.warped[c] * guide.gate; }
+    var logits: array<vec2<f32>, 9>;
+    var largest = vec2<f32>(-3.4e38);
+    for (var tap = 0u; tap < 9u; tap++) {
+        let row = AREA_W + tap * 26u;
+        // Both packed slots use the same guide. Only the last two inputs differ.
+        var sum = weights[AREA_B + tap];
+        for (var c = 0u; c < 12u; c++) {
+            sum = fma(weights[row + c], guide.encoded[c], sum);
+        }
+        for (var c = 0u; c < 12u; c++) {
+            sum = fma(weights[row + 12u + c], warped[c], sum);
+        }
+        let pair_sum = fma(vec2<f32>(weights[row + 24u]), ratio, vec2<f32>(sum));
+        logits[tap] = fma(vec2<f32>(weights[row + 25u]), log_weight, pair_sum);
+        largest = max(largest, logits[tap]);
+    }
+    var result = vec4<f32>(0.0);
+    var total = vec2<f32>(0.0);
+    for (var tap = 0u; tap < 9u; tap++) {
+        let w = exp(logits[tap] - largest);
+        let q = p + vec2<i32>(i32(tap % 3u), i32(tap / 3u)) - 1;
+        result += w.xxyy * textureLoad(pairs, clamp_scene(q), layer, 0);
+        total += w;
+    }
+    textureStore(pairs_out, p, layer, vec4<f32>(
+        select(center.xy, result.xy / total.x, (slots & 1u) != 0u),
+        select(center.zw, result.zw / total.y, (slots & 2u) != 0u),
+    ));
 }
 fn recur_dot(row: u32, guide: Guide, late: array<f32, 9>) -> f32 {
     let offset = RECURRENT_W + row * 33u;
@@ -206,32 +212,40 @@ fn recur_dot(row: u32, guide: Guide, late: array<f32, 9>) -> f32 {
     }
     return sum;
 }
-@compute @workgroup_size(8, 8)
-fn recurrent(@builtin(global_invocation_id) id: vec3<u32>) {
-    if !inside(id.xy) { return; }
-    let p = vec2<i32>(id.xy);
+fn hit_at(p: vec2<i32>, confidence: f32) -> vec4<f32> {
+    if control.has_hit_meta != 0u { return textureLoad(hit_meta, p, 0); }
+    return vec4<f32>(1.0, f32(confidence > 0.0), 0.0, 0.0);
+}
+fn update_state(p: vec2<i32>, r: vec4<f32>, hit_info: vec4<f32>) -> array<f32, 12> {
     let i = index(p);
     let g = guides[i];
     let color = textureLoad(hdr, p, 0).rgb;
-    var r = vec4<f32>(0.0);
-    var hit_info = vec4<f32>(0.0);
-    if control.has_reflection != 0u {
-        r = textureLoad(incident, p, 0);
-        if control.has_hit_meta != 0u { hit_info = textureLoad(hit_meta, p, 0); }
-        else { hit_info = vec4<f32>(1.0, f32(r.a > 0.0), 0.0, 0.0); }
-    }
     let reflection_valid = r.a > 0.0 && hit_info.y > 0.5;
     let rgb = select(vec3<f32>(0.0), r.rgb, reflection_valid);
     let late = array<f32, 9>(saturating_log(color.x), saturating_log(color.y),
         saturating_log(color.z), saturating_log(rgb.x), saturating_log(rgb.y),
         saturating_log(rgb.z), f32(reflection_valid), select(0.0, hit_info.x / 4.0, reflection_valid),
         select(0.0, clamp(hit_info.w, 0.0, 32.0) / 32.0, reflection_valid));
-    next[i].geometry = g.geometry;
+    var hidden: array<f32, 12>;
     for (var c = 0u; c < 12u; c++) {
         let candidate = tanh(recur_dot(c, g, late));
         let retain = 1.0 / (1.0 + exp(-recur_dot(c + 12u, g, late)));
-        next[i].hidden[c] = mix(candidate, g.warped[c], retain * g.gate);
+        hidden[c] = mix(candidate, g.warped[c], retain * g.gate);
     }
+    next[i] = State(hidden, g.geometry);
+    return hidden;
+}
+@compute @workgroup_size(8, 8)
+fn recurrent(@builtin(global_invocation_id) id: vec3<u32>) {
+    if !inside(id.xy) { return; }
+    let p = vec2<i32>(id.xy);
+    var r = vec4<f32>(0.0);
+    var hit_info = vec4<f32>(0.0);
+    if control.has_reflection != 0u {
+        r = textureLoad(incident, p, 0);
+        hit_info = hit_at(p, r.a);
+    }
+    _ = update_state(p, r, hit_info);
 }
 fn project(hidden: array<f32, 12>, start: u32, bias: u32, row: u32) -> f32 {
     var sum = weights[bias + row];
@@ -248,19 +262,28 @@ fn reflection_residual(original: vec3<f32>, hidden: array<f32, 12>) -> vec3<f32>
     }
     return result;
 }
+fn write_reflection(p: vec2<i32>, original: vec4<f32>, hit: vec4<f32>, hidden: array<f32, 12>) {
+    var value = original;
+    if control.has_hit_meta != 0u && original.a > 0.0 && hit.x == 1.0 && hit.y > 0.5 {
+        value = vec4<f32>(reflection_residual(original.rgb, hidden), original.a);
+    }
+    textureStore(incident_out, p, value);
+}
+@compute @workgroup_size(8, 8)
+fn recurrent_reflection(@builtin(global_invocation_id) id: vec3<u32>) {
+    if !inside(id.xy) { return; }
+    let p = vec2<i32>(id.xy);
+    let original = textureLoad(incident, p, 0);
+    let hit = hit_at(p, original.a);
+    let hidden = update_state(p, original, hit);
+    write_reflection(p, original, hit, hidden);
+}
 @compute @workgroup_size(8, 8)
 fn reconstruct_reflection(@builtin(global_invocation_id) id: vec3<u32>) {
     if !inside(id.xy) { return; }
     let p = vec2<i32>(id.xy);
     let original = textureLoad(incident, p, 0);
-    var value = original;
-    if control.has_hit_meta != 0u && original.a > 0.0 {
-        let hit = textureLoad(hit_meta, p, 0);
-        if hit.x == 1.0 && hit.y > 0.5 {
-            value = vec4<f32>(reflection_residual(original.rgb, next[index(p)].hidden), original.a);
-        }
-    }
-    textureStore(incident_out, p, value);
+    write_reflection(p, original, hit_at(p, original.a), next[index(p)].hidden);
 }
 @compute @workgroup_size(8, 8)
 fn sr_head(@builtin(global_invocation_id) id: vec3<u32>) {
