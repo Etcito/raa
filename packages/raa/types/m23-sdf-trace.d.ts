@@ -129,6 +129,8 @@ export interface Engine {
     reflectionIncident?: Uint8Array;
     reflectionReconstruction?: Uint8Array;
     compositeHdr?: Uint8Array;
+    /** Scene-linear output on the resolve grid, when the graph publishes a TAA/SR output. */
+    resolvedHdr?: Uint8Array;
     /** Packed weighted pairs for stochastic slots zero and one, RGBA16F. */
     areaPairs?: Uint8Array;
     areaReconstruction?: Uint8Array;

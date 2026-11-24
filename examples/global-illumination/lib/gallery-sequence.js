@@ -344,6 +344,60 @@ export async function captureGallerySequence({ target, canvas, raa }, { buildId,
     sequences }, files };
 }
 
+export async function captureGallerySrReplay({ target, canvas, raa }, { buildId, trajectory } = {}) {
+  if (!buildId || !/Windows.+Chrome\//.test(target.navigator.userAgent)) {
+    throw new Error('An actual Windows Chrome GPU is required for SR replay');
+  }
+  const { id, partition, heldout, replay, groupId } = jointTrajectory(trajectory);
+  const replaySha256 = await digest(new TextEncoder().encode(JSON.stringify(replay)));
+  const sequences = [], files = [];
+  const guideGraph = await reflectionGraph();
+  let facts, weightsSha256;
+  for (const arm of ['analytic', 'joint']) {
+    const view = await create(target, raa, canvas, displaySize, heldout, false, guideGraph);
+    const { engine } = view;
+    try {
+      facts = view.facts;
+      const model = await loadGalleryNeural(engine);
+      if (!model?.manifest || !['area', 'reflection', 'display'].every(head =>
+        model.manifest.trainedHeads.includes(head))) throw new Error('SR replay needs an installed joint model package');
+      weightsSha256 = model.manifest.weightsSha256;
+      const selected = engine.setRenderGraphSelection(model.graph, undefined, ...sceneSize);
+      if (!selected.ok) throw new Error('SR replay graph refused: ' + JSON.stringify(selected.issues));
+      engine.setNeuralReconstruction(arm === 'joint'
+        ? { model: model.id, area: true, reflection: true, sr: true } : null);
+      view.apply(replay[0]);
+      await warmSequence(engine, replay[0].timeMs);
+      const frames = [];
+      for (const [i, frame] of replay.entries()) {
+        view.apply(frame, replay[i - 1]);
+        const real = engine.renderInstrumented(frame.timeMs, {
+          viewId: 'primary', trialId: id + '-' + arm, presentId: id + '-' + arm + '-' + i,
+          inputCutoffMs: target.performance.now(),
+        });
+        if (real.error || !Number.isInteger(real.frameIndex)) throw new Error('SR replay real submission failed');
+        const dispatch = engine.neuralReconstructionStats();
+        if (arm === 'joint'
+          ? !dispatch?.ran.area || !dispatch.ran.reflection || !dispatch.ran.sr
+            || dispatch.realFrame !== real.frameIndex || dispatch.weightsSha256 !== weightsSha256
+          : dispatch !== null) {
+          throw new Error('SR replay actual dispatch differs from the requested mode: ' + JSON.stringify(dispatch));
+        }
+        const taps = await engine.captureTrainingTaps(real.frameIndex, true);
+        const frameId = id + '-' + String(i).padStart(2, '0');
+        const plane = await save(files, frameId, arm + 'resolved', displaySize, hdrRgb(taps.resolvedHdr, displaySize));
+        frames.push({ id: frameId, frameId: real.frameIndex, arm, timeMs: frame.timeMs, event: frame.event,
+          jitterNdc: taps.jitterNdc, dispatch, planes: { resolved: plane } });
+      }
+      sequences.push({ id, split: partition, groupId, arm, sceneSize, displaySize, replaySha256, frames });
+    } finally {
+      engine.dispose();
+    }
+  }
+  return { json: { format: 'raa.gallery-sr-resolved-replay/1', source: { buildId, facts },
+    rowOrder: 'top-down', colorSpace: 'scene-linear', exposure: 1, weightsSha256, sequences }, files };
+}
+
 export async function verifyGalleryReflection({ target, canvas, raa }, { buildId } = {}) {
   if (!/Windows.+Chrome\//.test(target.navigator.userAgent) || !buildId) throw new Error('Windows Chrome build required');
   const student = await create(target, raa, canvas, sceneSize, false, false, await reflectionGraph());

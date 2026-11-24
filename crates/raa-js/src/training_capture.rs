@@ -97,6 +97,12 @@ impl Engine {
             {
                 return Err(invalid("scene-aligned training tap extents differ"));
             }
+            if include_composite.unwrap_or(false)
+                && let Some(image) = resources.get("taa", "color")
+            {
+                // This only exists when the graph resolves a display-sized linear surface.
+                textures.push(("resolvedHdr", image.view.texture().clone()));
+            }
             Ok((textures, st.lit.handle().camera_jitter_ndc()))
         })?;
         let output = Object::new();

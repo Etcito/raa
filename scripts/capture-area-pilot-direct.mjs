@@ -17,7 +17,8 @@ const spherical = op === 'gallery-spherical';
 const mirror = op === 'gallery-mirror';
 const rayBudget = op === 'gallery-ray-budget';
 const raySelection = rayBudget ? /^(area|reflection):(joint-(?:development|final-[ab]))(?::(\d+))?$/.exec(comparison) : null;
-const sequence = op === 'gallery-sequence';
+const srReplay = op === 'gallery-sr-replay';
+const sequence = op === 'gallery-sequence' || srReplay;
 const srTiming = op === 'gallery-sr-timing';
 const jointTrajectory = sequence && comparison.startsWith('joint-') ? comparison : undefined;
 const predictionDataset = op === 'prediction' && comparison === 'dataset';
@@ -32,8 +33,8 @@ if (rayBudget && (!headful || !raySelection)) {
 }
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
     || flags.some(flag => flag !== '--headful')
-    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-sr-timing', 'gallery-reflection-model', 'gallery-ray-budget', 'gallery-mirror'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-sr-timing|gallery-reflection-model|gallery-ray-budget|gallery-mirror] [baseline|fixed|live|live-ui|train|test|both|reflection|joint-train-a|joint-train-b|joint-train-c|joint-development|joint-final-a|joint-final-b|sr|joint|dataset|learned|coverage|sharp|priority] [--headful]');
+    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-sr-replay', 'gallery-sr-timing', 'gallery-reflection-model', 'gallery-ray-budget', 'gallery-mirror'].includes(op)) {
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-sr-replay|gallery-sr-timing|gallery-reflection-model|gallery-ray-budget|gallery-mirror] [baseline|fixed|live|live-ui|train|test|both|reflection|joint-train-a|joint-train-b|joint-train-c|joint-development|joint-final-a|joint-final-b|sr|joint|dataset|learned|coverage|sharp|priority] [--headful]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
