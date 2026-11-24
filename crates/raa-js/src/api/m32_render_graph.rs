@@ -24,6 +24,7 @@ pub(crate) struct RenderGraphState {
     pub(crate) catalog: Catalog,
     pub(crate) explicit_scene_size: Option<(u32, u32)>,
     pub(crate) frozen_name: Option<String>,
+    pub(crate) area_model: Option<String>,
     models: std::collections::BTreeMap<String, raa_graph::learned::AreaPilotPackage>,
     /// The issues of the latest `setRenderGraph` that did not throw: a parse refusal, the executor's
     /// `SetResult.issues`, or empty after `null`.
@@ -127,7 +128,7 @@ pub(crate) mod web {
     use raa_gi::GiHandle;
     use raa_grading::GradingHandle;
     use raa_graph::catalog::{NodeTypeSpec, ParamValue};
-    use raa_graph::exec::{FeatureHandles, HandleSet};
+    use raa_graph::exec::{AreaGraphModel, FeatureHandles, HandleSet};
     use raa_graph::format::{GraphDoc, graph_from_json_value, graph_to_json_value, parse_graph};
     use raa_graph::validate::{GraphLimits, ValidateCtx};
     use raa_gtao::GtaoHandle;
@@ -149,6 +150,7 @@ pub(crate) mod web {
             catalog: Catalog::build(),
             explicit_scene_size: None,
             frozen_name: None,
+            area_model: None,
             models: Default::default(),
             last_set_issues: Vec::new(),
         });
@@ -322,6 +324,7 @@ pub(crate) mod web {
         gpu: &GpuContext,
         st: &mut EngineState,
         graph: &JsValue,
+        area_model: Option<AreaGraphModel>,
     ) -> Result<SetResult, RaaError> {
         Ok(match graph_argument(graph)? {
             GraphArgument::Clear => {
@@ -350,7 +353,7 @@ pub(crate) mod web {
                         viewports,
                         engine_options: &engine_options,
                     };
-                    executor.set_graph(doc, &ctx, h)
+                    executor.set_graph_with_area_model(doc, &ctx, h, area_model)
                 })?
             }
         })
@@ -361,6 +364,7 @@ pub(crate) mod web {
         result: SetResult,
         scene_size: Option<(u32, u32)>,
         frozen_name: Option<String>,
+        area_model: Option<String>,
     ) -> Result<JsValue, RaaError> {
         let json = result_to_json(&result);
         let state = st
@@ -373,6 +377,7 @@ pub(crate) mod web {
                 state.explicit_scene_size = scene_size;
             }
             state.frozen_name = frozen_name;
+            state.area_model = area_model;
         }
         state.last_set_issues = result.issues;
         Ok(json_to_js(&json))
@@ -429,8 +434,8 @@ pub(crate) mod web {
         pub fn set_render_graph(&mut self, graph: JsValue) -> Result<JsValue, JsValue> {
             self.with_state(|gpu, st| {
                 check_pipeline_available(st)?;
-                let result = apply_render_graph(gpu, st, &graph)?;
-                finish_selection(st, result, None, None)
+                let result = apply_render_graph(gpu, st, &graph, None)?;
+                finish_selection(st, result, None, None, None)
             })
         }
 
@@ -469,6 +474,7 @@ pub(crate) mod web {
             scene_height: Option<f64>,
             area_model: Option<String>,
         ) -> Result<JsValue, JsValue> {
+            let viewport = self.viewport;
             self.with_state(|gpu, st| {
                 let limit = gpu.device().limits().max_texture_dimension_2d;
                 let dimension = |n: f64| n.fract() == 0.0 && n >= 1.0 && n <= f64::from(limit);
@@ -478,34 +484,40 @@ pub(crate) mod web {
                     _ => return Err(api_error(INVALID_ARGUMENT, "scene extent needs two positive integer dimensions within device limits")),
                 };
                 let clear = graph.is_null() || graph.is_undefined();
-                if frozen.is_some() && !clear || frozen.is_none() && clear && size.is_some() {
-                    return Err(api_error(INVALID_ARGUMENT, "specify one graph when selecting a frozen graph or an explicit scene extent"));
+                if frozen.is_some() && !clear || frozen.is_none() && clear && (size.is_some() || area_model.is_some()) {
+                    return Err(api_error(INVALID_ARGUMENT, "specify one graph when selecting a frozen graph, a model, or an explicit scene extent"));
                 }
-                let result = if let Some(model) = area_model {
-                    if graph_state(st)?.models.contains_key(&model) {
-                        refusal("graph.model_unavailable", "this build has no graph consumer for the area model",
-                            "Select the graph without an area model.")
-                    } else {
-                        refusal("graph.model_unknown", "the selected area model is not registered",
-                            "Register the model package on this engine before selecting it.")
-                    }
-                } else if (frozen.is_some() || !clear) && viewport_count(st) > 1 {
+                let package = match &area_model {
+                    Some(name) => match graph_state(st)?.models.get(name) {
+                        Some(package) => Some(package.clone()),
+                        None => return finish_selection(st,
+                            refusal("graph.model_unknown", "the selected area model is not registered",
+                                "Register the model package on this engine before selecting it."),
+                            size, frozen, area_model),
+                    },
+                    None => None,
+                };
+                let single_full_view = size.is_some() || package.is_some();
+                let result = if (frozen.is_some() || !clear) && viewport_count(st) > 1 {
                     refusal("graph.multi_view", "render graph selection drives one view",
                         "Turn off the extra viewports before selecting a graph.")
-                } else if size.is_some() && st.features.get::<ViewsState>().is_some_and(|v| v.viewports() != [ViewRect::FULL]) {
-                    refusal("graph.multi_view", "explicit scene extent requires a full-canvas viewport",
-                        "Restore the full-canvas viewport before selecting an explicit scene extent.")
+                } else if single_full_view && st.features.get::<ViewsState>().is_some_and(|v| v.viewports() != [ViewRect::FULL]) {
+                    refusal("graph.multi_view", "scene extent and area model selection require a full-canvas viewport",
+                        "Restore the full-canvas viewport before selecting this graph.")
                 } else if size.is_some() && st.features.get::<ViewsState>().is_some_and(|v| v.render_scale() != 1.0) {
                     refusal("graph.scale_conflict", "explicit scene extent requires legacy render scale 1",
                         "Set legacy render scale to 1 before selecting an explicit scene extent.")
                 } else {
                     check_pipeline_available(st)?;
+                    let model = package.map(|package| AreaGraphModel {
+                        package, scene_size: size.unwrap_or(viewport),
+                    });
                     match &frozen {
-                        Some(name) => super::super::m33_frozen_render_graph::web::apply_frozen(name, gpu, st)?,
-                        None => apply_render_graph(gpu, st, &graph)?,
+                        Some(name) => super::super::m33_frozen_render_graph::web::apply_frozen(name, gpu, st, model)?,
+                        None => apply_render_graph(gpu, st, &graph, model)?,
                     }
                 };
-                finish_selection(st, result, size, frozen)
+                finish_selection(st, result, size, frozen, area_model)
             })
         }
 
@@ -527,6 +539,13 @@ pub(crate) mod web {
                 Ok(json_to_js(&JsonValue::Object(vec![
                     ("frozen".into(), frozen),
                     ("sceneSize".into(), size),
+                    (
+                        "areaModel".into(),
+                        state
+                            .area_model
+                            .clone()
+                            .map_or(JsonValue::Null, JsonValue::String),
+                    ),
                 ])))
             })
         }

@@ -382,9 +382,20 @@ impl GiHandle {
     /// Stores the camera with its aspect set from `viewport`, the viewport and the number of
     /// submitted views.
     pub fn set_view(&self, camera: &Camera, viewport: (u32, u32), submitted_views: u8) {
+        let mut camera = *camera;
+        camera.set_viewport(viewport.0, viewport.1);
+        self.set_view_with_projection(&camera, viewport, submitted_views);
+    }
+
+    /// Stores the scene grid while keeping the projection that drew its G-buffer.
+    pub fn set_view_with_projection(
+        &self,
+        camera: &Camera,
+        viewport: (u32, u32),
+        submitted_views: u8,
+    ) {
         let mut core = self.core.borrow_mut();
         core.camera = *camera;
-        core.camera.set_viewport(viewport.0, viewport.1);
         core.viewport = viewport;
         core.submitted_views = submitted_views;
     }

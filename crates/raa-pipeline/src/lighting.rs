@@ -1371,6 +1371,18 @@ impl LightingResources {
         &self.state.local_lights
     }
 
+    /// The world-space record corresponding to a dense light index in the slot table.
+    pub fn local_light_record(&self, index: u32) -> Option<&[u8; LIGHT_GPU_SIZE]> {
+        let index = usize::try_from(index).ok()?;
+        if index >= MAX_LOCAL_LIGHTS {
+            return None;
+        }
+        let start = index * LIGHT_GPU_SIZE;
+        self.state.local_lights[start..start + LIGHT_GPU_SIZE]
+            .try_into()
+            .ok()
+    }
+
     /// The 16384-byte local-lights uniform (group 1 binding 12).
     pub fn local_lights_buffer(&self) -> &wgpu::Buffer {
         &self.light_buffer

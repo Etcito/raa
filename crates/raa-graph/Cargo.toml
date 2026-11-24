@@ -10,6 +10,7 @@ description = "Render graph: document format, node catalog, validation, planning
 name = "raa_graph"
 
 [build-dependencies]
+naga = { workspace = true }
 raa-loader = { path = "../raa-loader" }
 
 [dependencies]

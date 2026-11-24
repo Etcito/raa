@@ -23,6 +23,7 @@ const ENTRIES: [&str; 6] = [
     "head",
 ];
 
+#[derive(Clone)]
 pub struct AreaPilotPackage(Cow<'static, [u8]>);
 
 fn hash(bytes: &[u8]) -> String {
@@ -113,7 +114,7 @@ impl AreaPilotRect {
         }
     }
 
-    fn workgroups(self) -> [u32; 2] {
+    pub(crate) fn workgroups(self) -> [u32; 2] {
         self.extent.map(|n| n.div_ceil(WORKGROUP))
     }
 
@@ -212,12 +213,25 @@ impl AreaPilot {
         rect: AreaPilotRect,
         package: AreaPilotPackage,
     ) -> Result<Self, RaaError> {
+        let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let pilot = Self::prepare_graph(gpu, rect, &package);
+        if let Some(error) = scope.pop().await {
+            return Err(refuse(&error.to_string()));
+        }
+        pilot
+    }
+
+    /// The graph uses the built-in shader and validates layout and extents before allocation.
+    pub(crate) fn prepare_graph(
+        gpu: &GpuContext,
+        rect: AreaPilotRect,
+        package: &AreaPilotPackage,
+    ) -> Result<Self, RaaError> {
         gpu.ensure_live()?;
         gpu.check_compute_limits(|limits| rect.check_limits(limits).map(|_| ()))?;
         let memory = rect.check_limits(&gpu.limits())?;
         let device = gpu.device();
         let queue = gpu.queue();
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let weights = buffer(device, memory.weights, Usage::STORAGE | Usage::COPY_DST);
         queue.write_buffer(&weights, 0, &package.0);
         let input = buffer(device, memory.io, Usage::STORAGE | Usage::COPY_DST);
@@ -281,9 +295,6 @@ impl AreaPilot {
                 ),
             })
             .collect::<Vec<_>>();
-        if let Some(error) = scope.pop().await {
-            return Err(refuse(&error.to_string()));
-        }
         Ok(Self {
             rect,
             memory,
@@ -303,6 +314,10 @@ impl AreaPilot {
     pub fn publish(&self, table: &ResourceTable, entry: &str) {
         table.publish_buffer(entry, "weights", &self.weights, self.memory.weights);
         table.publish_buffer(entry, "output", &self.output, self.memory.io);
+    }
+
+    pub(crate) fn input(&self) -> &wgpu::Buffer {
+        &self.input
     }
 
     pub fn output(&self) -> &wgpu::Buffer {

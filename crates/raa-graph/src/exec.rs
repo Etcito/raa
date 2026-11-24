@@ -8,7 +8,7 @@ mod settings;
 mod settings_post;
 
 pub use executor::{
-    GraphExecutor, adopt_pipeline, external_changes, pipeline_differs, settings_targets,
+    AreaGraphModel, GraphExecutor, adopt_pipeline, external_changes, pipeline_differs, settings_targets,
 };
 pub use export::export_snapshot;
 pub use settings::{

@@ -310,6 +310,7 @@ export interface RenderGraphCatalog {
 export interface RenderGraphSelectionState {
   frozen: string | null;
   sceneSize: [width: number, height: number] | null;
+  areaModel: string | null;
 }
 
 /**
@@ -334,7 +335,9 @@ export interface Engine {
   /**
    * Selects an editable graph, a frozen graph (pass null as graph), or the engine default.
    * Optional scene dimensions must be supplied together. A refused selection keeps the
-   * previous graph and extent. Package selection requires a graph consumer for that ABI.
+   * previous graph, extent, and model. An area model requires a hardware adapter and a
+   * full-canvas view with area.trace.raw linked directly to area.mask.src and that mask
+   * feeding forward.areaShadow. Select the graph without a model to use raw visibility.
    */
   setRenderGraphSelection(
     graph: RenderGraphDoc | string | null,

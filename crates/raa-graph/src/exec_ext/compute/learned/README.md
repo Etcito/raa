@@ -4,6 +4,17 @@ The pilot runs on the renderer's existing `GpuContext`. Each view can own a defa
 
 The manifest specifies NHWC input order and normalization multipliers. An input occupies the full scene grid. The active rectangle sets both dispatch and spatial gather bounds. The shader produces twelve FP32 values per pixel in the same layout. The first nine are normalized spatial weights, followed by the hard-masked history gate, confidence and resolved visibility. Confidence is exposed independently. The spatial filter and temporal blend apply the same coefficients to S and U before division.
 
+For a live graph, use the **Area inference pilot** starter or wire a stratified
+`area.trace.raw → area.mask.src → forward.areaShadow` branch with the light tiles
+pass enabled. Register a package with `registerAreaRenderModel` and pass its name
+to `setRenderGraphSelection`. The same graph without a model resolves raw pairs.
+The graph runs the FP32 pilot once per occupied slot, and the mask publishes its
+result with the existing slot table. The bridge keeps previous raw pairs and
+depth from submitted real frames and rejects history across camera discontinuities,
+changed light records, changed slot generations, and invalid reprojection.
+A resize beyond the model's buffer limits falls back to the raw pairs for that
+extent. ReSTIR and other graph routes keep their own processing.
+
 Run the following commands from the RAA checkout on Windows with Kong's Cargo environment and a hardware adapter.
 
 ```sh

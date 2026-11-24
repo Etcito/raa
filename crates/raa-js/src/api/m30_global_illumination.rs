@@ -455,9 +455,13 @@ mod web {
             return Ok(());
         };
         let camera = st.scene.camera;
-        let viewport = viewport0(st, input);
         let submitted = submitted_views(st);
-        gi.set_view(&camera, viewport, submitted);
+        let graph = crate::api::m32_render_graph::web::graph_state(st)?;
+        if let Some(scene_size) = graph.explicit_scene_size {
+            gi.set_view_with_projection(&camera, scene_size, submitted);
+        } else {
+            gi.set_view(&camera, viewport0(st, input), submitted);
+        }
         gi.set_sun(&st.scene.light);
         gi.set_local_light_count(st.lit.local_lights().active_count());
         if st.scene_invocation.is_discontinuous(0) {

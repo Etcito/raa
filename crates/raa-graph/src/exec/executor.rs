@@ -3,8 +3,14 @@
 //! a change is refused or the graph is cleared. `settings_targets` and `external_changes` are the
 //! device-free helpers that the executor and its tests share.
 
+#[path = "area_model.rs"]
+mod area_model;
+
+pub use area_model::AreaGraphModel;
+use area_model::{AreaModelFrame, SharedAreaFrame};
 use raa_core::RaaError;
 use raa_pipeline::{PassInfo, PassRole, Pipeline};
+use std::{cell::RefCell, rc::Rc};
 
 use super::{
     AppliedDescs, ExecExtension, FeatureHandles, NodeStats, SetResult, SettingsSnapshot,
@@ -61,6 +67,7 @@ pub struct GraphExecutor {
     /// The index of the latest frame of the active graph; `None` before one.
     frame: Option<u64>,
     last_issues: Vec<Issue>,
+    area_model: Option<Rc<RefCell<AreaModelFrame>>>,
 }
 
 impl Default for GraphExecutor {
@@ -84,6 +91,7 @@ impl GraphExecutor {
             scratch: Vec::new(),
             frame: None,
             last_issues: Vec::new(),
+            area_model: None,
         }
     }
 
@@ -96,6 +104,16 @@ impl GraphExecutor {
         ctx: &ValidateCtx<'_>,
         h: &mut FeatureHandles<'_>,
     ) -> SetResult {
+        self.set_graph_with_area_model(doc, ctx, h, None)
+    }
+
+    pub fn set_graph_with_area_model(
+        &mut self,
+        doc: GraphDoc,
+        ctx: &ValidateCtx<'_>,
+        h: &mut FeatureHandles<'_>,
+        model: Option<AreaGraphModel>,
+    ) -> SetResult {
         match plan_from_doc(&doc, ctx) {
             Err(issues) => {
                 self.last_issues.clone_from(&issues);
@@ -107,7 +125,7 @@ impl GraphExecutor {
             }
             Ok((plan, warnings)) => {
                 let canonical = canonical_doc(&doc, &self.catalog);
-                let mut result = self.set_plan(plan, Some(canonical), h);
+                let mut result = self.set_plan_with_area_model(plan, Some(canonical), h, model);
                 result.issues.extend(warnings);
                 self.last_issues.clone_from(&result.issues);
                 result
@@ -124,9 +142,64 @@ impl GraphExecutor {
         doc: Option<GraphDoc>,
         h: &mut FeatureHandles<'_>,
     ) -> SetResult {
-        let result = self.activate(plan, doc, h);
+        self.set_plan_with_area_model(plan, doc, h, None)
+    }
+
+    pub fn set_plan_with_area_model(
+        &mut self,
+        plan: GraphPlan,
+        doc: Option<GraphDoc>,
+        h: &mut FeatureHandles<'_>,
+        model: Option<AreaGraphModel>,
+    ) -> SetResult {
+        let result = self.activate_with_area_model(plan, doc, h, model);
         self.last_issues.clone_from(&result.issues);
         result
+    }
+
+    fn activate_with_area_model(
+        &mut self,
+        plan: GraphPlan,
+        doc: Option<GraphDoc>,
+        h: &mut FeatureHandles<'_>,
+        model: Option<AreaGraphModel>,
+    ) -> SetResult {
+        const FRAME: &str = "area_model";
+        let candidate = match model
+            .map(|model| AreaModelFrame::prepare(model, &plan, h))
+            .transpose()
+        {
+            Ok(candidate) => candidate.map(|frame| Rc::new(RefCell::new(frame))),
+            Err(issue) => return area_model::refused(issue),
+        };
+        if let Some(frame) = &candidate
+            && self.area_model.is_none()
+            && let Err(error) = h
+                .pipeline
+                .borrow_mut()
+                .add_graph_frame(FRAME, Box::new(SharedAreaFrame(frame.clone())))
+        {
+            return area_model::refused(area_model::issue("graph.model_device", error.to_string()));
+        }
+        let result = self.activate(plan, doc, h);
+        match (result.ok, candidate, &self.area_model) {
+            (true, Some(candidate), Some(active)) => {
+                std::mem::swap(&mut *active.borrow_mut(), &mut *candidate.borrow_mut());
+            }
+            (true, Some(candidate), None) => self.area_model = Some(candidate),
+            (true, None, Some(_)) => self.clear_area_model(h),
+            (false, Some(_), None) => {
+                h.pipeline.borrow_mut().remove_graph_frame(FRAME);
+            }
+            _ => {}
+        }
+        result
+    }
+
+    fn clear_area_model(&mut self, h: &mut FeatureHandles<'_>) {
+        if self.area_model.take().is_some() {
+            h.pipeline.borrow_mut().remove_graph_frame("area_model");
+        }
     }
 
     /// Clears every extension, then restores the no-graph configuration (pipeline enable and order,
@@ -139,6 +212,7 @@ impl GraphExecutor {
         if let Some(no_graph) = &self.no_graph {
             restore(no_graph, h)?;
         }
+        self.clear_area_model(h);
         self.no_graph = None;
         self.doc = None;
         self.plan = None;

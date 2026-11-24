@@ -687,14 +687,13 @@ mod web {
         pub fn set_viewports(&mut self, rects: JsValue) -> Result<(), JsValue> {
             self.with_state(|_, st| {
                 let rects = rects_from_js(&rects)?;
+                let graph = crate::api::m32_render_graph::web::graph_state(st)?;
                 if rects != [ViewRect::FULL]
-                    && crate::api::m32_render_graph::web::graph_state(st)?
-                        .explicit_scene_size
-                        .is_some()
+                    && (graph.explicit_scene_size.is_some() || graph.area_model.is_some())
                 {
                     return Err(api_error(
                         "graph.multi_view",
-                        "explicit scene extent requires a full-canvas viewport",
+                        "explicit scene extent and area model selection require a full-canvas viewport",
                     ));
                 }
                 let previous = views(st)?.viewports().to_vec();

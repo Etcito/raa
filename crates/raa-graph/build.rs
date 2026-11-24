@@ -16,6 +16,21 @@ const RUST_DIRS: [&str; 3] = ["src/nodes", "src/exec_ext", "src/frozen"];
 const JSON_DIRS: [&str; 2] = ["graphs", "presets"];
 
 fn main() {
+    for path in [
+        "src/exec/area_model.wgsl",
+        "src/exec_ext/compute/learned/pilot.wgsl",
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+        let source = fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|error| panic!("{path}: {}", error.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("{path}: {error:?}"));
+    }
     println!("cargo:rerun-if-changed=build.rs");
     for dir in RUST_DIRS.iter().chain(JSON_DIRS.iter()) {
         println!("cargo:rerun-if-changed={dir}");

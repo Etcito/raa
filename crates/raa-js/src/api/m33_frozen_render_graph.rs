@@ -111,7 +111,7 @@ pub(crate) mod web {
     use crate::engine::{Engine, InstallCtx};
     use crate::state::EngineState;
     use raa_core::{GpuContext, RaaError};
-    use raa_graph::exec::SetResult;
+    use raa_graph::exec::{AreaGraphModel, SetResult};
     use raa_web::FrameInput;
     use wasm_bindgen::JsValue;
     use wasm_bindgen::prelude::wasm_bindgen;
@@ -137,6 +137,7 @@ pub(crate) mod web {
         name: &str,
         gpu: &GpuContext,
         st: &mut EngineState,
+        model: Option<AreaGraphModel>,
     ) -> Result<SetResult, RaaError> {
         with_handles(
             st,
@@ -147,7 +148,12 @@ pub(crate) mod web {
                     issues,
                     rebuilt: 0,
                 },
-                Ok(selection) => executor.set_plan(selection.plan, Some(selection.doc), handles),
+                Ok(selection) => executor.set_plan_with_area_model(
+                    selection.plan,
+                    Some(selection.doc),
+                    handles,
+                    model,
+                ),
             },
         )
     }
@@ -168,8 +174,8 @@ pub(crate) mod web {
                     )
                 })?;
                 check_pipeline_available(st)?;
-                let result = apply_frozen(&name, gpu, st)?;
-                finish_selection(st, result, None, Some(name))
+                let result = apply_frozen(&name, gpu, st, None)?;
+                finish_selection(st, result, None, Some(name), None)
             })
         }
     }
