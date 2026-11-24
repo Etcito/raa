@@ -153,6 +153,7 @@ pub struct MeshTraceStats {
 #[derive(Default)]
 pub struct MeshTraceScene {
     pub settings: MeshTraceSettings,
+    reference_sample: Option<(u32, u32)>,
     path: hybrid::PathState,
     geometry: Geometry,
     gpu_geometry: Option<pass::GeometryBuffers>,
@@ -168,6 +169,11 @@ pub struct MeshTraceScene {
 }
 
 impl MeshTraceScene {
+    /// Seed and sample count for an explicitly requested offline reference invocation.
+    pub fn set_reference_sample(&mut self, sample: Option<(u32, u32)>) {
+        self.reference_sample = sample;
+    }
+
     pub fn set_path_model(&mut self, bytes: &[u8]) -> Result<(), RaaError> {
         self.path.load(bytes)?;
         self.epoch = self.epoch.wrapping_add(1);

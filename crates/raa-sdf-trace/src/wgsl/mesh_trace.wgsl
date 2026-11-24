@@ -559,7 +559,7 @@ fn trace_mesh(@builtin(global_invocation_id) id: vec3<u32>) {
         var value = vec3<f32>(0.0);
         var terminal: TerminalDiffuse;
         let diffuse_output = options[2].z;
-        if diffuse_output != 0u { seed ^= options[2].w * 277803737u; }
+        if diffuse_output != 0u || options[3].z != 0u { seed ^= options[2].w * 277803737u; }
         let mirrors = select(0u, options[0].y, options[1].y != 0u);
         for (var i = 0u; i < options[1].w; i++) {
             let subpixel = (vec2<f32>(random(&seed), random(&seed)) - 0.5) / vec2<f32>(size);

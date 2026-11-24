@@ -8,6 +8,7 @@
     "gallery-path-measure",
     "gallery-path-diffuse",
     "gallery-panel-noise",
-    "gallery-spherical"
+    "gallery-spherical",
+    "gallery-sequence"
   ]
 }

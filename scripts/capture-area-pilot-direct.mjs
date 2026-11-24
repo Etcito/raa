@@ -13,10 +13,11 @@ const op = mode === '--prediction' ? 'prediction' : mode;
 const capture = op === 'area-pilot' || op === 'gallery-path-capture';
 const gallery = op.startsWith('gallery-');
 const spherical = op === 'gallery-spherical';
+const sequence = op === 'gallery-sequence';
 const liveSpherical = spherical && comparison === 'live';
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
-    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical] [baseline|fixed|live]');
+    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence'].includes(op)) {
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence] [baseline|fixed|live|train|test|both]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
@@ -141,7 +142,10 @@ try {
   }
   console.log(`Windows ${version.Browser}: ${renderer}; WebGPU ${JSON.stringify(webgpu)}`);
   const result = liveSpherical ? null : await evalPage(`(async () => {
-    const result = await window.nmcGpu.ops[${JSON.stringify(op)}](${JSON.stringify({ buildId: receipt.buildId, remainingMs: 280000, requireFixed: comparison !== 'baseline' })});
+    const result = await window.nmcGpu.ops[${JSON.stringify(op)}](${JSON.stringify({
+      buildId: receipt.buildId, remainingMs: 280000, requireFixed: comparison !== 'baseline',
+      ...(sequence && { split: comparison === 'fixed' ? 'both' : comparison }),
+    })});
     const files = await Promise.all(result.files.map(async ({ name, blob, base64 }) => {
       if (base64) return { name, base64 };
       const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -152,7 +156,7 @@ try {
     return { json: result.json, files };
   })()`, 300000);
   const ui = spherical ? await evalPage(`import('/lib/gallery-spherical-evidence.js').then(module => module.verifyGallerySphericalUi())`, 120000) : null;
-  if (spherical && browserErrors.length) throw new Error(browserErrors.join('\n'));
+  if ((spherical || sequence) && browserErrors.length) throw new Error(browserErrors.join('\n'));
   const windows = { browser: version.Browser, renderer, device: nvidia, webgpu };
   if (liveSpherical) {
     await mkdir(path.dirname(output), { recursive: true });
@@ -203,6 +207,20 @@ try {
         row.sha256 = createHash('sha256').update(bytes).digest('hex');
         await writeFile(path.join(output, row.file), bytes, { flag: 'wx' });
       }
+    } else if (sequence) {
+      for (const clip of data.sequences) {
+        for (const frame of clip.frames) {
+          for (const record of Object.values(frame.planes)) {
+            const bytes = files.get(record.file);
+            if (!/^[a-z0-9-]+\.bin$/.test(record.file) || record.dtype !== 'f32le' || !bytes
+                || bytes.length !== record.byteLength || bytes.length !== record.shape.reduce((a, b) => a * b, 4)
+                || createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
+              throw new Error(`Sequence plane length or hash mismatch: ${record.file}`);
+            }
+            await writeFile(path.join(output, record.file), bytes, { flag: 'wx' });
+          }
+        }
+      }
     } else if (spherical) {
       for (const record of data.captures) {
         const bytes = files.get(record.file);
@@ -217,7 +235,7 @@ try {
       ...(gallery ? data.source : {}), revision: receipt.inputs.revision,
       receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'),
     };
-    const manifest = path.join(output, op === 'prediction' ? 'prediction.json' : capture ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
+    const manifest = path.join(output, op === 'prediction' ? 'prediction.json' : capture || sequence ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
       : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : 'measurement.json');
     await writeFile(manifest, JSON.stringify({ ...data, source, windows, ...(ui && { ui }) }, null, 2) + '\n', { flag: 'wx' });
     console.log(manifest);

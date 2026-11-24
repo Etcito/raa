@@ -1,6 +1,7 @@
 import { createGalleryAoControls } from './lib/gallery-ao.js';
 import { mountLightingNotice } from './lib/gallery-lighting.js';
 import { syncSphericalControls } from './lib/gallery-spherical.js';
+import { captureGallerySequence } from './lib/gallery-sequence.js';
 import { captureGalleryPath, measureGalleryDiffuse, measureGalleryPanelNoise, measureGalleryPath, measureGallerySpherical } from './lib/gallery-path-evidence.js';
 import { createLiveStats } from './lib/live-stats.js';
 import { interactiveInterior } from './lib/interactive-interior.js';
@@ -138,7 +139,8 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
     });
     for (const [op, action] of [['gallery-path-capture', captureGalleryPath],
       ['gallery-path-measure', measureGalleryPath], ['gallery-path-diffuse', measureGalleryDiffuse],
-      ['gallery-panel-noise', measureGalleryPanelNoise], ['gallery-spherical', measureGallerySpherical]]) {
+      ['gallery-panel-noise', measureGalleryPanelNoise], ['gallery-spherical', measureGallerySpherical],
+      ['gallery-sequence', captureGallerySequence]]) {
       target.nmcGpu.ops[op] = input => exclusively(() => {
         stopInteractive();
         runner?.dispose();

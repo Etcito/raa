@@ -383,6 +383,10 @@ pub struct Engine {
 }
 
 impl Engine {
+    pub(crate) fn capture_runtime(&self) -> Result<&WebRuntime, JsValue> {
+        self.runtime.as_ref().ok_or_else(disposed)
+    }
+
     fn runtime(&mut self) -> Result<&mut WebRuntime, JsValue> {
         let runtime = self.runtime.as_mut().ok_or_else(disposed)?;
         // Once the browser loses the device every GPU call would panic inside wgpu (the lobby

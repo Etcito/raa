@@ -95,6 +95,9 @@ impl FeaturePass for MeshTracePass {
         } else {
             settings.path_mode
         };
+        let reference_sample = scene.reference_sample.filter(|_| settings.reference);
+        let (reference_seed, reference_spp) =
+            reference_sample.unwrap_or((ctx.frame as u32, REFERENCE_SPP));
         let filtered = ctx.targets.hdr();
         let params = [
             scene.geometry.count(),
@@ -104,14 +107,14 @@ impl FeaturePass for MeshTracePass {
             settings.confidence_threshold.to_bits(),
             u32::from(settings.reflections),
             u32::from(history_valid),
-            REFERENCE_SPP,
+            reference_spp,
             scene.sky_diffuse.to_bits(),
             path_mode as u32,
             settings.diffuse_output as u32,
-            ctx.frame as u32,
+            reference_seed,
             settings.panel_sampling as u32,
             settings.lighting_output.code(),
-            0,
+            u32::from(reference_sample.is_some()),
             0,
         ];
         let queue = ctx.gpu.queue();

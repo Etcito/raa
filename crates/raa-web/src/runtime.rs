@@ -763,9 +763,10 @@ pub async fn read_capture_texture(
     gpu: &GpuContext,
     texture: &wgpu::Texture,
 ) -> Result<Vec<u8>, RaaError> {
-    let texel_bytes = match texture.format() {
-        wgpu::TextureFormat::Rgba16Float => 8,
-        wgpu::TextureFormat::R32Float => 4,
+    let (texel_bytes, aspect) = match texture.format() {
+        wgpu::TextureFormat::Rgba16Float => (8, wgpu::TextureAspect::All),
+        wgpu::TextureFormat::R32Float => (4, wgpu::TextureAspect::All),
+        wgpu::TextureFormat::Depth32Float => (4, wgpu::TextureAspect::DepthOnly),
         format => {
             return Err(RaaError::Unsupported(format!(
                 "offline capture format {format:?}"
@@ -798,7 +799,7 @@ pub async fn read_capture_texture(
             texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
+            aspect,
         },
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,

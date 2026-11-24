@@ -87,4 +87,18 @@ export interface Engine {
   }>;
   /** Captures one fixed-seed specular RGB sample and guides from short or traced mode. */
   captureMeshPathSample(nowMs: number, seed: number): Promise<{ size: [number, number]; data: Uint8Array }>;
+  /** Offline readback of the latest submitted single view, without advancing its history. */
+  captureTrainingTaps(frameId: number): Promise<{
+    hdr: Uint8Array;
+    depth: Uint8Array;
+    normal: Uint8Array;
+    motion: Uint8Array;
+    reflectionHit?: Uint8Array;
+    jitterNdc: [number, number];
+  }>;
+  /** Offline seeded reference trace, with an independent batch of 1 to 32 samples per pixel. */
+  captureTrainingReference(nowMs: number, seed: number, samples: number): Promise<{
+    size: [number, number];
+    data: Uint8Array;
+  }>;
 }
