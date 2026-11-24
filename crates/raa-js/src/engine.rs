@@ -681,6 +681,7 @@ impl Engine {
     /// `maxInstances` (16384), `maxMaterials` (256), `powerPreference`
     /// ('high-performance' or 'low-power'), `msaa` (1 or 4, default 4), `toneMapper`
     /// ('agx', 'aces' or 'linear', default 'agx'), `exposureEv` (finite, default 0).
+    /// Set `allowSoftware: false` to require a hardware adapter.
     /// The device is requested on a core adapter with the WEBGPU_OPTIONAL features the
     /// adapter has and the adapter's limits.
     pub async fn create(
@@ -688,6 +689,13 @@ impl Engine {
         options: JsValue,
     ) -> Result<Engine, JsValue> {
         let o = js::engine_options(&options).map_err(|e| js_err(&e))?;
+        let allow_software = if options.is_null() || options.is_undefined() {
+            true
+        } else {
+            js::optional_bool(&options, "allowSoftware")
+                .map_err(|e| js_err(&e))?
+                .unwrap_or(true)
+        };
         let state: Shared = Rc::new(RefCell::new(None));
         let app = EngineApp {
             state: Rc::clone(&state),
@@ -698,7 +706,7 @@ impl Engine {
             height: canvas.height(),
             gpu: GpuOptions {
                 power_preference: o.power_preference,
-                allow_software: true,
+                allow_software,
             },
             ..RuntimeOptions::default()
         };
@@ -852,6 +860,100 @@ impl Engine {
         };
         self.finish_scene_invocation(result.is_ok());
         result
+    }
+
+    /// Renders one single-view stratified area sample and returns tight, native-format planes.
+    #[wasm_bindgen(js_name = captureAreaSample)]
+    pub async fn capture_area_sample(
+        &mut self,
+        now_ms: f64,
+        seed: u32,
+        guides: bool,
+    ) -> Result<JsValue, JsValue> {
+        if seed >= 0x8000_0000 || !now_ms.is_finite() {
+            return Err(js_err(&invalid("invalid area capture time or seed".into())));
+        }
+        let shared = self.with_state(|gpu, s| {
+            if !gpu.summary().is_hardware() {
+                return Err(RaaError::Unsupported(
+                    "area capture requires hardware WebGPU".into(),
+                ));
+            }
+            s.features
+                .get::<raa_gi::GiHandle>()
+                .map(|gi| gi.shared())
+                .ok_or_else(|| invalid("area capture requires GI".into()))
+        })?;
+        shared.set_area_capture_seed(Some(seed));
+        let rendered = self.render_frame(now_ms, None);
+        shared.set_area_capture_seed(None);
+        rendered.map_err(|e| js_err(&e))?;
+
+        // The legacy trace owns these textures. Temporal and spatial passes only read the raw
+        // trace and guides, and no subsequent render can start while this call owns the engine.
+        let (size, light, generation, textures) = self.with_state(|_, s| {
+            let pipeline = s.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
+            let submission = pipeline.scene_submission();
+            if submission.pending_mask != 1 || submission.submitted_mask != 0 {
+                return Err(invalid(
+                    "area capture requires one submitted primary view".into(),
+                ));
+            }
+            let frame = s.lit.handle().area_stochastic();
+            let light = u32::from_le_bytes(frame.table[..4].try_into().expect("slot word"));
+            if frame.active != 1
+                || light == u32::MAX
+                || pipeline
+                    .resources()
+                    .get("gi.area-shadow", "restirAtlas")
+                    .is_some()
+            {
+                return Err(invalid(
+                    "area capture requires one stratified light in slot zero".into(),
+                ));
+            }
+            let tap = |port| {
+                pipeline
+                    .resources()
+                    .get("gi.area-shadow", port)
+                    .ok_or_else(|| invalid(format!("missing area capture tap {port}")))
+            };
+            let raw = tap("raw")?;
+            let mut textures = vec![raw.view.texture().clone()];
+            if guides {
+                let depth = tap("depthHistory")?;
+                let targets = pipeline
+                    .targets()
+                    .ok_or_else(|| invalid("missing capture guides".into()))?;
+                textures.extend([
+                    depth.view.texture().clone(),
+                    targets.normal_texture().clone(),
+                    targets.motion_texture().clone(),
+                ]);
+            }
+            let size = [raw.desc.width, raw.desc.height];
+            if textures
+                .iter()
+                .any(|texture| [texture.width(), texture.height()] != size)
+            {
+                return Err(invalid("area capture guide extents differ".into()));
+            }
+            Ok((size, light, frame.generations[0], textures))
+        })?;
+        let runtime = self.runtime.as_ref().ok_or_else(disposed)?;
+        let planes = Array::new();
+        for texture in textures {
+            let bytes = raa_web::read_capture_texture(runtime.gpu(), &texture)
+                .await
+                .map_err(|e| js_err(&e))?;
+            planes.push(&js_sys::Uint8Array::from(bytes.as_slice()));
+        }
+        let output = Object::new();
+        set(&output, "size", &number_array(&size));
+        set(&output, "lightIndex", &JsValue::from(light));
+        set(&output, "lightGeneration", &JsValue::from(generation));
+        set(&output, "planes", &planes);
+        Ok(output.into())
     }
 
     /// Selects camera jitter independently of TAA. Null uses the default TAA-driven policy.

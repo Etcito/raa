@@ -350,6 +350,11 @@ impl AreaShadowResources {
             })
     }
 
+    /// Sets the offline trace seed in the reserved word after write_params clears it.
+    pub(crate) fn write_capture_seed(&self, gpu: &GpuContext, seed: u32) {
+        gpu.queue().write_buffer(&self.params, 4, &(seed + 1).to_le_bytes());
+    }
+
     /// Writes the 16 B of `AreaShadowParamsGpu` as (frame_index, 0, 0, 0) and every 16 B
     /// `AreaDispatchGpu` as (index, history bit, pairs of this group, min(limit, 8)).
     pub(crate) fn write_params(&self, gpu: &GpuContext, frame_index: u32, limit: u32) {

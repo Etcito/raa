@@ -594,19 +594,7 @@ impl WebRuntime {
         // The copy is submitted, so presenting (and the texture expiring at the await) is safe.
         frame.present();
 
-        map_read(&buffer).await?;
-        let mut pixels = Vec::with_capacity(row_bytes * height as usize);
-        {
-            let mapped = buffer
-                .slice(..)
-                .get_mapped_range()
-                .map_err(|e| RaaError::Gpu(format!("mapped range unavailable: {e}")))?;
-            for row in mapped.chunks_exact(padded_row) {
-                // Invariant: padded_row >= row_bytes.
-                pixels.extend_from_slice(&row[..row_bytes]);
-            }
-        }
-        buffer.unmap();
+        let mut pixels = read_rows(&buffer, row_bytes, padded_row, height).await?;
         if swap_red_blue {
             for px in pixels.chunks_exact_mut(4) {
                 px.swap(0, 2);
@@ -615,6 +603,88 @@ impl WebRuntime {
         let clear = crate::quantise_color(raa_core::CLEAR_COLOR, format.is_srgb());
         Ok(raa_core::non_empty(&pixels, clear))
     }
+}
+
+/// Copies the first layer of a single-sample linear texture in queue order.
+pub async fn read_capture_texture(
+    gpu: &GpuContext,
+    texture: &wgpu::Texture,
+) -> Result<Vec<u8>, RaaError> {
+    let texel_bytes = match texture.format() {
+        wgpu::TextureFormat::Rgba16Float => 8,
+        wgpu::TextureFormat::R32Float => 4,
+        format => {
+            return Err(RaaError::Unsupported(format!(
+                "offline capture format {format:?}"
+            )));
+        }
+    };
+    if texture.sample_count() != 1 || !texture.usage().contains(wgpu::TextureUsages::COPY_SRC) {
+        return Err(RaaError::Unsupported(
+            "offline capture requires a single-sample COPY_SRC texture".into(),
+        ));
+    }
+    let width = texture.width();
+    let height = texture.height();
+    let row = width * texel_bytes;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let pitch = row.div_ceil(align) * align;
+    let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("raa-offline-capture"),
+        size: u64::from(pitch) * u64::from(height),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = gpu
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("raa-offline-capture"),
+        });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(pitch),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue().submit([encoder.finish()]);
+    read_rows(&buffer, row as usize, pitch as usize, height).await
+}
+
+async fn read_rows(
+    buffer: &wgpu::Buffer,
+    row_bytes: usize,
+    padded_row: usize,
+    height: u32,
+) -> Result<Vec<u8>, RaaError> {
+    map_read(buffer).await?;
+    let mut pixels = Vec::with_capacity(row_bytes * height as usize);
+    {
+        let mapped = buffer
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| RaaError::Gpu(format!("mapped range unavailable: {e}")))?;
+        for row in mapped.chunks_exact(padded_row) {
+            // Invariant: padded_row >= row_bytes.
+            pixels.extend_from_slice(&row[..row_bytes]);
+        }
+    }
+    buffer.unmap();
+    Ok(pixels)
 }
 
 /// Maps `buffer` for reading and waits for it through a JS Promise resolved by the

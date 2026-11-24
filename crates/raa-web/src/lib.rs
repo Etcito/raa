@@ -56,7 +56,7 @@ pub trait WebApp {
 #[cfg(target_arch = "wasm32")]
 pub use js::{error_to_js, stats_to_js};
 #[cfg(target_arch = "wasm32")]
-pub use runtime::{FrameTiming, RuntimeOptions, WebRuntime};
+pub use runtime::{FrameTiming, RuntimeOptions, WebRuntime, read_capture_texture};
 pub use stats::FrameStats;
 
 /// Quantises a linear colour to the 8-bit RGBA a canvas stores: sRGB-encoded when the

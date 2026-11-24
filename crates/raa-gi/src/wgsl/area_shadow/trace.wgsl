@@ -22,7 +22,7 @@
 // The per-frame trace parameters (16 B), contract 'area-shadow-trace-wgsl'.
 struct AreaShadowParamsGpu {
     frame_index: u32,
-    pad0: u32,
+    capture_seed_plus_one: u32,
     pad1: u32,
     pad2: u32,
 }
@@ -284,8 +284,19 @@ fn raa_gi_area_trace(@builtin(global_invocation_id) id: vec3<u32>) {
             if light.kind != 3u {
                 continue;
             }
-            let cell = raa_area_stratum_cell(cells, frame_index + s, pixel);
-            let jitter = raa_area_r2_jitter(frame_index + 7u * s, pixel);
+            let capture_seed = raa_area_params.capture_seed_plus_one;
+            let index = select(frame_index, capture_seed - 1u, capture_seed != 0u);
+            let cell = raa_area_stratum_cell(cells, index + s, pixel);
+            var jitter = raa_area_r2_jitter(index + 7u * s, pixel);
+            if capture_seed != 0u {
+                // Traverse complete strata with a new hashed jitter for each offline seed.
+                let key = raa_gi_probe_pcg(index * 2u + 1u)
+                    ^ raa_gi_probe_pcg(pixel.x * 2957u + pixel.y * 6113u + s * 823u);
+                jitter = vec2<f32>(
+                    raa_gi_probe_hash_to_unit(key),
+                    raa_gi_probe_hash_to_unit(key ^ 0x9e3779b9u),
+                );
+            }
             let uv = raa_area_stratum_uv(cells, cell, jitter);
             let basis = raa_area_basis(light.direction_cos_outer.xyz);
             let point = light.position_range.xyz

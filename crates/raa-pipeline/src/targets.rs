@@ -15,6 +15,7 @@ const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 const GBUFFER_USAGE: wgpu::TextureUsages =
     wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING);
+const CAPTURE_GUIDE_USAGE: wgpu::TextureUsages = GBUFFER_USAGE.union(wgpu::TextureUsages::COPY_SRC);
 const HDR_USAGE: wgpu::TextureUsages = GBUFFER_USAGE
     .union(wgpu::TextureUsages::STORAGE_BINDING)
     .union(wgpu::TextureUsages::COPY_SRC)
@@ -270,7 +271,7 @@ impl Targets {
                 "raa-pipeline.normal",
                 size,
                 NORMAL_FORMAT,
-                GBUFFER_USAGE,
+                CAPTURE_GUIDE_USAGE,
             ),
             material: Target::new(
                 gpu,
@@ -284,7 +285,7 @@ impl Targets {
                 "raa-pipeline.motion",
                 size,
                 MOTION_FORMAT,
-                GBUFFER_USAGE,
+                CAPTURE_GUIDE_USAGE,
             ),
             hdr: HdrChain::new(gpu, size),
             output: None,

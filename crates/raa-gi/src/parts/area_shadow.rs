@@ -382,6 +382,9 @@ impl FeaturePass for GiAreaShadowPass {
             }
         }
         resources.write_params(ctx.gpu, frame_index.wrapping_add(1), limit);
+        if let Some(seed) = self.part.shared.area_capture_seed() {
+            resources.write_capture_seed(ctx.gpu, seed);
+        }
         *sdf_slot = sdf;
         ctx.lighting
             .set_area_shadow(resources.mask_view(), &frame.table)?;

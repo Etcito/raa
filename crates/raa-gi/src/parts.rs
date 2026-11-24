@@ -257,9 +257,19 @@ struct SharedFrame {
     /// Validity of the latest prepared frame's lit history and camera continuity.
     history_valid: bool,
     camera_valid: bool,
+    area_capture_seed: Option<u32>,
 }
 
 impl GiShared {
+    /// Overrides the stratified trace sample for an offline render.
+    pub fn set_area_capture_seed(&self, seed: Option<u32>) {
+        self.0.borrow_mut().area_capture_seed = seed;
+    }
+
+    pub(crate) fn area_capture_seed(&self) -> Option<u32> {
+        self.0.borrow().area_capture_seed
+    }
+
     /// A handle with no frame, atlas or history yet, and the default quality, settings and
     /// tunables.
     pub fn new(gpu: &GpuContext) -> GiShared {
@@ -291,6 +301,7 @@ impl GiShared {
             voxel_generation: 0,
             history_valid: false,
             camera_valid: false,
+            area_capture_seed: None,
         })))
     }
 
