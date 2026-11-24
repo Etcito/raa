@@ -1033,7 +1033,8 @@ impl Engine {
         Ok(output.into())
     }
 
-    /// Reads linear RGBA16F from the mesh trace output or the ordinary forward pass.
+    /// Reads linear RGBA16F. An isolated forward view also returns its same-frame
+    /// combined lighting as `combinedData`.
     #[wasm_bindgen(js_name = captureMeshLighting)]
     pub async fn capture_mesh_lighting(
         &mut self,
@@ -1048,7 +1049,7 @@ impl Engine {
         }
         self.render_frame(now_ms, None)
             .map_err(|error| js_err(&error))?;
-        let texture = self.with_state(|gpu, st| {
+        let (texture, combined) = self.with_state(|gpu, st| {
             if !gpu.summary().is_hardware() {
                 return Err(RaaError::Unsupported(
                     "mesh lighting capture requires hardware WebGPU".into(),
@@ -1072,15 +1073,18 @@ impl Engine {
                     return Err(invalid("raw mesh lighting capture requires tracing".into()));
                 }
             };
-            pipeline
-                .resources()
-                .get(producer, port)
-                .map(|image| image.view.texture().clone())
-                .ok_or_else(|| {
-                    invalid(format!(
-                        "missing mesh lighting capture tap {producer}.{port}"
-                    ))
-                })
+            let resources = pipeline.resources();
+            let texture = resources.get(producer, port).ok_or_else(|| {
+                invalid(format!("missing mesh lighting capture tap {producer}.{port}"))
+            })?;
+            let combined = if traced {
+                None
+            } else {
+                resources
+                    .get("forward", "combined-lighting")
+                    .map(|image| image.view.texture().clone())
+            };
+            Ok((texture.view.texture().clone(), combined))
         })?;
         let runtime = self.runtime.as_ref().ok_or_else(disposed)?;
         let bytes = raa_web::read_capture_texture(runtime.gpu(), &texture)
@@ -1097,6 +1101,16 @@ impl Engine {
             "data",
             &js_sys::Uint8Array::from(bytes.as_slice()).into(),
         );
+        if let Some(combined) = combined {
+            let bytes = raa_web::read_capture_texture(runtime.gpu(), &combined)
+                .await
+                .map_err(|error| js_err(&error))?;
+            set(
+                &output,
+                "combinedData",
+                &js_sys::Uint8Array::from(bytes.as_slice()).into(),
+            );
+        }
         Ok(output.into())
     }
 
