@@ -301,11 +301,16 @@ fn terminal_diffuse_gi(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material)
     let surface_basis = basis(n);
     let sky_scale = bitcast<f32>(options[2].x);
     let sky_lod = f32(textureNumLevels(sky) - 1u);
-    const SAMPLES: u32 = 12u;
+    // Use an equal-area stratified disk and a continuous world-space rotation.
+    // A fixed low-count fan gives nearby hits the same visibility error. Rotating
+    // by position breaks up that alignment without frame or pixel keyed noise.
+    const SAMPLES: u32 = 64u;
+    let rotation = fract(dot(p, vec3<f32>(0.73, 1.13, 0.97)));
     var incident = vec3<f32>(0.0);
     for (var i = 0u; i < SAMPLES; i++) {
         let u = (f32(i) + 0.5) / f32(SAMPLES);
-        let phi = f32(i) * 2.39996323;
+        let azimuth = f32(reverseBits(i) >> 26u) / f32(SAMPLES);
+        let phi = 2.0 * PI * (azimuth + rotation);
         let direction = surface_basis * vec3<f32>(sqrt(u) * cos(phi), sqrt(u) * sin(phi), sqrt(1.0 - u));
         if dot(ng, direction) <= 0.0 { continue; }
         let hit = closest(Ray(origin, direction), frame.clip.y, false);
