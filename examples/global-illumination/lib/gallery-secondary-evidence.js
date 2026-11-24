@@ -59,7 +59,7 @@ function assertLearned(sample, grid, check) {
 }
 
 
-const firstRayKeys = ['eligible', 'acceptedScreen', 'traced', 'geometryHit', 'mirrorRays',
+const firstRayKeys = ['eligible', 'acceptedScreen', 'traced', 'geometryHit',
   'firstHitRays', 'firstHitHits', 'firstHitHash'];
 
 function sameFirstRay(a, b, check) {
@@ -88,6 +88,14 @@ export async function measureSharpSecondary({ engine, capture, check, compare, s
   const policy = indirectGrid => engine.setMeshTracing({ indirectGrid, confidenceThreshold: 1 });
   const groups = channelMask => engine.setSphericalGi({ channelMask });
   try {
+    const automatic = await capture('sharp-default-cache', true, true);
+    engine.setMeshTracing({ indirectGrid: 'off' });
+    const automaticBypass = await capture('sharp-default-cache-bypassed', true, true);
+    sameFirstRay(automatic, automaticBypass, check);
+    check(automatic.trace.acceptedScreen > 0 && automatic.trace.firstHitRays > 0,
+      'Default screen confidence/BVH split was not exercised', automatic.trace);
+    const automaticEffect = compare(automatic.rgb, automaticBypass.rgb);
+    check(automaticEffect.changedPixels > 0, 'Default mirror cache supplied no physical contribution', automaticEffect);
     policy('auto');
     const active = await capture('sharp-bvh-spherical', true, true);
     check(active.trace.eligible > 0 && active.trace.acceptedScreen === 0
@@ -137,7 +145,8 @@ export async function measureSharpSecondary({ engine, capture, check, compare, s
       && physical.trace.sphericalDiffuseHits === debug.trace.sphericalDiffuseHits
       && sceneLinear.peak === 0 && presentation.changedPixels > 0,
       'Debug overlay changed physical reflected lighting or was invisible', { sceneLinear, presentation });
-    return { active: active.trace, bypass: bypass.trace, volume: volume.trace, effect, volumeEffect,
+    return { automatic: automatic.trace, automaticBypass: automaticBypass.trace, automaticEffect,
+      active: active.trace, bypass: bypass.trace, volume: volume.trace, effect, volumeEffect,
       groups: responses, debug: { sceneLinear, presentation } };
   } finally {
     engine.setSphericalGi({ channelMask: 7, debug: 'off' });
