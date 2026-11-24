@@ -109,6 +109,9 @@ pub(crate) struct GiCore {
     requests: BTreeMap<u32, bool>,
     camera: Camera,
     previous_view_proj: Option<Mat4>,
+    /// Real frames acknowledged by the active volume pass.
+    submitted_frames: u64,
+    history_source: Option<(u64, Mat4)>,
     viewport: (u32, u32),
     submitted_views: u8,
     sun_direction: [f32; 3],
@@ -125,8 +128,8 @@ pub(crate) struct GiCore {
     history: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// Separate write target while passes still read the previous submission.
     history_write: Option<(wgpu::Texture, wgpu::TextureView)>,
-    /// The size of the staged copy, consumed only on submission.
-    history_copied: Option<(u32, u32)>,
+    /// The real-frame ID and projection of the staged HDR copy.
+    history_copied: Option<(u64, Mat4)>,
     /// Frames prepared so far; 0 before the first frame.
     frame_index: u64,
     shared: GiShared,
@@ -188,6 +191,8 @@ impl GiCore {
             requests: BTreeMap::new(),
             camera: Camera::default(),
             previous_view_proj: None,
+            submitted_frames: 0,
+            history_source: None,
             viewport: (0, 0),
             submitted_views: 1,
             sun_direction: [0.0, 1.0, 0.0],
@@ -529,6 +534,7 @@ impl GiHandle {
 
         let camera_valid = active && !allocated && core.last_active_viewport == Some(core.viewport);
         core.history_valid = camera_valid
+            && core.history_source.is_some()
             && core
                 .history
                 .as_ref()
@@ -539,6 +545,10 @@ impl GiHandle {
                 .filter(|_| core.history_valid)
                 .map(|(_, view)| view.clone()),
         );
+        let history_age = core
+            .history_source
+            .filter(|_| core.history_valid)
+            .map(|(source, _)| core.submitted_frames + 1 - source);
         core.shared
             .set_frame_validity(core.history_valid, camera_valid);
 
@@ -558,7 +568,7 @@ impl GiHandle {
         core.signature = Some(core.report.signature);
 
         if active && let Some(frame) = core.shared.frame_buffer() {
-            let record = frame_record(core);
+            let record = frame_record(core, history_age);
             gpu.queue().write_buffer(&frame, 0, &record.to_bytes());
         }
         let sky = sky_scale(core);
@@ -688,6 +698,7 @@ impl GiHandle {
             allocated_bytes,
             stats_frame_index: None,
             pending: true,
+            lit_history_age: history_age,
             history_length_mean: None,
             rejected_percent: None,
             clamped_percent: None,
@@ -734,6 +745,7 @@ pub(crate) fn lighting_power(lit: &LitRenderer, sun_color: [f32; 3]) -> f32 {
 /// history of every part.
 fn drop_histories(core: &mut GiCore) {
     core.history_valid = false;
+    core.history_source = None;
     core.history_copied = None;
     core.last_active_viewport = None;
     for part in &core.parts {
@@ -780,6 +792,7 @@ fn release_resources(core: &mut GiCore) {
     core.volume = None;
     core.history = None;
     core.history_write = None;
+    core.history_source = None;
     core.history_copied = None;
     core.shared.set_history(None);
     for driver in &core.drivers {
@@ -796,12 +809,16 @@ fn reciprocal(v: f32) -> f32 {
 }
 
 /// The `GiFrameGpu` record of an active frame (S38). The previous view-projection is the one of
-/// the last active frame, or the current one; the current one becomes the next previous.
-fn frame_record(core: &mut GiCore) -> GiFrameGpu {
+/// the matching submitted HDR copy when available, or the previous submitted camera.
+fn frame_record(core: &GiCore, history_age: Option<u64>) -> GiFrameGpu {
     let camera = core.camera;
     let (view, proj, view_proj) = (camera.view(), camera.projection(), camera.view_proj());
-    let previous_view_proj = core.previous_view_proj.unwrap_or(view_proj);
-    core.previous_view_proj = Some(view_proj);
+    let previous_view_proj = core
+        .history_source
+        .filter(|_| core.history_valid)
+        .map(|(_, projection)| projection)
+        .or(core.previous_view_proj)
+        .unwrap_or(view_proj);
     let (w, h) = (core.viewport.0 as f32, core.viewport.1 as f32);
     let [sx, sy, sz] = core.sun_direction;
     let [cr, cg, cb] = core.sun_color;
@@ -812,7 +829,12 @@ fn frame_record(core: &mut GiCore) -> GiFrameGpu {
         inv_proj: proj.inverse().unwrap_or(Mat4::IDENTITY),
         inv_view: view.inverse().unwrap_or(Mat4::IDENTITY),
         previous_view_proj,
-        camera_position: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
+        camera_position: [
+            camera.eye.x,
+            camera.eye.y,
+            camera.eye.z,
+            history_age.unwrap_or(0) as f32,
+        ],
         sun_direction: [sx, sy, sz, 0.0],
         sun_color: [cr, cg, cb, sky_scale(core)],
         viewport: [w, h, reciprocal(w), reciprocal(h)],
@@ -845,6 +867,24 @@ pub(crate) struct GiVolumePass {
 }
 
 impl FeaturePass for GiVolumePass {
+    fn submitted(&mut self) {
+        let mut core = self.core.borrow_mut();
+        core.submitted_frames += 1;
+        if core.last_active_viewport != Some(core.viewport)
+            && core
+                .history_source
+                .is_some_and(|(frame, _)| frame < core.submitted_frames)
+        {
+            core.history_source = None;
+        }
+        core.previous_view_proj = Some(core.camera.view_proj());
+        core.last_active_viewport = core
+            .shared
+            .frame_buffer()
+            .is_some()
+            .then_some(core.viewport);
+    }
+
     fn name(&self) -> &str {
         VOLUME_PASS
     }
@@ -964,7 +1004,7 @@ fn copy_history(core: &mut GiCore, ctx: &mut RecordCtx<'_>) {
         },
         extent,
     );
-    core.history_copied = Some((width, height));
+    core.history_copied = Some((core.submitted_frames + 1, core.camera.view_proj()));
 }
 
 /// The `gi.history` pass (order 64). While GI is active, it copies the lit HDR into the history
@@ -992,14 +1032,10 @@ impl FeaturePass for GiHistoryPass {
     fn submitted(&mut self) {
         let mut core = self.core.borrow_mut();
         let core = &mut *core;
-        if core.history_copied.take().is_some() {
+        if let Some(source) = core.history_copied.take() {
             std::mem::swap(&mut core.history, &mut core.history_write);
+            core.history_source = Some(source);
         }
-        core.last_active_viewport = core
-            .shared
-            .frame_buffer()
-            .is_some()
-            .then_some(core.viewport);
     }
 
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
@@ -1044,6 +1080,7 @@ impl GiHistoryPass {
             } else {
                 core.history = None;
                 core.history_write = None;
+                core.history_source = None;
                 core.shared.set_history(None);
             }
         }

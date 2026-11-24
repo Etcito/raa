@@ -329,3 +329,35 @@ fn screen_space_off_adds_nothing() {
         "screen space with {SSGI_PASS} disabled adds nothing"
     );
 }
+
+// This test requires a real adapter on Windows. It never requests a software fallback.
+#[cfg(target_os = "windows")]
+#[test]
+fn lit_history_age_counts_actual_submissions() {
+    let gpu = block_on(GpuContext::headless(&raa_core::GpuOptions {
+        allow_software: false,
+        ..raa_core::GpuOptions::default()
+    }))
+    .expect("Windows hardware GPU");
+    let mut rig = Rig::new(&gpu, true);
+    assert_eq!(rig.frame(&gpu).lit_history_age, None);
+    assert_eq!(rig.frame(&gpu).lit_history_age, Some(1));
+
+    // Submit a real frame without a history copy. The retained source gets one frame older.
+    rig.pipeline
+        .borrow_mut()
+        .set_enabled("gi.history", false)
+        .unwrap();
+    assert_eq!(rig.frame(&gpu).lit_history_age, Some(1));
+    rig.pipeline
+        .borrow_mut()
+        .set_enabled("gi.history", true)
+        .unwrap();
+
+    // Preparing an invocation that never submits must leave the age unchanged.
+    rig.handle.prepare_frame(&gpu, &mut rig.scene, &mut rig.lit);
+    assert_eq!(rig.frame(&gpu).lit_history_age, Some(2));
+    assert_eq!(rig.frame(&gpu).lit_history_age, Some(1));
+    rig.handle.invalidate_history();
+    assert_eq!(rig.frame(&gpu).lit_history_age, None);
+}

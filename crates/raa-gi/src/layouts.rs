@@ -38,7 +38,7 @@ pub struct GiFrameGpu {
     pub inv_view: Mat4,
     /// Previous frame's view-projection (offset 256).
     pub previous_view_proj: Mat4,
-    /// Camera position, w 0 (offset 320).
+    /// Camera position, w lit HDR age in real frames (0 for unavailable, offset 320).
     pub camera_position: [f32; 4],
     /// Direction toward the sun, w 0 (offset 336).
     pub sun_direction: [f32; 4],

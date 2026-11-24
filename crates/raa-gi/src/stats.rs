@@ -31,6 +31,8 @@ pub struct GiStats {
     pub stats_frame_index: Option<u64>,
     /// A prepared frame whose submission is not yet observed.
     pub pending: bool,
+    /// Real-frame age of the lit HDR that screen hits could sample in this frame.
+    pub lit_history_age: Option<u64>,
     /// The mean history length of the screen accumulation (frames), read back from the GPU a few
     /// frames late over one pixel in 16; `None` until a readback completed.
     pub history_length_mean: Option<f32>,

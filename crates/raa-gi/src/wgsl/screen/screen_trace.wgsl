@@ -196,8 +196,13 @@ fn raa_gi_trace_screen(
 }
 
 // Last frame's lit colour at a world hit, found by reprojecting the hit with the previous
-// frame's view-projection. a is 0 when the hit was off screen or behind the previous camera.
+// copy's view-projection. Alpha is the copy's real-frame age, or zero for unavailable
+// history and hits outside the previous camera's screen.
 fn raa_gi_screen_hit_radiance(world_hit: vec3<f32>) -> vec4<f32> {
+    let age = raa_gi_frame.camera_position.w;
+    if age == 0.0 {
+        return vec4<f32>(0.0);
+    }
     let clip = raa_gi_frame.previous_view_proj * vec4<f32>(world_hit, 1.0);
     if clip.w <= 0.0 {
         return vec4<f32>(0.0);
@@ -207,5 +212,5 @@ fn raa_gi_screen_hit_radiance(world_hit: vec3<f32>) -> vec4<f32> {
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) {
         return vec4<f32>(0.0);
     }
-    return vec4<f32>(textureSampleLevel(raa_gi_history, raa_linear_clamp, uv, 0.0).rgb, 1.0);
+    return vec4<f32>(textureSampleLevel(raa_gi_history, raa_linear_clamp, uv, 0.0).rgb, age);
 }

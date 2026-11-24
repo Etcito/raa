@@ -352,6 +352,7 @@ fn stats_entries_follow_the_key_order_with_a_null_frame_index() {
             ("historyLengthMean", GiWire::Null),
             ("rejectedPercent", GiWire::Null),
             ("clampedPercent", GiWire::Null),
+            ("litHistoryAge", GiWire::Null),
         ]
     );
     assert_eq!(

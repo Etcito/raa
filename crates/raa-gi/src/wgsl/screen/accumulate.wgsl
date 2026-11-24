@@ -267,7 +267,9 @@ fn raa_gi_acc_reproject(in: RaaGiAccInput) -> RaaGiAccHistory {
     let m = textureLoad(raa_gi_motion, in.pixel, 0);
     let center = vec2<f32>(in.pixel) + vec2<f32>(0.5);
     let previous_uv = center * raa_gi_frame.viewport.zw - m.xy;
-    if m.z > 0.5 || raa_gi_screen_params.history_valid == 0u
+    // The reprojection matrix belongs to the lit copy when one is available.
+    // Accumulation taps require the immediately preceding real frame.
+    if m.z > 0.5 || raa_gi_screen_params.history_valid == 0u || raa_gi_frame.camera_position.w > 1.0
         || any(previous_uv <= vec2<f32>(0.0)) || any(previous_uv >= vec2<f32>(1.0)) {
         return out;
     }

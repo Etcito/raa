@@ -366,6 +366,10 @@ pub(crate) fn stats_entries(s: &GiStats) -> Vec<(&'static str, GiWire)> {
             "clampedPercent",
             number_or_null(s.clamped_percent.map(f64::from)),
         ),
+        (
+            "litHistoryAge",
+            number_or_null(s.lit_history_age.map(|age| age as f64)),
+        ),
     ]
 }
 

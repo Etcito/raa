@@ -89,7 +89,7 @@ fn raa_gi_probe_trace(@builtin(global_invocation_id) id: vec3<u32>) {
                 screen_radiance.a,
             );
         }
-        if screen.hit && screen.weight >= 1.0 && screen_radiance.a == 1.0 {
+        if screen.hit && screen.weight >= 1.0 && screen_radiance.a > 0.0 {
             textureStore(raa_gi_rays_out, id.xy, vec4<f32>(screen_radiance.rgb, 2.0));
             return;
         }
@@ -123,7 +123,7 @@ fn raa_gi_probe_trace(@builtin(global_invocation_id) id: vec3<u32>) {
             kind = 1.0;
         }
     }
-    if screen.hit && screen_radiance.a == 1.0 {
+    if screen.hit && screen_radiance.a > 0.0 {
         // Near the screen edge, blend towards the volume so probes do not pop.
         radiance = mix(radiance, screen_radiance.rgb, screen.weight);
         t = mix(t, screen.t, screen.weight);

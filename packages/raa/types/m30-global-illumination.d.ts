@@ -209,6 +209,8 @@ export interface GiStats {
   rejectedPercent: number | null;
   /** Share of pixels whose history the neighbourhood clamp moved, percent, or `null`. */
   clampedPercent: number | null;
+  /** Real-frame age of the lit HDR available to screen hits, or null if unavailable. */
+  litHistoryAge: number | null;
 }
 
 /**
