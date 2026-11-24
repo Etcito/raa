@@ -621,17 +621,16 @@ def joint_metrics(models, sequences):
                         x, y, _, _ = display_coordinates(f.hdr.shape[-2:], f.output_size, f.jitter)
                         mask = at(sample.disocclusion, (x + 0.5).floor(), (y + 0.5).floor())
                         row[f"{label}DisocclusionLogMae"] = float(masked_mean(delta.abs(), mask))
-                if sample.reflection_target is not None:
-                    active = f.reflection[:, 3:4] > 0.5
-                    if active.any():
-                        reflect = result["reflection"]
-                        delta = reflect.log1p() - sample.reflection_target.log1p()
-                        row["reflectionLogMae"] = float(masked_mean(delta.abs(), active))
-                        row["reflectionHdrRmse"] = float(masked_mean((reflect - sample.reflection_target).square(), active).sqrt())
-                        change = reflection_residual_change(f, delta, reflection_errors.get(name), valid)
-                        if change is not None and change[1].any():
-                            row["reflectionWarpedLogChangeMae"] = float(masked_mean(change[0].abs(), change[1]))
-                        reflection_errors[name] = (delta, f.reflection[:, 3:5], f.jitter)
+                active = (f.reflection[:, 3:4] > 0.5) if sample.reflection_target is not None else None
+                if active is not None and active.any():
+                    reflect = result["reflection"]
+                    delta = reflect.log1p() - sample.reflection_target.log1p()
+                    row["reflectionLogMae"] = float(masked_mean(delta.abs(), active))
+                    row["reflectionHdrRmse"] = float(masked_mean((reflect - sample.reflection_target).square(), active).sqrt())
+                    change = reflection_residual_change(f, delta, reflection_errors.get(name), valid)
+                    if change is not None and change[1].any():
+                        row["reflectionWarpedLogChangeMae"] = float(masked_mean(change[0].abs(), change[1]))
+                    reflection_errors[name] = (delta, f.reflection[:, 3:5], f.jitter)
                 else:
                     reflection_errors.pop(name, None)
                 if sample.area_target is not None:
