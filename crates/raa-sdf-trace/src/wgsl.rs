@@ -70,7 +70,14 @@ fn trace_shader(program: &TraceProgram, traversal: &str) -> String {
 
 const TRACE_FALLBACK_WGSL: &str = include_str!("wgsl/trace_fallback_wgsl.wgsl");
 
-pub(crate) const RAY_INTERVAL_WGSL: &str = include_str!("wgsl/ray_interval.wgsl");
+const RAY_INTERVAL_WGSL: &str = include_str!("wgsl/ray_interval.wgsl");
+
+/// World-space mesh intersections and the shared current GI clipmap gather.
+pub fn mesh_trace_module() -> String {
+    let gi = raa_shader::GI_VOLUME_WGSL;
+    let mesh = include_str!("wgsl/mesh_trace.wgsl");
+    format!("{RAY_INTERVAL_WGSL}{gi}{mesh}")
+}
 
 const TRACE_WGSL: &str = include_str!("wgsl/trace_wgsl.wgsl");
 

@@ -1340,6 +1340,11 @@ impl LightingResources {
         &self.state.views.cloud_transmittance
     }
 
+    /// Current world-space GI atlas, or the neutral 3D texture while GI is inactive.
+    pub fn gi_volume_view(&self) -> &wgpu::TextureView {
+        &self.state.views.gi_volume
+    }
+
     /// The 96-byte `RaaGiVolumeParams` uniform (group 1 binding 18), `UNIFORM | COPY_DST`.
     pub fn gi_volume_params_buffer(&self) -> &wgpu::Buffer {
         &self.gi_params_buffer

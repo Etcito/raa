@@ -82,6 +82,7 @@ pub struct MeshTraceScene {
     material_bytes: Vec<u8>,
     material_revision: u64,
     frame: Option<Buffer>,
+    sky_diffuse: f32,
     latest: Option<MeshTraceStats>,
     pending: Option<Receiver<Option<MeshTraceStats>>>,
     epoch: u64,
@@ -101,9 +102,11 @@ impl MeshTraceScene {
         inputs: &[MeshInput<'_>],
         materials: &[MeshTraceMaterial],
         frame: Buffer,
+        sky_diffuse: f32,
     ) -> Result<(), RaaError> {
         self.geometry.update(inputs)?;
         self.frame = Some(frame);
+        self.sky_diffuse = sky_diffuse;
         if materials != self.materials {
             self.material_revision = self.material_revision.wrapping_add(1);
             self.materials.clear();

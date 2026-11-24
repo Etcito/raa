@@ -2,7 +2,8 @@
 //! generation interfaces parse and type-check with naga; no GPU rendering is done here.
 use raa_sdf_trace::wgsl::{
     PROGRAM_EVAL_WGSL, VOLUME_ABI_VERSION, VOLUME_COARSE_TILE, VOLUME_MAX_AXIS, VOLUME_MIP_LEVELS,
-    VolumeUniform, composite_module, eval_module, trace_module, volume_mip_layout, volume_module,
+    VolumeUniform, composite_module, eval_module, mesh_trace_module, trace_module,
+    volume_mip_layout, volume_module,
 };
 use raa_sdf_trace::{
     COMPOSITE_NAME, COMPOSITE_ORDER, Instance, Source, TRACE_NAME, TRACE_ORDER, TraceProgram,
@@ -83,10 +84,7 @@ fn generated_variants_parse_and_validate() {
 
 #[test]
 fn mesh_trace_shaders_validate() {
-    let trace = validate(concat!(
-        include_str!("../src/wgsl/ray_interval.wgsl"),
-        include_str!("../src/wgsl/mesh_trace.wgsl")
-    ));
+    let trace = validate(&mesh_trace_module());
     assert_eq!(trace.entry_points[0].workgroup_size, [8, 8, 1]);
     let output = validate(include_str!("../src/wgsl/mesh_composite.wgsl"));
     assert_eq!(output.entry_points.len(), 2);

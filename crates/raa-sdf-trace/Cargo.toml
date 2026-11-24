@@ -12,5 +12,6 @@ half = "2.7.1"
 raa-core = { workspace = true }
 raa-math = { workspace = true }
 raa-pipeline = { path = "../raa-pipeline" }
+raa-shader = { path = "../raa-shader" }
 wgpu = { workspace = true }
 naga = { workspace = true }

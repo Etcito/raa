@@ -20,7 +20,7 @@ struct Light {
     inner: f32, kind: u32, width: f32, height: f32,
 }
 @group(0) @binding(0) var<uniform> frame: Frame;
-@group(0) @binding(1) var<uniform> options: array<vec4<u32>, 2>;
+@group(0) @binding(1) var<uniform> options: array<vec4<u32>, 3>;
 @group(0) @binding(2) var<storage, read> nodes: array<TraceNode>;
 @group(0) @binding(3) var<storage, read> triangles: array<Triangle>;
 @group(0) @binding(4) var<storage, read> materials: array<Material>;
@@ -34,7 +34,19 @@ struct Light {
 @group(0) @binding(12) var radiance: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(13) var<uniform> lights: array<Light, 256>;
 @group(0) @binding(14) var sky: texture_cube<f32>;
-@group(0) @binding(15) var linear_clamp: sampler;
+@group(0) @binding(15) var raa_linear_clamp: sampler;
+
+// Same 96-byte record and atlas used by the lit GI passes.
+struct RaaGiVolumeParams {
+    levels: array<vec4<f32>, 5>,
+    resolution: f32,
+    intensity: f32,
+    level_count: u32,
+    flags: u32,
+}
+@group(0) @binding(16) var raa_gi_volume: texture_3d<f32>;
+@group(0) @binding(17) var<uniform> raa_gi_volume_params: RaaGiVolumeParams;
+const GI_VOLUME_VALID: u32 = 1u;
 
 const PI: f32 = 3.14159265;
 const EPS: f32 = 0.001;
@@ -184,6 +196,44 @@ fn sun_and_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: 
     return direct;
 }
 
+// Estimate incident diffuse at the actual mesh hit from the current world clipmap.
+// The cosine-weighted mean is irradiance / pi, so use the same diffuse weight
+// as the direct BRDF. The gather starts away from the receiver's own radiance band.
+fn terminal_diffuse_gi(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material) -> vec3<f32> {
+    let params = raa_gi_volume_params;
+    let weight = diffuse(mat) * params.intensity;
+    if (params.flags & GI_VOLUME_VALID) == 0u || !any(weight > vec3<f32>(0.0)) {
+        return vec3<f32>(0.0);
+    }
+    let level = raa_gi_level_at(p, 0u);
+    if level >= params.level_count { return vec3<f32>(0.0); }
+    let voxel = params.levels[level].w;
+    let origin = p + ng * (1.5 * voxel);
+    let surface_basis = basis(n);
+    let sky_scale = bitcast<f32>(options[2].x);
+    let sky_lod = f32(textureNumLevels(sky) - 1u);
+    const SAMPLES: u32 = 6u;
+    var incident = vec3<f32>(0.0);
+    for (var i = 0u; i < SAMPLES; i++) {
+        let u = (f32(i) + 0.5) / f32(SAMPLES);
+        let phi = f32(i) * 2.39996323;
+        let direction = surface_basis * vec3<f32>(sqrt(u) * cos(phi), sqrt(u) * sin(phi), sqrt(1.0 - u));
+        if dot(ng, direction) <= 0.0 { continue; }
+        let hit = raa_gi_gather(origin, direction, 0.5 * voxel, 320.0, 40u, 0.85);
+        if hit.hit {
+            incident += hit.radiance;
+        } else if hit.escaped && sky_scale > 0.0 {
+            // A coarse volume can miss a thin occluder. A sky sample must escape
+            // the actual mesh from the unshifted receiver as well.
+            let ray = Ray(p + ng * (2.0 * EPS), direction);
+            if closest(ray, frame.clip.y, true).object == MISS {
+                incident += textureSampleLevel(sky, raa_linear_clamp, direction, sky_lod).rgb * sky_scale;
+            }
+        }
+    }
+    return weight * (incident / f32(SAMPLES));
+}
+
 fn trace_path(initial: Ray, mirrors: u32, path: bool, seed: ptr<function, u32>) -> vec3<f32> {
     var ray = initial;
     var throughput = vec3<f32>(1.0);
@@ -193,7 +243,7 @@ fn trace_path(initial: Ray, mirrors: u32, path: bool, seed: ptr<function, u32>) 
     for (var step = 0u; step < 13u; step++) {
         let hit = closest(ray, frame.clip.y, false);
         if hit.object == MISS {
-            return sum + throughput * textureSampleLevel(sky, linear_clamp, ray.direction, 0).rgb;
+            return sum + throughput * textureSampleLevel(sky, raa_linear_clamp, ray.direction, 0).rgb;
         }
         if !path && step == 0u { atomicAdd(&counters[GEOMETRY_HIT], 1u); }
         let tri = triangles[hit.object];
@@ -215,7 +265,11 @@ fn trace_path(initial: Ray, mirrors: u32, path: bool, seed: ptr<function, u32>) 
         sum += throughput * mat.emission_metallic.rgb;
         if (mat.flags.x & 2u) != 0u { return sum + throughput * mat.base_roughness.rgb; }
         sum += throughput * sun_and_lights(p, ng, n, -ray.direction, mat, seed);
-        if !path || path_steps == 0u { break; }
+        if !path {
+            sum += throughput * terminal_diffuse_gi(p, ng, n, mat);
+            break;
+        }
+        if path_steps == 0u { break; }
 
         let chance = clamp(max(f0(mat).x, max(f0(mat).y, f0(mat).z)), 0.12, 0.88);
         let select_specular = random(seed) < chance;

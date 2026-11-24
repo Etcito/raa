@@ -6,13 +6,12 @@ use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, RecordCtx};
 
 use super::{MeshTraceScene, MeshTraceStats};
-use crate::wgsl::RAY_INTERVAL_WGSL;
+use crate::wgsl::mesh_trace_module;
 
 pub const MESH_TRACE_NAME: &str = "trace.mesh";
 const ORDER: u32 = 66;
 const COUNTER_BYTES: u64 = 48;
 const CONFIDENCE: &str = "ssr.confidence";
-const COMPUTE_WGSL: &str = include_str!("../wgsl/mesh_trace.wgsl");
 const COMPOSITE_WGSL: &str = include_str!("../wgsl/mesh_composite.wgsl");
 
 pub type MeshTraceHandle = Rc<RefCell<MeshTraceScene>>;
@@ -104,6 +103,10 @@ impl FeaturePass for MeshTracePass {
             u32::from(settings.reflections),
             u32::from(history_valid),
             4,
+            scene.sky_diffuse.to_bits(),
+            0,
+            0,
+            0,
         ];
         let queue = ctx.gpu.queue();
         let bytes: Vec<_> = params.into_iter().flat_map(u32::to_le_bytes).collect();
@@ -139,6 +142,8 @@ impl FeaturePass for MeshTracePass {
                     binding: 15,
                     resource: wgpu::BindingResource::Sampler(ctx.lighting.linear_clamp()),
                 },
+                image_entry(16, ctx.lighting.gi_volume_view()),
+                buffer_entry(17, ctx.lighting.gi_volume_params_buffer()),
             ],
         });
         ctx.encoder.clear_buffer(&gpu.counters, 0, None);
@@ -381,7 +386,7 @@ impl Pipelines {
     fn new(device: &wgpu::Device) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(MESH_TRACE_NAME),
-            source: wgpu::ShaderSource::Wgsl(format!("{RAY_INTERVAL_WGSL}{COMPUTE_WGSL}").into()),
+            source: wgpu::ShaderSource::Wgsl(mesh_trace_module().into()),
         });
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
             binding,
@@ -431,6 +436,8 @@ impl Pipelines {
                     15,
                     wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 ),
+                entry(16, tex(T::Float { filterable: true }, D::D3)),
+                entry(17, buf(B::Uniform)),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -478,7 +485,7 @@ impl Pipelines {
             options: buffer(
                 device,
                 "trace.mesh.options",
-                32,
+                48,
                 wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             ),
             counters: buffer(

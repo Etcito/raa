@@ -96,9 +96,13 @@ pub(crate) fn prepare(st: &EngineState) -> Result<(), RaaError> {
             })
         })
         .collect::<Vec<_>>();
+    let sky_diffuse = st
+        .features
+        .get::<raa_ibl::IblHandle>()
+        .map_or(1.0, raa_ibl::IblHandle::diffuse);
     handle
         .borrow_mut()
-        .update(&inputs, &materials, lit.frame_buffer())
+        .update(&inputs, &materials, lit.frame_buffer(), sky_diffuse)
 }
 
 fn integer(desc: &JsValue, key: &str, previous: u32) -> Result<u32, RaaError> {
