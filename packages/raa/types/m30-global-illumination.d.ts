@@ -257,13 +257,13 @@ export interface Engine {
   /** The latest published counters, a fresh {@link GiStats}. */
   giStats(): GiStats;
   /**
-   * Merges a spherical grid patch and installs the optional capture pass on first enable.
+   * Merges a spherical grid patch and installs the optional primary-view capture pass on first enable.
    * Grid changes discard earlier captures. Debug changes preserve the capture cache.
    */
   setSphericalGi(patch: Partial<SphericalGiSettings>): void;
   /** Effective settings for this engine. The grid is disabled by default. */
   sphericalGi(): SphericalGiSettings;
-  /** Live capture counters. Returns null before the feature has been installed. */
+  /** Live capture counters. Returns null before the first spherical frame is recorded. */
   sphericalGiStats(): SphericalGiStats | null;
   /** Polls or requests a diagnostic GPU texel readback from one ready spherical probe. */
   sphericalGiProbe(): SphericalGiProbe | null;

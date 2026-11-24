@@ -63,7 +63,7 @@ units. `clipStart` is nonnegative and `zMax` is strictly greater than `clipStart
 Shell boundaries must remain distinct in float32. The final shell ends at `zMax`
 and its center is half its width inside that boundary.
 
-Run the comparison on Windows using the direct Chrome driver:
+Run the comparison with the direct Chrome driver on Windows.
 
 ```powershell
 node scripts/capture-area-pilot-direct.mjs 'C:\Program Files\Google\Chrome\Application\chrome.exe' dist/global-illumination out/gallery-spherical-win gallery-spherical

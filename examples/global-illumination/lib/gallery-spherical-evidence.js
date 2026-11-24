@@ -1,3 +1,5 @@
+import { box } from './content.js';
+
 const groups = [['sky', 1], ['sun', 2], ['other', 4]];
 const debugViews = ['boundaries', 'occupancy', 'age', 'light-hash'];
 export const sphericalEvidenceSize = [320, 180];
@@ -37,7 +39,10 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
     return sample;
   };
   const record = (id, sample = stats()) => {
-    transitions.push({ id, frame: engine.stats().frames, settings: engine.sphericalGi(), stats: sample, pass: pass() });
+    const timing = engine.passGpuTimings();
+    const sphericalGpuMs = timing.passes?.find(stage => stage.pass === 'gi.spherical')?.ms ?? null;
+    transitions.push({ id, frame: engine.stats().frames, settings: engine.sphericalGi(), stats: sample,
+      pass: pass(), sphericalGpuMs });
     return sample;
   };
   const frame = async () => {
@@ -45,14 +50,29 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
     engine.render(timeMs);
     await engine.submittedWorkDone();
   };
-  async function warm() {
+  async function warm(minCells = 8) {
     for (let i = 0; i < 120; i++) {
       await frame();
       const sample = live();
-      if (i >= 7 && sample.readyCells >= 8 && sample.pendingFaces === 0 && sample.inFlightFaces === 0
+      if (i >= 7 && sample.readyCells >= minCells && sample.pendingFaces === 0 && sample.inFlightFaces === 0
           && sample.lightingMetadataReadyCells === sample.readyCells) return sample;
     }
     check(false, 'occupied gallery grid did not become ready', stats());
+  }
+  async function readProbe() {
+    let probe = engine.sphericalGiProbe();
+    for (let i = 0; i < 20 && !probe; i++) {
+      await frame();
+      probe = engine.sphericalGiProbe();
+    }
+    check(probe?.faceHits.length === 6 && probe.faceHits.some(count => count > 0)
+      && probe.faceHits.every((count, i) => count === probe.faceValidGeometry[i] && count + probe.faceValidMisses[i] === 64)
+      && probe.channelSums.length === 3 && probe.channelSums.flat().every(Number.isFinite)
+      && /^[a-f0-9]{16}$/.test(probe.lightHash) && probe.contributingLightIds.length > 0
+      && probe.contributingLightIds.every(id => /^[a-f0-9]{16}$/.test(id))
+      && new Set(probe.contributingLightIds).size === probe.contributingLightIds.length,
+    'occupied probe has invalid GPU position, normal, or lighting data', probe);
+    return probe;
   }
   function lastShell(sample) {
     const { inner, center, outer } = sample.lastShell;
@@ -81,22 +101,14 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
   set('lighting-view', 'indirect');
   check(!engine.sphericalGi().enabled && stats() === null && !pass(), 'feature is enabled on a default engine');
   set('gi', true);
-  set('gi-grid', 'spherical');
   // Isolate the spherical lighting groups from both direct light and volume fallback.
   engine.setGlobalIllumination({ enabled: false, screenSpace: false });
+  for (let i = 0; i < 8; i++) await frame();
+  record('never-enabled');
+  const defaultOff = await capture('default-off');
+  set('gi-grid', 'spherical');
   lastShell(record('occupied', await warm()));
-  let probe = engine.sphericalGiProbe();
-  for (let i = 0; i < 20 && !probe; i++) {
-    await frame();
-    probe = engine.sphericalGiProbe();
-  }
-  check(probe?.faceHits.length === 6 && probe.faceHits.some(count => count > 0)
-    && probe.faceHits.every((count, i) => count === probe.faceValidGeometry[i] && count + probe.faceValidMisses[i] === 64)
-    && probe.channelSums.length === 3 && probe.channelSums.flat().every(Number.isFinite)
-    && /^[a-f0-9]{16}$/.test(probe.lightHash) && probe.contributingLightIds.length > 0
-    && probe.contributingLightIds.every(id => /^[a-f0-9]{16}$/.test(id))
-    && new Set(probe.contributingLightIds).size === probe.contributingLightIds.length,
-  'occupied probe has invalid GPU position, normal, or lighting data', probe);
+  const probe = await readProbe();
   configure({ channelMask: 0 });
   const noGroups = await capture('groups-off');
   const sum = new Float32Array(noGroups.length);
@@ -189,7 +201,7 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
   check(removedRemote.lightInvalidatedFaces === lit.lightInvalidatedFaces
     && removedRemote.capturedFaces === lit.capturedFaces, 'remote light removal invalidated occupied cells', removedRemote);
 
-  const local = engine.addLight({ kind: 'point', position: [-1.1, 0.78, -3.05], range: 0.7, intensity: 15 });
+  const local = engine.addLight({ kind: 'point', position: [0.2, 0.35, -2.8], range: 0.7, intensity: 15 });
   let beforeLightChange = record('local-light-added', await warm());
   for (const [id, change] of [
     ['local-light-edited', () => engine.updateLight(local, { intensity: 4 })],
@@ -212,6 +224,7 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
     && (geometry.readyFaces < beforeGeometry.readyFaces || geometry.capturedFaces > beforeGeometry.capturedFaces),
   'moving geometry did not refresh its captures', { beforeGeometry, geometry });
   await warm();
+  engine.setTransform(state.sphereNode, [-1.1, 0.56, -3.2], [0, 0, 0, 1], [1, 1, 1]);
 
   translate(48);
   await frame();
@@ -219,6 +232,15 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
   check(empty.cells === 0 && empty.readyFaces === 0 && empty.pendingFaces === 0,
     'empty origin retained occupied cells', empty);
   await capture('empty');
+  const cube = engine.addMesh(box([0, 0, 0], [0.3, 0.3, 0.3]));
+  const cubeNode = engine.addNode(null, [camera.eye[0] + 48, 1.25, -2.1], [0, 0, 0, 1], [1, 1, 1]);
+  const cubeInstance = engine.addMeshInstance(cubeNode, cube);
+  record('isolated-geometry', await warm(1));
+  const isolatedProbe = await readProbe();
+  check(isolatedProbe.faceValidMisses.some(count => count > 0), 'isolated geometry did not retain valid sky misses', isolatedProbe);
+  engine.removeInstance(cubeInstance);
+  engine.removeNode(cubeNode);
+  engine.removeMesh(cube);
   translate(0);
   record('occupied-again', await warm());
 
@@ -227,6 +249,9 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
   const off = record('disabled');
   check(off?.active === false && off.gpuBytes === 0 && off.readyFaces === 0 && off.pendingFaces === 0
     && !pass(), 'did not release capture resources when disabled', off);
+  const restoredOff = await capture('restored-off');
+  const offEquivalence = difference(restoredOff, defaultOff);
+  check(offEquivalence.changedChannels === 0, 'disabled HDR differs from the default-off renderer', offEquivalence);
   set('gi-grid', 'spherical');
   await frame();
   const restarted = record('reenabled-first-frame', live());
@@ -249,7 +274,7 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
     check(delta.changedChannels > 20, `${method} comparison shows no spherical response`, delta);
     comparisons.push({ id: method, on: `${method}-on`, off: `${method}-off`, ...delta });
   }
-  return { json: { source, size: [width, height], camera, timeMs, probe, additiveError, groupTotal,
+  return { json: { source, size: [width, height], camera, timeMs, probe, isolatedProbe, additiveError, groupTotal, offEquivalence,
     layout: 'linear scene RGBA16F, little-endian, top-down', captures, comparisons, transitions }, files };
 }
 
