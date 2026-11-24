@@ -90,6 +90,11 @@ function reflectionScore(frame, baseline, label) {
   return { lanes, offscreen, changed, squared, logSquared };
 }
 
+// Match area.mask's zero-weight fallback and clamped ratio. The teacher support
+// and auxiliary training comparison still use the finer input support threshold.
+const areaVisibility = (visible, weight) => weight > 1e-6
+  ? Math.max(0, Math.min(1, visible / weight)) : 1;
+
 function areaScore(pairs, reference, raw = pairs) {
   let lanes = 0, squared = 0, weightSquared = 0, visibleWeightedSquared = 0;
   let commonLanes = 0, commonSquared = 0, outputOnEmpty = 0, missingOutput = 0, invalidPairs = 0;
@@ -102,7 +107,7 @@ function areaScore(pairs, reference, raw = pairs) {
       outputOnEmpty += Number(hasOutput);
       continue;
     }
-    const ratio = hasOutput ? visible / weight : 1;
+    const ratio = areaVisibility(visible, weight);
     const target = reference[k] / reference[k + 1];
     const error = (ratio - target) ** 2;
     squared += error;
@@ -287,7 +292,7 @@ export async function measureGalleryRayBudget(context, { buildId, head, trajecto
         for (let p = 0; p < pixels; p++) {
           for (let slot = 0; slot < 2; slot++) {
             const lane = p * 4 + slot * 2, weight = frame.pairs[lane + 1];
-            const expected = weight > 1e-6 ? Math.max(0, Math.min(1, frame.pairs[lane] / weight)) : 1;
+            const expected = areaVisibility(frame.pairs[lane], weight);
             if (Math.abs(frame.mask[p * 4 + slot] - expected) > 0.001) {
               throw new Error('The forward area mask did not consume the reconstructed visibility pairs');
             }
@@ -333,6 +338,7 @@ export async function measureGalleryRayBudget(context, { buildId, head, trajecto
       format: 'raa.area-ray-development/1', guideChannels: galleryGuideChannels,
       pairChannels: ['visibleWeight0', 'totalWeight0', 'visibleWeight1', 'totalWeight1'],
       validity: 'target U > 1e-8; common also requires baseline raw U > 1e-8',
+      forwardVisibility: 'clamp(S/U, 0, 1) for U > 1e-6, otherwise fully lit',
       sampleCounts: { raw: 1, learned: 1, extra: budget, teacher: [128, 128] },
       frames: developmentFrames,
     } }),

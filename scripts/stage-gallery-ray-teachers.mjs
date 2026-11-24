@@ -41,8 +41,9 @@ for (const source of sources) {
 }
 for (const [file, bytes] of staged) await writeFile(join(page, file), bytes, { flag: 'wx' });
 receipt.inputs = { ...receipt.inputs, parentBuildId: receipt.buildId,
-  rayTeachers: Object.fromEntries([...staged].filter(([file]) => file.endsWith('/manifest.json'))
-    .map(([file, bytes]) => [file, sha(bytes)])) };
+  rayTeachers: { ...receipt.inputs.rayTeachers,
+    ...Object.fromEntries([...staged].filter(([file]) => file.endsWith('/manifest.json'))
+      .map(([file, bytes]) => [file, sha(bytes)])) } };
 receipt.buildId = randomUUID();
 receipt.files = [...new Set([...receipt.files, ...staged.keys()])].sort();
 await writeFile(receiptPath + '.ray-teachers', JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx' });
