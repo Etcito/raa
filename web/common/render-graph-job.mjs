@@ -98,6 +98,12 @@ export async function captureAreaPilot(page, out) {
     }
   }
   const manifest = path.join(out, 'manifest.json');
-  await writeFile(manifest, JSON.stringify({ ...result, source: inputs, jobId, clientId, pageRef }, null, 2) + '\n', { flag: 'wx' });
+  const source = {
+    revision: inputs.revision,
+    toolchain: inputs.toolchain,
+    inputsSha256: createHash('sha256').update(JSON.stringify(inputs)).digest('hex'),
+  };
+  const dataset = { ...result, source, jobId, clientId, pageRef };
+  await writeFile(manifest, JSON.stringify(dataset, null, 2) + '\n', { flag: 'wx' });
   return manifest;
 }

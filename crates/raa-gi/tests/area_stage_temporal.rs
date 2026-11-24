@@ -57,6 +57,13 @@ fn weighted_pair_resolve_preserves_black_umbra_and_empty_slot() {
 }
 
 #[test]
+fn seeded_area_trace_validates_as_wgsl() {
+    use raa_gi::parts::area_shadow::passes::trace_module_wgsl;
+
+    raa_shader::Composer::validate(&trace_module_wgsl()).expect("area capture trace WGSL");
+}
+
+#[test]
 fn staged_area_filters_validate_as_wgsl() {
     use raa_gi::parts::area_shadow::passes::{spatial_module_wgsl, temporal_module_wgsl};
 

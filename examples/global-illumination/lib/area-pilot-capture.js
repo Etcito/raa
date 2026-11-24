@@ -45,6 +45,7 @@ export function areaInput(sample, previous, reset) {
     previous.lightGeneration === sample.lightGeneration ? planeViews(previous, PLANES) : null;
   const bytes = new Uint8Array(width * height * 12 * 4);
   const out = new DataView(bytes.buffer);
+  let weightedReceivers = 0;
   for (let p = 0; p < width * height; p++) {
     const z = depth.getFloat32(p * 4, true);
     if (!Number.isFinite(z) || z < 0) throw new Error('invalid metric depth');
@@ -57,6 +58,10 @@ export function areaInput(sample, previous, reset) {
       half(raw, lane), half(raw, lane + 1), 0, 0, half(normal, lane),
       half(normal, lane + 1), half(normal, lane + 2), z, du, dv, 0, 0,
     ];
+    if (values[0] < 0 || values[0] > values[1] || values[1] < 0) {
+      throw new Error('invalid captured weighted visibility pair');
+    }
+    if (values[1] > 0) weightedReceivers++;
     if (history && half(motion, lane + 2) < 0.5 && x >= 0 && x < width && y >= 0 && y < height) {
       const q = y * width + x;
       const previousDepth = history[1].getFloat32(q * 4, true);
@@ -68,6 +73,7 @@ export function areaInput(sample, previous, reset) {
     }
     for (let c = 0; c < values.length; c++) out.setFloat32((p * 12 + c) * 4, values[c], true);
   }
+  if (weightedReceivers === 0) throw new Error('area input has no weighted receivers');
   return bytes;
 }
 
