@@ -18,6 +18,8 @@ const sequence = op === 'gallery-sequence';
 const predictionDataset = op === 'prediction' && comparison === 'dataset';
 const predictionLearned = op === 'prediction' && comparison === 'learned';
 const liveSpherical = spherical && comparison === 'live';
+const liveMirror = mirror && comparison === 'live';
+const live = liveSpherical || liveMirror;
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
     || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-reflection-model', 'gallery-mirror'].includes(op)) {
   throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-reflection-model|gallery-mirror] [baseline|fixed|live|train|test|both|reflection|dataset|learned|coverage|sharp]');
@@ -45,17 +47,17 @@ const server = createServer(async (request, response) => {
   }
 });
 await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
-const url = liveSpherical ? 'http://127.0.0.1:8081/' : `http://127.0.0.1:${server.address().port}/`;
+const url = live ? 'http://127.0.0.1:8081/' : `http://127.0.0.1:${server.address().port}/`;
 const profile = await mkdtemp(path.join(tmpdir(), 'raa-area-pilot-'));
 let browser;
 let socket;
 let launchError;
 const stderr = [];
 try {
-  if (liveSpherical) {
+  if (live) {
     const response = await fetch(new URL('build.json', url), { signal: AbortSignal.timeout(10000) });
     if (!response.ok || !receiptBytes.equals(Buffer.from(await response.arrayBuffer()))) {
-      throw new Error('The live 8081 receipt does not match the staged spherical build');
+      throw new Error('The live 8081 receipt does not match the staged gallery build');
     }
   }
   browser = spawn(chrome, [
@@ -247,7 +249,7 @@ try {
     }
     const source = {
       ...(gallery ? data.source : {}), revision: receipt.inputs.revision,
-      receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'),
+      receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'), url,
     };
     const manifest = path.join(output, op === 'prediction' && !predictionDataset ? (predictionLearned ? 'learned-prediction.json' : 'prediction.json') : capture || sequence || predictionDataset ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
       : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : mirror ? 'mirror.json' : op === 'gallery-reflection-model' ? 'reflection-model.json' : 'measurement.json');
