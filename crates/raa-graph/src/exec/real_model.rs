@@ -5,7 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 use raa_core::{GpuContext, RaaError};
 use raa_lit::{LitHandle, StochasticMode};
 use raa_pipeline::{
-    GraphFrame, HDR_FORMAT, ImageDesc, ImageDim, PublishedImage, RecordCtx, ResourceTable,
+    GraphFrame, HDR_FORMAT, ImageDesc, ImageDim, PrepareCtx, PublishedImage, RecordCtx, ResourceTable,
 };
 use raa_taa::HistoryState;
 use serde_json::Value;
@@ -267,18 +267,32 @@ impl NeuralRoutes {
 
 pub(super) struct SharedNeuralRoutes(pub Rc<RefCell<NeuralRoutes>>);
 
-impl GraphFrame for SharedNeuralRoutes {
-    fn before_record(&mut self, pass: &str, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+impl SharedNeuralRoutes {
+    fn bind_native_area(&self, pass: &str, resources: &ResourceTable) {
         let routes = self.0.borrow();
         if let Some(route) = &routes.area
             && route.mask == pass
-            && let Some(image) = ctx.resources.get(&route.trace, "raw")
+            && let Some(image) = resources.get(&route.trace, "raw")
         {
             if let Some(alias) = &route.alias {
-                ctx.resources.publish(alias, "pairs", &image.view, image.desc);
+                resources.publish(alias, "pairs", &image.view, image.desc);
             }
-            ctx.resources.bind_input(pass, "src", image);
+            resources.bind_input(pass, "src", image);
         }
+    }
+}
+
+impl GraphFrame for SharedNeuralRoutes {
+    fn before_prepare(&mut self, pass: &str, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        // The mask publishes its receiver bindings only when the typed input is present at
+        // prepare time. The real-frame operator can replace the raw pairs at record time.
+        self.bind_native_area(pass, ctx.resources);
+        Ok(())
+    }
+
+    fn before_record(&mut self, pass: &str, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        self.bind_native_area(pass, ctx.resources);
+        let routes = self.0.borrow();
         if let Some(route) = &routes.reflection
             && route.replace == pass
             && let Some(image) = ctx.resources.get(&route.incident, "incident")

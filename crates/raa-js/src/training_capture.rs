@@ -86,6 +86,9 @@ impl Engine {
                     .ok_or_else(|| invalid("missing typed area trace pairs"))?;
                 // This offline tap reads layer zero, the first two stochastic slots.
                 textures.push(("areaPairs", image.view.texture().clone()));
+                if let Some(image) = resources.get("area.mask#mask", "areaShadow") {
+                    textures.push(("areaMask", image.view.texture().clone()));
+                }
                 if let Some(image) = resources.get("neural.area-reconstruction#areaModel", "pairs") {
                     textures.push(("areaReconstruction", image.view.texture().clone()));
                 }

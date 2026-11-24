@@ -236,9 +236,12 @@ async function measureCase(context, graph, tape, head, settings) {
         previous = { camera: pose.camera, depth: signals.depth, jitterPx: signals.jitterPx };
         guides = { guide: signals.guide, hdr: signals.hdr, depth: signals.depth, motion: signals.motion };
       }
+      if (head === 'area' && !taps.areaMask) throw new Error('The area mask did not publish its forward input');
       frames.push({ frameId: timing.frameIndex, event: pose.event, guides,
         ...(head === 'area' ? { pairs: decodeGalleryTap(
-          settings.learned ? taps.areaReconstruction : taps.areaPairs, pixels * 4, true) }
+          settings.learned ? taps.areaReconstruction : taps.areaPairs, pixels * 4, true),
+          ...(settings.learned && { rawPairs: decodeGalleryTap(taps.areaPairs, pixels * 4, true),
+            mask: decodeGalleryTap(taps.areaMask, pixels * 4, true) }) }
           : { trace: decodeGalleryTap(taps.reflectionTrace, pixels * 4, true),
             meta: decodeGalleryTap(taps.reflectionMeta, pixels * 4, false),
             incident: decodeGalleryTap(settings.learned ? taps.reflectionReconstruction : taps.reflectionIncident, pixels * 4, false) }),
@@ -274,6 +277,24 @@ export async function measureGalleryRayBudget(context, { buildId, head, trajecto
   ]) {
     const run = settings.name === 'baseline' ? baseline : await measureCase(context, graph, tape, head, settings);
     weights ??= run.weights;
+    if (head === 'area' && settings.learned) {
+      const supported = pairs => pairs.reduce((n, weight, i) => n + Number(i % 2 === 1 && weight > 1e-8), 0);
+      for (const [i, frame] of run.frames.entries()) {
+        const rawSupport = supported(frame.rawPairs), filteredSupport = supported(frame.pairs);
+        if (rawSupport === 0 || filteredSupport === 0) {
+          throw new Error(`Learned area produced no valid weighted pairs on frame ${i}; raw=${rawSupport}, filtered=${filteredSupport}`);
+        }
+        for (let p = 0; p < pixels; p++) {
+          for (let slot = 0; slot < 2; slot++) {
+            const lane = p * 4 + slot * 2, weight = frame.pairs[lane + 1];
+            const expected = weight > 1e-6 ? Math.max(0, Math.min(1, frame.pairs[lane] / weight)) : 1;
+            if (Math.abs(frame.mask[p * 4 + slot] - expected) > 0.001) {
+              throw new Error('The forward area mask did not consume the reconstructed visibility pairs');
+            }
+          }
+        }
+      }
+    }
     const frames = run.frames.map((frame, i) => ({ frame: frame.frameId, event: frame.event,
       ...(head === 'area' ? areaScore(frame.pairs, label.frames[i].target, baseline.frames[i].pairs)
         : reflectionScore(frame, baseline.frames[i], label.frames[i])) }));
@@ -282,6 +303,9 @@ export async function measureGalleryRayBudget(context, { buildId, head, trajecto
         const frame = run.frames[i];
         const name = settings.learned ? 'areaReconstruction' : settings.budget ? 'areaExtraPairs' : 'areaPairs';
         planes[name] = await saveGalleryPlane(files, id, name, size, frame.pairs);
+        if (frame.rawPairs) {
+          planes.areaLearnedInput = await saveGalleryPlane(files, id, 'areaLearnedInput', size, frame.rawPairs);
+        }
         if (settings.name === 'baseline') {
           for (const [name, values] of Object.entries(frame.guides)) {
             planes[name] = await saveGalleryPlane(files, id, name, size, values);

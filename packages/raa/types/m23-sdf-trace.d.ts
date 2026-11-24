@@ -134,6 +134,7 @@ export interface Engine {
     /** Packed weighted pairs for stochastic slots zero and one, RGBA16F. */
     areaPairs?: Uint8Array;
     areaReconstruction?: Uint8Array;
+    areaMask?: Uint8Array;
     jitterNdc: [number, number];
   }>;
   /** Offline seeded reference trace, with an independent batch of 1 to 32 samples per pixel. */
