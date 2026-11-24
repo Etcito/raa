@@ -9,7 +9,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use raa_cluster::ClusterStore;
 use raa_core::{GpuContext, MeshId, RaaError, wgpu};
@@ -138,7 +138,8 @@ struct Latest {
 /// Everything a clone of [`VgHandle`] shares.
 struct HandleState {
     vg: SharedVg,
-    pipeline: Rc<RefCell<Pipeline>>,
+    // A pipeline pass can retain this handle through the GI voxel driver.
+    pipeline: Weak<RefCell<Pipeline>>,
     store: Rc<RefCell<ClusterStore>>,
     requests: RefCell<InstanceRequests>,
     keys: RefCell<MeshKeys>,
@@ -417,10 +418,14 @@ impl VgHandle {
         if let Ok(mut state) = self.shared.vg.try_borrow_mut() {
             state.recorded.clear();
         }
-        let (passes_enabled, shadow_enabled) = match self.shared.pipeline.try_borrow() {
-            Ok(pipeline) => {
+        let (passes_enabled, shadow_enabled) = self
+            .shared
+            .pipeline
+            .upgrade()
+            .and_then(|pipeline| {
+                let pipeline = pipeline.try_borrow().ok()?;
                 let entries = pipeline.passes();
-                (
+                Some((
                     VG_ENTRIES.iter().all(|name| {
                         entries
                             .iter()
@@ -429,10 +434,9 @@ impl VgHandle {
                     entries
                         .iter()
                         .any(|info| info.name == "shadow.csm" && info.enabled),
-                )
-            }
-            Err(_) => (false, false),
-        };
+                ))
+            })
+            .unwrap_or_default();
         scene.update_world();
         let mut plan = self.plan(scene, lit, &settings);
         if !settings.enabled {
@@ -698,7 +702,7 @@ impl VgFeature {
         Ok(VgHandle {
             shared: Rc::new(HandleState {
                 vg,
-                pipeline: Rc::clone(pipeline),
+                pipeline: Rc::downgrade(pipeline),
                 store,
                 requests: RefCell::new(InstanceRequests::default()),
                 keys: RefCell::new(MeshKeys::default()),

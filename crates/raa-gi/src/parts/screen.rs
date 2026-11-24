@@ -118,17 +118,16 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
     Ok(())
 }
 
-/// The group-2 bind groups of one built `ScreenResources`, cached until the frame buffer, the
-/// history view or `invalidate_bindings` changes them.
+/// Shared screen groups and up to three trace bindings for the current resource inputs.
 struct ScreenBindings {
     frame: wgpu::Buffer,
-    history: Option<wgpu::TextureView>,
     /// The G-buffer views the cached groups were built from.
     views: GBufferViews,
     /// The voxel-buffer generation binding 6 of the trace group was built with (None: dummy).
     voxels: Option<u64>,
     pyramid: Vec<wgpu::BindGroup>,
-    trace: wgpu::BindGroup,
+    // The two HDR history views alternate. A third group binds the dummy during cuts.
+    trace: Vec<(Option<wgpu::TextureView>, wgpu::BindGroup)>,
     project: wgpu::BindGroup,
     filter: wgpu::BindGroup,
     integrate: [wgpu::BindGroup; 2],
@@ -138,8 +137,7 @@ struct ScreenBindings {
 }
 
 /// The per-frame views the screen groups bind: the frame record and the lit history, or none
-/// before the first frame. [`ScreenResources::work`] rebuilds its cached groups when either
-/// changes.
+/// while history is invalid.
 pub(crate) struct ScreenInputs<'a> {
     pub(crate) frame: &'a wgpu::Buffer,
     pub(crate) history: Option<&'a wgpu::TextureView>,
@@ -634,9 +632,8 @@ impl ScreenResources {
         Some(counters)
     }
 
-    /// Builds the group-2 bind groups of contract 'gi-screen-wgsl' on first use and caches them;
-    /// rebuilds them after `invalidate_bindings` or when `frame`, `history`, `voxels` or the
-    /// G-buffer `views` differ from the cached one.
+    /// Rebuilds the shared groups when the frame, voxel generation or G-buffer views change.
+    /// Only the trace group depends on which HDR history this frame reads.
     pub(crate) fn work<'a>(
         &'a mut self,
         gpu: &GpuContext,
@@ -653,19 +650,42 @@ impl ScreenResources {
         } = inputs;
         let stale = self.bindings.as_ref().is_none_or(|bindings| {
             bindings.frame != *frame
-                || bindings.history.as_ref() != history
                 || bindings.views != *views
                 || bindings.voxels != voxels.map(|v| v.1)
         });
         if stale {
-            let bindings = self.build_bindings(gpu, pipelines, views, frame, history, voxels);
-            self.bindings = Some(bindings);
+            self.bindings = Some(self.build_bindings(gpu, pipelines, views, frame, voxels));
         }
+        let trace_index = self
+            .bindings
+            .as_ref()
+            .expect("bindings built above")
+            .trace
+            .iter()
+            .position(|(view, _)| view.as_ref() == history);
+        let trace_index = trace_index.unwrap_or_else(|| {
+            let group = self.build_trace_group(
+                gpu,
+                pipelines,
+                views,
+                ScreenInputs {
+                    frame,
+                    history,
+                    voxels,
+                },
+            );
+            let trace = &mut self.bindings.as_mut().expect("bindings built above").trace;
+            if trace.len() == 3 {
+                trace.remove(0);
+            }
+            trace.push((history.cloned(), group));
+            trace.len() - 1
+        });
         let bindings = self.bindings.as_ref().expect("bindings built above");
         ScreenWork {
             pyramid: &bindings.pyramid,
             pyramid_sizes: &self.pyramid_sizes,
-            trace: &bindings.trace,
+            trace: &bindings.trace[trace_index].1,
             project: &bindings.project,
             filter: &bindings.filter,
             integrate: &bindings.integrate[parity & 1],
@@ -690,13 +710,42 @@ impl ScreenResources {
         self.bindings = None;
     }
 
+    fn build_trace_group(
+        &self,
+        gpu: &GpuContext,
+        pipelines: &ScreenPipelines,
+        views: &GBufferViews,
+        inputs: ScreenInputs<'_>,
+    ) -> wgpu::BindGroup {
+        let ScreenInputs {
+            frame,
+            history,
+            voxels,
+        } = inputs;
+        let history_view = history.unwrap_or(&self.dummy_view);
+        group(
+            gpu.device(),
+            "raa-gi.screen.trace",
+            &pipelines.trace_layout,
+            &[
+                (0, frame.as_entire_binding()),
+                (1, texture_resource(&views.depth)),
+                (2, texture_resource(&views.normal)),
+                (3, texture_resource(history_view)),
+                (4, texture_resource(&self.pyramid_view)),
+                (5, texture_resource(&self.atlas_view)),
+                (6, self.voxel_buffer(voxels).as_entire_binding()),
+                (7, self.params.as_entire_binding()),
+            ],
+        )
+    }
+
     fn build_bindings(
         &self,
         gpu: &GpuContext,
         pipelines: &ScreenPipelines,
         views: &GBufferViews,
         frame: &wgpu::Buffer,
-        history: Option<&wgpu::TextureView>,
         voxels: Option<&(wgpu::Buffer, u64)>,
     ) -> ScreenBindings {
         let device = gpu.device();
@@ -723,23 +772,6 @@ impl ScreenResources {
                 ],
             ));
         }
-        let cached_history = history.cloned();
-        let history_view = history.unwrap_or(&self.dummy_view);
-        let trace = group(
-            device,
-            "raa-gi.screen.trace",
-            &pipelines.trace_layout,
-            &[
-                (0, frame.as_entire_binding()),
-                (1, texture_resource(&views.depth)),
-                (2, texture_resource(&views.normal)),
-                (3, texture_resource(history_view)),
-                (4, texture_resource(&self.pyramid_view)),
-                (5, texture_resource(&self.atlas_view)),
-                (6, self.voxel_buffer(voxels).as_entire_binding()),
-                (7, self.params.as_entire_binding()),
-            ],
-        );
         let project = group(
             device,
             "raa-gi.screen.project",
@@ -815,11 +847,10 @@ impl ScreenResources {
         });
         ScreenBindings {
             frame: frame.clone(),
-            history: cached_history,
             views: views.clone(),
             voxels: voxels.map(|v| v.1),
             pyramid,
-            trace,
+            trace: Vec::new(),
             project,
             filter,
             integrate,

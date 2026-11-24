@@ -83,8 +83,9 @@ struct RetainedPrediction {
 /// Owns the GPU context, the canvas surface, the frame graph and the application, and runs
 /// one frame per [`WebRuntime::frame`] call.
 pub struct WebRuntime {
-    gpu: GpuContext,
+    // Unconfigure the canvas before dropping the context destroys its dedicated device.
     surface: CanvasSurface,
+    gpu: GpuContext,
     graph: FrameGraph,
     app: Box<dyn WebApp>,
     performance: web_sys::Performance,

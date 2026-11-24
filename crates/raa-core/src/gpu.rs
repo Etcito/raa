@@ -146,6 +146,15 @@ pub struct GpuContext {
     lost: Arc<LostState>,
 }
 
+#[cfg(target_arch = "wasm32")]
+impl Drop for GpuContext {
+    fn drop(&mut self) {
+        // The canvas context owns a dedicated device. Destroy it even if a browser object
+        // still references it or initialization failed after the device was created.
+        self.device.destroy();
+    }
+}
+
 impl GpuContext {
     pub fn device(&self) -> &wgpu::Device {
         &self.device
@@ -261,7 +270,7 @@ impl GpuContext {
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let surface = instance
-            .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+            .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
             .map_err(|e| RaaError::Surface(e.to_string()))?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -279,7 +288,7 @@ impl GpuContext {
                 gpu.summary.device
             )));
         }
-        let surface = crate::CanvasSurface::new(&gpu, surface, width, height)?;
+        let surface = crate::CanvasSurface::new(&gpu, surface, canvas, width, height)?;
         Ok((gpu, surface))
     }
 

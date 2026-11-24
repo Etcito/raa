@@ -1,11 +1,27 @@
 //! Canvas surface (wasm32): [`CanvasSurface`] and [`SurfaceFrame`].
 
+use js_sys::{Object, Reflect};
+use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
+
 use crate::{GpuContext, RaaError};
+
+#[wasm_bindgen]
+extern "C" {
+    type GpuCanvasContext;
+
+    #[wasm_bindgen(method, catch, js_name = getConfiguration)]
+    fn get_configuration(this: &GpuCanvasContext) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(method)]
+    fn unconfigure(this: &GpuCanvasContext);
+}
 
 /// A configured WebGPU canvas surface.
 #[derive(Debug)]
 pub struct CanvasSurface {
     surface: wgpu::Surface<'static>,
+    canvas: web_sys::HtmlCanvasElement,
+    device: wgpu::Device,
     config: wgpu::SurfaceConfiguration,
     /// False when the adapter does not allow COPY_SRC on the surface texture.
     copy_src: bool,
@@ -15,6 +31,7 @@ impl CanvasSurface {
     pub(crate) fn new(
         gpu: &GpuContext,
         surface: wgpu::Surface<'static>,
+        canvas: web_sys::HtmlCanvasElement,
         width: u32,
         height: u32,
     ) -> Result<CanvasSurface, RaaError> {
@@ -46,6 +63,8 @@ impl CanvasSurface {
         surface.configure(gpu.device(), &config);
         Ok(CanvasSurface {
             surface,
+            canvas,
+            device: gpu.device().clone(),
             config,
             copy_src,
         })
@@ -103,6 +122,28 @@ impl CanvasSurface {
             texture,
             queue: gpu.queue().clone(),
         })
+    }
+}
+
+impl Drop for CanvasSurface {
+    fn drop(&mut self) {
+        // An older engine can finish disposing after a replacement configured the same
+        // canvas. Leave that configuration alone even though both surfaces share the context.
+        let Some(device) = self.device.as_webgpu() else {
+            return;
+        };
+        let Ok(Some(context)) = self.canvas.get_context("webgpu") else {
+            return;
+        };
+        let context: GpuCanvasContext = context.unchecked_into();
+        let Ok(config) = context.get_configuration() else {
+            return;
+        };
+        if let Ok(owner) = Reflect::get(&config, &JsValue::from_str("device"))
+            && Object::is(device.as_ref(), &owner)
+        {
+            context.unconfigure();
+        }
     }
 }
 

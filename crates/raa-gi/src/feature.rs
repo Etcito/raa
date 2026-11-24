@@ -7,7 +7,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use raa_core::{GpuContext, MeshId, RaaError};
 use raa_ibl::IblHandle;
@@ -169,7 +169,8 @@ pub(crate) struct GiCore {
     published: Option<GiStats>,
     pending: bool,
     recorded: Vec<&'static str>,
-    pipeline: Rc<RefCell<Pipeline>>,
+    // The pipeline's passes own this core.
+    pipeline: Weak<RefCell<Pipeline>>,
 }
 
 impl GiCore {
@@ -177,7 +178,7 @@ impl GiCore {
     /// submitted view, the sun straight up, and `prepared` holding the initial statistics.
     pub(crate) fn new(
         _gpu: &GpuContext,
-        pipeline: Rc<RefCell<Pipeline>>,
+        pipeline: Weak<RefCell<Pipeline>>,
         shared: GiShared,
         drivers: Vec<Rc<dyn VoxelDriver>>,
         parts: Vec<Rc<dyn GiPart>>,
@@ -485,10 +486,12 @@ impl GiHandle {
         plan_members(items, &source, &core.requests, &claimed, &mut core.report);
         let members = core.report.forward_count + core.report.virtual_count;
 
-        let volume_pass_enabled = core.pipeline.try_borrow().is_ok_and(|p| {
-            p.passes()
-                .iter()
-                .any(|info| info.name == VOLUME_PASS && info.enabled)
+        let volume_pass_enabled = core.pipeline.upgrade().is_some_and(|pipeline| {
+            pipeline.try_borrow().is_ok_and(|p| {
+                p.passes()
+                    .iter()
+                    .any(|info| info.name == VOLUME_PASS && info.enabled)
+            })
         });
         let reason = inactive_reason(
             core.settings.enabled,
@@ -1154,7 +1157,7 @@ impl GiFeature {
         crate::parts::install_parts(&mut ctx)?;
         let (parts, drivers) = ctx.take();
         let debug = DebugRenderer::new(gpu, &shared.compute_group1_layout());
-        let mut core = GiCore::new(gpu, Rc::clone(pipeline), shared, drivers, parts, debug);
+        let mut core = GiCore::new(gpu, Rc::downgrade(pipeline), shared, drivers, parts, debug);
         core.ibl = sky_ibl;
         let core = Rc::new(RefCell::new(core));
         {

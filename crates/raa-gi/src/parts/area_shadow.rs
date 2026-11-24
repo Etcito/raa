@@ -269,8 +269,12 @@ impl FeaturePass for GiAreaShadowPass {
 
     /// Drops the cached bind groups after the targets were recreated.
     fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {
-        if let Some(resources) = self.part.state.borrow_mut().resources.as_mut() {
+        let mut state = self.part.state.borrow_mut();
+        if let Some(resources) = state.resources.as_mut() {
             resources.invalidate_bindings();
+        }
+        if let Some(restir) = state.restir.as_mut() {
+            restir.invalidate_bindings();
         }
     }
 

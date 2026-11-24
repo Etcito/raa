@@ -518,9 +518,9 @@ struct RestirGiBindings {
     views: GBufferViews,
     voxels: wgpu::Buffer,
     outputs: wgpu::TextureView,
-    main: [wgpu::BindGroup; 2],
-    spatial: [wgpu::BindGroup; 2],
-    denoise: [wgpu::BindGroup; 2],
+    main: wgpu::BindGroup,
+    spatial: wgpu::BindGroup,
+    denoise: wgpu::BindGroup,
 }
 
 /// The viewport-sized ReSTIR GI resources: two final reservoir buffers (ping-pong by parity), the
@@ -533,7 +533,8 @@ pub(crate) struct RestirGiResources {
     scratch: wgpu::Buffer,
     raw_view: wgpu::TextureView,
     params: wgpu::Buffer,
-    bindings: Option<RestirGiBindings>,
+    // HDR history normally alternates with the two screen output parities.
+    bindings: [Option<RestirGiBindings>; 2],
 }
 
 /// GPU bytes of the resources of `viewport`: three reservoir buffers (two final, one scratch) of
@@ -650,7 +651,7 @@ impl RestirGiResources {
             scratch,
             raw_view,
             params,
-            bindings: None,
+            bindings: [None, None],
         }
     }
 
@@ -680,7 +681,7 @@ impl RestirGiResources {
     }
 
     pub(crate) fn invalidate_bindings(&mut self) {
-        self.bindings = None;
+        self.bindings = [None, None];
     }
 
     /// The groups of `parity`: stage 1 reads reservoirs[1 - parity] and writes the scratch, stage
@@ -694,7 +695,8 @@ impl RestirGiResources {
         inputs: &RestirGiInputs<'_>,
         parity: usize,
     ) -> RestirGiWork<'a> {
-        let stale = self.bindings.as_ref().is_none_or(|b| {
+        let parity = parity & 1;
+        let stale = self.bindings[parity].as_ref().is_none_or(|b| {
             b.frame != *inputs.frame
                 || b.history != *inputs.history
                 || b.views != *views
@@ -702,13 +704,13 @@ impl RestirGiResources {
                 || b.outputs != inputs.accumulate.outputs[0]
         });
         if stale {
-            self.bindings = Some(self.build(gpu, pipelines, views, inputs));
+            self.bindings[parity] = Some(self.build(gpu, pipelines, views, inputs, parity));
         }
-        let b = self.bindings.as_ref().expect("built above");
+        let b = self.bindings[parity].as_ref().expect("built above");
         RestirGiWork {
-            main: &b.main[parity & 1],
-            spatial: &b.spatial[parity & 1],
-            denoise: &b.denoise[parity & 1],
+            main: &b.main,
+            spatial: &b.spatial,
+            denoise: &b.denoise,
             viewport: self.viewport,
         }
     }
@@ -719,6 +721,7 @@ impl RestirGiResources {
         pipelines: &RestirGiPipelines,
         views: &GBufferViews,
         inputs: &RestirGiInputs<'_>,
+        parity: usize,
     ) -> RestirGiBindings {
         let device = gpu.device();
         let tex = wgpu::BindingResource::TextureView;
@@ -738,62 +741,56 @@ impl RestirGiResources {
                 entries: &entries,
             })
         };
-        let main = std::array::from_fn(|parity| {
-            group(
-                "raa-gi.restir-gi.main",
-                &pipelines.main_layout,
-                &[
-                    (0, inputs.frame.as_entire_binding()),
-                    (1, tex(&views.depth)),
-                    (2, tex(&views.normal)),
-                    (3, tex(inputs.history)),
-                    (4, tex(inputs.pyramid)),
-                    (6, inputs.voxels.as_entire_binding()),
-                    (7, inputs.screen_params.as_entire_binding()),
-                    (8, tex(&views.motion)),
-                    (10, self.reservoirs[1 - parity].as_entire_binding()),
-                    (11, self.scratch.as_entire_binding()),
-                    (12, self.params.as_entire_binding()),
-                ],
-            )
-        });
-        let spatial = std::array::from_fn(|parity| {
-            group(
-                "raa-gi.restir-gi.spatial",
-                &pipelines.spatial_layout,
-                &[
-                    (0, inputs.frame.as_entire_binding()),
-                    (1, tex(&views.depth)),
-                    (2, tex(&views.normal)),
-                    (11, self.scratch.as_entire_binding()),
-                    (12, self.params.as_entire_binding()),
-                    (13, tex(&self.raw_view)),
-                    (15, self.reservoirs[parity].as_entire_binding()),
-                ],
-            )
-        });
+        let main = group(
+            "raa-gi.restir-gi.main",
+            &pipelines.main_layout,
+            &[
+                (0, inputs.frame.as_entire_binding()),
+                (1, tex(&views.depth)),
+                (2, tex(&views.normal)),
+                (3, tex(inputs.history)),
+                (4, tex(inputs.pyramid)),
+                (6, inputs.voxels.as_entire_binding()),
+                (7, inputs.screen_params.as_entire_binding()),
+                (8, tex(&views.motion)),
+                (10, self.reservoirs[1 - parity].as_entire_binding()),
+                (11, self.scratch.as_entire_binding()),
+                (12, self.params.as_entire_binding()),
+            ],
+        );
+        let spatial = group(
+            "raa-gi.restir-gi.spatial",
+            &pipelines.spatial_layout,
+            &[
+                (0, inputs.frame.as_entire_binding()),
+                (1, tex(&views.depth)),
+                (2, tex(&views.normal)),
+                (11, self.scratch.as_entire_binding()),
+                (12, self.params.as_entire_binding()),
+                (13, tex(&self.raw_view)),
+                (15, self.reservoirs[parity].as_entire_binding()),
+            ],
+        );
         let acc = &inputs.accumulate;
-        let denoise = std::array::from_fn(|parity: usize| {
-            group(
-                "raa-gi.restir-gi.denoise",
-                &pipelines.denoise_layout,
-                &[
-                    (0, inputs.frame.as_entire_binding()),
-                    (1, tex(&views.depth)),
-                    (2, tex(&views.normal)),
-                    (3, tex(&views.motion)),
-                    (4, tex(&acc.outputs[1 - parity])),
-                    (6, tex(&acc.outputs[parity])),
-                    (7, inputs.screen_params.as_entire_binding()),
-                    (8, tex(&acc.metas[1 - parity])),
-                    (9, tex(&acc.metas[parity])),
-                    (10, tex(&acc.filter)),
-                    (11, tex(&acc.debug)),
-                    (12, acc.counters.as_entire_binding()),
-                    (14, tex(&self.raw_view)),
-                ],
-            )
-        });
+        let denoise = group(
+            "raa-gi.restir-gi.denoise",
+            &pipelines.denoise_layout,
+            &[
+                (0, inputs.frame.as_entire_binding()),
+                (1, tex(&views.depth)),
+                (2, tex(&views.normal)),
+                (3, tex(&views.motion)),
+                (4, tex(&acc.outputs[1 - parity])),
+                (6, tex(&acc.outputs[parity])),
+                (7, inputs.screen_params.as_entire_binding()),
+                (8, tex(&acc.metas[1 - parity])),
+                (9, tex(&acc.metas[parity])),
+                (10, tex(&acc.filter)),
+                (11, tex(&acc.debug)),
+                (12, acc.counters.as_entire_binding()),
+                (14, tex(&self.raw_view)),
+            ],
+        );
         RestirGiBindings {
             frame: inputs.frame.clone(),
             history: inputs.history.clone(),

@@ -29,7 +29,6 @@ struct RestirBindings {
     sdf_uniform: Option<wgpu::Buffer>,
     raw: wgpu::TextureView,
     views: GBufferViews,
-    parity: usize,
     group: wgpu::BindGroup,
 }
 
@@ -55,7 +54,7 @@ fn texture_resource(view: &wgpu::TextureView) -> wgpu::BindingResource<'_> {
 /// `restir_resource_bytes`. Today `new` allocates the two 16-B-per-pixel STORAGE reservoir
 /// buffers, the 64-B params uniform and the LTC atlas; `bind_group` caches the group-2 bind group
 /// over `RestirPipelines.layout` (Handoff at restir.rs:199 `RestirPipelines`) and rebuilds it when
-/// the shared parity or an input buffer or view differs. LIFECYCLE: RestirResources is created by
+/// an input buffer or view differs for that parity. LIFECYCLE: RestirResources is created by
 /// GiAreaShadowPass::prepare (pipeline prepare, order 43) on a frame whose
 /// AreaStochasticFrame.mode is Restir when needs_restir_reallocation reports a new viewport, and
 /// dropped by that prepare on a Stratified frame or whenever it clears the mask (GI inactive,
@@ -70,7 +69,7 @@ pub(crate) struct RestirResources {
     atlas: wgpu::Texture,
     atlas_view: wgpu::TextureView,
     state: HistoryState,
-    bindings: Option<RestirBindings>,
+    bindings: [Option<RestirBindings>; 2],
 }
 
 impl RestirResources {
@@ -93,7 +92,7 @@ impl RestirResources {
             atlas,
             atlas_view,
             state: HistoryState::new(viewport),
-            bindings: None,
+            bindings: [None, None],
         }
     }
 
@@ -150,7 +149,7 @@ impl RestirResources {
         gpu.queue().write_buffer(&self.params, 0, &bytes);
     }
 
-    /// The cached group-2 bind group, rebuilt when the shared parity, the raw view, the G-buffer
+    /// The cached group-2 bind group for this parity, rebuilt when the raw view, the G-buffer
     /// views or any input buffer or view differs from the one it was built from.
     pub(crate) fn bind_group(
         &mut self,
@@ -160,9 +159,9 @@ impl RestirResources {
         inputs: &AreaShadowInputs<'_>,
         shared: &AreaSharedViews<'_>,
     ) -> &wgpu::BindGroup {
-        let stale = self.bindings.as_ref().is_none_or(|bindings| {
-            bindings.parity != shared.parity
-                || bindings.raw != *shared.raw
+        let parity = shared.parity;
+        let stale = self.bindings[parity].as_ref().is_none_or(|bindings| {
+            bindings.raw != *shared.raw
                 || bindings.views != *views
                 || bindings.gi_frame != *inputs.gi_frame
                 || bindings.lit_frame != *inputs.lit_frame
@@ -173,7 +172,7 @@ impl RestirResources {
         });
         if stale {
             let group = self.build_group(gpu, pipelines, views, inputs, shared);
-            self.bindings = Some(RestirBindings {
+            self.bindings[parity] = Some(RestirBindings {
                 gi_frame: inputs.gi_frame.clone(),
                 lit_frame: inputs.lit_frame.clone(),
                 table: inputs.table.clone(),
@@ -182,14 +181,17 @@ impl RestirResources {
                 sdf_uniform: inputs.sdf.map(|sdf| sdf.1.clone()),
                 raw: shared.raw.clone(),
                 views: views.clone(),
-                parity: shared.parity,
                 group,
             });
         }
-        match &self.bindings {
-            Some(bindings) => &bindings.group,
-            None => unreachable!("the bindings were built above"),
-        }
+        &self.bindings[parity]
+            .as_ref()
+            .expect("bindings built above")
+            .group
+    }
+
+    pub(crate) fn invalidate_bindings(&mut self) {
+        self.bindings = [None, None];
     }
 
     fn build_group(

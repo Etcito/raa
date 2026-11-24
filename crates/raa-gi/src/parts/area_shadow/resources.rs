@@ -26,9 +26,7 @@ pub(crate) struct AreaShadowInputs<'a> {
     pub(crate) sdf: Option<(&'a wgpu::TextureView, &'a wgpu::Buffer)>,
 }
 
-/// The inputs one set of cached bind groups was built from, and the groups themselves. `work`
-/// rebuilds them when the parity, any of these buffers and views, or the G-buffer `views`
-/// differs.
+/// The inputs one parity's cached bind groups were built from, and the groups themselves.
 struct AreaShadowBindings {
     gi_frame: wgpu::Buffer,
     lit_frame: wgpu::Buffer,
@@ -37,7 +35,6 @@ struct AreaShadowBindings {
     sdf_field: Option<wgpu::TextureView>,
     sdf_uniform: Option<wgpu::Buffer>,
     views: GBufferViews,
-    parity: usize,
     trace: wgpu::BindGroup,
     temporal: Vec<wgpu::BindGroup>,
     spatial_h: Vec<wgpu::BindGroup>,
@@ -181,7 +178,7 @@ pub(crate) struct AreaShadowResources {
     dummy_pyramid: wgpu::TextureView,
     dummy_sdf_field: wgpu::TextureView,
     dummy_sdf_uniform: wgpu::Buffer,
-    bindings: Option<AreaShadowBindings>,
+    bindings: [Option<AreaShadowBindings>; 2],
 }
 
 impl AreaShadowResources {
@@ -304,7 +301,7 @@ impl AreaShadowResources {
             dummy_pyramid,
             dummy_sdf_field,
             dummy_sdf_uniform,
-            bindings: None,
+            bindings: [None, None],
         }
     }
 
@@ -350,7 +347,8 @@ impl AreaShadowResources {
 
     /// Sets the offline trace seed in the reserved word after write_params clears it.
     pub(crate) fn write_capture_seed(&self, gpu: &GpuContext, seed: u32) {
-        gpu.queue().write_buffer(&self.params, 4, &(seed + 1).to_le_bytes());
+        gpu.queue()
+            .write_buffer(&self.params, 4, &(seed + 1).to_le_bytes());
     }
 
     /// Writes the 16 B of `AreaShadowParamsGpu` as (frame_index, 0, 0, 0) and every 16 B
@@ -384,8 +382,8 @@ impl AreaShadowResources {
     }
 
     /// Builds the bind groups on first use and caches them; rebuilds them after
-    /// `invalidate_bindings`, a change of the depth pair's write index (the shared parity of
-    /// every pair) or a changed G-buffer view or input buffer or view. The returned
+    /// `invalidate_bindings` or a changed G-buffer view or input. Each parity has its own slot.
+    /// The returned
     /// `AreaShadowWork` carries the trace group, `cpu::groups_for(limit).min(groups)` temporal
     /// and horizontal spatial groups, `limit.min(8).div_ceil(4)` vertical spatial groups and the
     /// viewport.
@@ -397,8 +395,10 @@ impl AreaShadowResources {
         inputs: &AreaShadowInputs<'_>,
         limit: u32,
     ) -> AreaShadowWork<'a> {
-        self.refresh(gpu, pipelines, views, inputs);
-        let bindings = self.bindings.as_ref().expect("bindings built by refresh");
+        let parity = self.refresh(gpu, pipelines, views, inputs);
+        let bindings = self.bindings[parity]
+            .as_ref()
+            .expect("bindings built by refresh");
         let groups = cpu::groups_for(limit).min(self.groups) as usize;
         let layers = (limit.min(8).div_ceil(4) as usize).min(bindings.spatial_v.len());
         AreaShadowWork {
@@ -434,8 +434,10 @@ impl AreaShadowResources {
         inputs: &AreaShadowInputs<'_>,
         limit: u32,
     ) -> AreaShadowWork<'a> {
-        self.refresh(gpu, pipelines, views, inputs);
-        let bindings = self.bindings.as_ref().expect("bindings built by refresh");
+        let parity = self.refresh(gpu, pipelines, views, inputs);
+        let bindings = self.bindings[parity]
+            .as_ref()
+            .expect("bindings built by refresh");
         let layers = (limit.min(8).div_ceil(4) as usize).min(bindings.spatial_v_broadcast.len());
         AreaShadowWork {
             trace: &bindings.trace,
@@ -459,19 +461,17 @@ impl AreaShadowResources {
         }
     }
 
-    /// Rebuilds the cached bind groups after `invalidate_bindings`, a parity change or a changed
-    /// G-buffer view or input buffer or view.
+    /// Selects the current parity's groups and rebuilds them when the inputs change.
     fn refresh(
         &mut self,
         gpu: &GpuContext,
         pipelines: &AreaShadowPipelines,
         views: &GBufferViews,
         inputs: &AreaShadowInputs<'_>,
-    ) {
+    ) -> usize {
         let parity = self.depth.state().write_index();
-        let stale = self.bindings.as_ref().is_none_or(|bindings| {
-            bindings.parity != parity
-                || bindings.views != *views
+        let stale = self.bindings[parity].as_ref().is_none_or(|bindings| {
+            bindings.views != *views
                 || bindings.gi_frame != *inputs.gi_frame
                 || bindings.lit_frame != *inputs.lit_frame
                 || bindings.table != *inputs.table
@@ -480,13 +480,14 @@ impl AreaShadowResources {
                 || bindings.sdf_uniform.as_ref() != inputs.sdf.map(|sdf| sdf.1)
         });
         if stale {
-            self.bindings = Some(self.build_bindings(gpu, pipelines, views, inputs, parity));
+            self.bindings[parity] = Some(self.build_bindings(gpu, pipelines, views, inputs));
         }
+        parity
     }
 
     /// Drops the cached bind groups, so the next `work` builds them again.
     pub(crate) fn invalidate_bindings(&mut self) {
-        self.bindings = None;
+        self.bindings = [None, None];
     }
 
     /// Commits every history pair and the depth pair: one frame of history is now readable.
@@ -503,7 +504,6 @@ impl AreaShadowResources {
         pipelines: &AreaShadowPipelines,
         views: &GBufferViews,
         inputs: &AreaShadowInputs<'_>,
-        parity: usize,
     ) -> AreaShadowBindings {
         let device = gpu.device();
         let pyramid = inputs.pyramid.unwrap_or(&self.dummy_pyramid);
@@ -623,7 +623,6 @@ impl AreaShadowResources {
             sdf_field: inputs.sdf.map(|sdf| sdf.0.clone()),
             sdf_uniform: inputs.sdf.map(|sdf| sdf.1.clone()),
             views: views.clone(),
-            parity,
             trace,
             temporal,
             spatial_h,
@@ -832,13 +831,29 @@ mod tests {
             (work.trace.clone(), work.temporal[0].clone())
         };
         assert_eq!(first, kept);
+
+        resources.commit();
+        {
+            let opposite = resources.work(&gpu, &pipelines, &plain, &inputs, 3);
+            assert_ne!(first.0, *opposite.trace);
+            assert_ne!(first.1, opposite.temporal[0]);
+        }
+        resources.commit();
+        {
+            let reused = resources.work(&gpu, &pipelines, &plain, &inputs, 3);
+            assert_eq!(first.0, *reused.trace);
+            assert_eq!(first.1, reused.temporal[0]);
+        }
+
         let rebuilt = {
             let work = resources.work(&gpu, &pipelines, &bound, &inputs, 3);
             (work.trace.clone(), work.temporal[0].clone())
         };
         assert_ne!(first.0, rebuilt.0);
         assert_ne!(first.1, rebuilt.1);
-        let cached = resources.bindings.as_ref().expect("bindings built above");
+        let cached = resources.bindings[0]
+            .as_ref()
+            .expect("bindings built above");
         assert!(cached.views == bound);
         assert_eq!(cached.views.normal, bound.normal);
         assert_eq!(cached.views.depth, plain.depth);
