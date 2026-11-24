@@ -1,7 +1,7 @@
 import init, { Engine } from './raa/raa.js';
 import { loadEngine } from './ege/loader.js';
 import { RollbackBinding } from './ege/rollback.js';
-import { predictionInputs, predictionLabel, predictionPlanes } from './training.js';
+import { predictionInputs, predictionLabel, predictionPlanes, scorePrediction } from './training.js';
 
 const canvas = document.querySelector('canvas');
 const hud = document.querySelector('output');
@@ -236,7 +236,7 @@ async function run({ buildId, trajectory } = {}) {
     const packet = trajectory && {
       id: trajectory.id, sourceRealFrameId: source, sourceAgeRealFrames: targetReal - source,
       sourceAvailableMs, guidesAvailableMs, cutoffMs: targetCutoffMs, targetRenderStartedMs,
-      targetRealFrameId: targetReal, sourceSnapshot: first, acceptedTarget: target,
+      targetRealFrameId: targetReal, analytic: scorePrediction(inputs, label), sourceSnapshot: first, acceptedTarget: target,
       sourcePositionPx: from, targetPositionPx: to, actorStops: trajectory.stops,
       planes: await predictionPlanes(files, trajectory.id, { ...inputs, label }, width, height),
     };
@@ -268,7 +268,7 @@ async function captureDataset({ buildId }) {
     const { packet, ...proof } = result.json;
     facts = proof.facts;
     require(packet.sourceAvailableMs <= packet.cutoffMs && packet.guidesAvailableMs <= packet.cutoffMs
-      && packet.cutoffMs <= packet.targetRenderStartedMs, 'Predictive evidence crossed its input cutoff');
+      && packet.cutoffMs < packet.targetRenderStartedMs, 'Predictive evidence crossed its input cutoff');
     sequences.push({ id: trajectory.id, split: trajectory.split, groupId: trajectory.id, frames: [packet], proof });
     files.push(...result.files);
   }
