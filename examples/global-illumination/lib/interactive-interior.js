@@ -12,9 +12,20 @@ const options = [
 ];
 const variant = {
   id: 'live',
+  title: 'Quality · 4× MSAA, medium screen GI',
+  engine: { msaa: 4 },
+  screenSpaceQuality: 'medium',
   selection: {
     camera: { eye: [0.1, 1.65, -0.35], target: [0, 1.32, -5.8], fovYDeg: 62, near: 0.05, far: 40 },
   },
+};
+
+const performanceVariant = {
+  ...variant,
+  id: 'performance',
+  title: 'Performance · 1× sampling, low screen GI',
+  engine: { msaa: 1 },
+  screenSpaceQuality: 'low',
 };
 
 const fixtures = [
@@ -22,11 +33,11 @@ const fixtures = [
   { position: [1.45, 2.62, -5.65], size: [0.8, 1.7], color: [0.59, 0.79, 1], intensity: 23 },
 ];
 
-function setGi(engine, enabled) {
+function setGi(engine, enabled, screenSpaceQuality) {
   engine.setGlobalIllumination({
     enabled,
     screenSpace: enabled,
-    screenSpaceQuality: 'medium',
+    screenSpaceQuality,
     reflections: enabled,
     localLightShadows: true,
     environmentDiffuse: 0.1,
@@ -42,10 +53,11 @@ function fixtureSurface(color, enabled) {
   };
 }
 
-function build(engine) {
+function build(engine, _lib, selected = variant) {
   const room = volumeRoom();
   const state = {
     enabled: Object.fromEntries(options.map(option => [option.id, option.enabled])),
+    screenSpaceQuality: selected.screenSpaceQuality,
     fixtures: [],
     motionTime: 0,
     previousTime: undefined,
@@ -59,7 +71,7 @@ function build(engine) {
   engine.setAreaLightShading({ mode: 'ltc' });
   engine.setAreaLightShadows({ tier: 'hero', heroCount: fixtures.length });
   engine.setSsr({ intensity: 0.65, maxRoughness: 0.35 });
-  setGi(engine, state.enabled.gi);
+  setGi(engine, state.enabled.gi, state.screenSpaceQuality);
 
   const material = (color, roughness = 0.78, metallic = 0) =>
     engine.addSurfaceMaterial({ color, roughness, metallic });
@@ -120,7 +132,7 @@ function setOption(engine, state, id, enabled) {
   if (state.enabled[id] === enabled) return;
   switch (id) {
     case 'gi':
-      setGi(engine, enabled);
+      setGi(engine, enabled, state.screenSpaceQuality);
       break;
     case 'area-lights':
       for (const { light, intensity, surface, color } of state.fixtures) {
@@ -162,7 +174,7 @@ export const interactiveInterior = {
     id: 'interactive-interior',
     milestone: 'lighting',
     title: 'Interactive gallery interior',
-    variants: [variant],
+    variants: [performanceVariant, variant],
     options,
     build,
     frame,

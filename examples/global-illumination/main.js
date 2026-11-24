@@ -146,7 +146,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
         if (!namespace.inventory.some(row => row.mode === variant.id)) continue;
         const option = target.document.createElement('option');
         option.value = variant.id;
-        option.textContent = variant.id;
+        option.textContent = variant.title ?? variant.id;
         variantPicker.appendChild(option);
       }
     }
