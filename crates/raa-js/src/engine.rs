@@ -730,6 +730,14 @@ impl Engine {
         self.render_frame(now_ms, None).map_err(|e| js_err(&e))
     }
 
+    /// Resolves when this engine's WebGPU queue has finished work submitted so far.
+    #[wasm_bindgen(js_name = submittedWorkDone)]
+    pub fn submitted_work_done(&mut self) -> Result<js_sys::Promise<js_sys::Undefined>, JsValue> {
+        let queue = self.runtime()?.gpu().queue().as_webgpu()
+            .ok_or_else(|| js_err(&RaaError::Unsupported("WebGPU queue required".into())))?;
+        Ok(queue.on_submitted_work_done())
+    }
+
     /// Whether the canvas supports the copy used by split presentation.
     #[wasm_bindgen(js_name = supportsSplitPresentation)]
     pub fn supports_split_presentation(&self) -> Result<bool, JsValue> {

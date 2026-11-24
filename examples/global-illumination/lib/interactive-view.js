@@ -165,7 +165,7 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
       let sceneReady = !scene.ready;
       let firstTime;
       let previousTime;
-      function frame(timestamp) {
+      async function frame(timestamp) {
         request = null;
         try {
           firstTime ??= timestamp;
@@ -178,9 +178,10 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
           if (!sceneReady) sceneReady = scene.ready(engine, state, variant).ready;
           if (previousTime === undefined) onReady(state);
           previousTime = timestamp;
-          request = target.requestAnimationFrame(frame);
+          await engine.submittedWorkDone();
+          if (!signal.aborted) request = target.requestAnimationFrame(frame);
         } catch (error) {
-          fail(error);
+          if (!signal.aborted) fail(error);
         }
       }
       request = target.requestAnimationFrame(frame);

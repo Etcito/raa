@@ -421,6 +421,8 @@ export interface Engine {
    * @throws RaaError `core.surface`, `core.gpu`, `api.disposed`.
    */
   render(nowMs: number): void;
+  /** Resolves after all previously submitted GPU work completes. */
+  submittedWorkDone(): Promise<void>;
 
   /**
    * Renders one frame through the same path as render() and returns its timing record.

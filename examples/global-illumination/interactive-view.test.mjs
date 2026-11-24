@@ -13,6 +13,7 @@ function fixture() {
     resize: (...args) => calls.push(['resize', ...args]),
     setCamera: desc => calls.push(['camera', desc]),
     setOrbit: (pivot, ...pose) => calls.push(['orbit', [...pivot], ...pose]),
+    submittedWorkDone: () => Promise.resolve(),
     render: time => calls.push(['render', time]),
     dispose: () => calls.push(['dispose']),
   };
@@ -55,7 +56,7 @@ function fixture() {
       assert.equal(pending.size, 1);
       const [[id, callback]] = pending;
       pending.delete(id);
-      callback(time);
+      return callback(time);
     },
     input(type, props) {
       return canvas.dispatchEvent(Object.assign(new Event(type, { cancelable: true }), props));
@@ -68,22 +69,22 @@ test('live frames use the variant camera, apply focused input and release the ca
   const view = createInteractiveView(options);
   await view.ready;
   assert.deepEqual(calls.at(-1), ['camera', camera]);
-  tick(100);
+  await tick(100);
   assert.deepEqual(calls.slice(-3), [['frame', 500], ['render', 500], ['ready']]);
 
   assert.equal(input('keydown', { key: 'z', code: 'KeyW' }), false);
-  tick(116);
+  await tick(116);
   const move = calls.at(-3);
   assert.equal(move[0], 'orbit');
   assert.ok(move[1][2] > 0);
   options.canvas.dispatchEvent(new Event('blur'));
-  tick(132);
+  await tick(132);
   assert.equal(calls.filter(call => call[0] === 'orbit').length, 1);
 
   input('pointerdown', { button: 0, pointerId: 2, clientX: 0, clientY: 0 });
   input('pointermove', { pointerId: 2, clientX: 20, clientY: 12 });
   assert.equal(input('wheel', { deltaY: -100, deltaMode: 0 }), false);
-  tick(148);
+  await tick(148);
   const orbit = calls.at(-3);
   assert.equal(orbit[0], 'orbit');
   assert.ok(orbit[2] < move[2]);
@@ -91,10 +92,10 @@ test('live frames use the variant camera, apply focused input and release the ca
   assert.notEqual(orbit[4], move[4]);
 
   input('keydown', { key: 'f' });
-  tick(164);
+  await tick(164);
   assert.deepEqual(calls.at(-3)[1], camera.target);
   view.reset();
-  tick(180);
+  await tick(180);
   assert.deepEqual(calls.at(-3), ['camera', camera]);
 
   assert.equal(options.canvas.hasPointerCapture(2), false);
@@ -117,10 +118,10 @@ test('scene readiness advances alongside normal rendering until setup finishes',
   };
   const view = createInteractiveView(options);
   await view.ready;
-  tick(100);
+  await tick(100);
   assert.deepEqual(calls.at(-1), ['ready']);
-  tick(116);
-  tick(132);
+  await tick(116);
+  await tick(132);
   assert.equal(checks, 2);
   view.stop();
 });
@@ -141,5 +142,20 @@ test('stopping during a scene build disposes its engine when the build completes
   build.resolve();
   await view.ready;
   assert.deepEqual(calls, [['resize', 1280, 720], ['dispose']]);
+  assert.equal(pending.size, 0);
+});
+
+test('a pending GPU frame prevents further submissions and cannot restart a stopped view', async () => {
+  const { options, engine, calls, pending, tick } = fixture();
+  const fence = Promise.withResolvers();
+  engine.submittedWorkDone = () => fence.promise;
+  const view = createInteractiveView(options);
+  await view.ready;
+  const submitted = tick(100);
+  assert.equal(pending.size, 0);
+  assert.equal(calls.filter(call => call[0] === 'render').length, 1);
+  view.stop();
+  fence.resolve();
+  await submitted;
   assert.equal(pending.size, 0);
 });
