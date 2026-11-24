@@ -4,7 +4,7 @@ const TENSORS = [
   ['hidden.weight', 0, [8, 12]], ['hidden.bias', 384, [8]],
   ['output.weight', 416, [3, 8]], ['output.bias', 512, [3]],
 ];
-export const PATH_FIXTURE = 'gallery-mesh-specular/1';
+export const PATH_FIXTURE = 'gallery-mesh-specular/2';
 const MODEL_FOLDER = 'lib/gallery-path-fit';
 const MANIFEST = `${MODEL_FOLDER}/manifest.json`;
 const WEIGHTS = `${MODEL_FOLDER}/weights.fp32le`;

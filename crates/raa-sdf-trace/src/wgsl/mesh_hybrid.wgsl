@@ -158,7 +158,7 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let tri = triangles[hit.object];
-    let mat = materials[tri.a.material];
+    let mat = hit_material(tri, hit.bary);
     if (mat.flags.x & 3u) != 0u {
         if diffuse_output != 0u {
             textureStore(radiance, sample_pixel, vec4<f32>(0.0));

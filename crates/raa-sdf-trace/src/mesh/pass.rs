@@ -8,6 +8,7 @@ use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, Recor
 use super::{
     COUNTER_COUNT, MeshTraceScene, MeshTraceStats, PathMode, REFERENCE_SPP, hybrid::HybridGpu,
 };
+use super::geometry::TRIANGLE_BYTES;
 use crate::wgsl::mesh_trace_module;
 
 pub const MESH_TRACE_NAME: &str = "trace.mesh";
@@ -526,7 +527,7 @@ impl Pipelines {
                 wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             ),
             nodes: DataBuffer::new(device, "trace.mesh.nodes", 32),
-            triangles: DataBuffer::new(device, "trace.mesh.triangles", 96),
+            triangles: DataBuffer::new(device, "trace.mesh.triangles", TRIANGLE_BYTES),
             materials: DataBuffer::new(device, "trace.mesh.materials", 48),
         }
     }

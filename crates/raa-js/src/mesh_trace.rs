@@ -54,7 +54,7 @@ pub(crate) fn prepare(st: &EngineState) -> Result<(), RaaError> {
                 continue;
             };
             let indices = &source.mesh.indices[first as usize..(first + count) as usize];
-            parts.insert(id, (gpu.key, &source.mesh, indices));
+            parts.insert(id, (gpu.key, source, indices));
         }
     }
 
@@ -84,12 +84,13 @@ pub(crate) fn prepare(st: &EngineState) -> Result<(), RaaError> {
             if material.class() == DrawClass::Transparent {
                 return None;
             }
-            let (key, mesh, indices) = parts.get(&item.mesh)?;
+            let (key, source, indices) = parts.get(&item.mesh)?;
             Some(MeshInput {
                 key: *key,
                 mesh: item.mesh.0,
-                positions: &mesh.positions,
-                normals: &mesh.normals,
+                positions: &source.mesh.positions,
+                normals: &source.mesh.normals,
+                colors: source.colors.as_deref(),
                 indices,
                 world: item.world,
                 material: item.material.0,

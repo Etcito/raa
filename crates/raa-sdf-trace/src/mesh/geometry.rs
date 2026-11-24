@@ -5,7 +5,9 @@ use raa_math::{Mat4, Vec3};
 
 use crate::bvh::{Bvh, Node, build_bounds};
 
-const TRIANGLE_WORDS: usize = 24;
+const VERTEX_WORDS: usize = 12;
+pub(super) const TRIANGLE_BYTES: u64 = (TRIANGLE_WORDS * 4) as u64;
+const TRIANGLE_WORDS: usize = 3 * VERTEX_WORDS;
 const MAX_TRIANGLES: usize = 250_000;
 type Bounds = ([f32; 3], [f32; 3]);
 
@@ -15,6 +17,7 @@ pub struct MeshInput<'a> {
     pub mesh: u32,
     pub positions: &'a [[f32; 3]],
     pub normals: &'a [[f32; 3]],
+    pub colors: Option<&'a [[f32; 4]]>,
     pub indices: &'a [u32],
     pub material: u32,
     pub world: Mat4,
@@ -163,9 +166,12 @@ impl Geometry {
                             .normalize_or_zero()
                     })
                     .to_array();
-                let offset = corner * 8;
+                let color = input.colors.map_or([1.0; 4], |colors| colors[index]);
+                let offset = corner * VERTEX_WORDS;
                 words[offset..offset + 3].copy_from_slice(&p.map(f32::to_bits));
                 words[offset + 4..offset + 7].copy_from_slice(&normal.map(f32::to_bits));
+                words[offset + 8..offset + 11]
+                    .copy_from_slice(&[color[0], color[1], color[2]].map(f32::to_bits));
                 for axis in 0..3 {
                     lo[axis] = lo[axis].min(p[axis]);
                     hi[axis] = hi[axis].max(p[axis]);
@@ -200,5 +206,47 @@ impl Geometry {
         }
         self.bvh.nodes[i].min = lo;
         self.bvh.nodes[i].max = hi;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packs_linear_rgb_in_index_order_and_uses_white_for_uncolored_meshes() {
+        let colors = [
+            [1.5, 0.3, 0.1, 1.0],
+            [0.1, 0.7, 0.2, 0.0],
+            [0.25, 0.5, 1.0, 0.2],
+        ];
+        let mut input = MeshInput {
+            key: 1,
+            mesh: 0,
+            positions: &[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            normals: &[[0., 0., 1.]; 3],
+            colors: Some(&colors),
+            indices: &[2, 0, 1],
+            material: 7,
+            world: Mat4::IDENTITY,
+        };
+        let mut geometry = Geometry::default();
+        geometry.update(std::slice::from_ref(&input)).unwrap();
+        let lanes = |geometry: &Geometry, corner: usize| {
+            let start = corner * VERTEX_WORDS + 8;
+            std::array::from_fn::<_, 3, _>(|i| f32::from_bits(geometry.triangles[0][start + i]))
+        };
+        for (corner, index) in input.indices.iter().enumerate() {
+            let [r, g, b, _] = colors[*index as usize];
+            assert_eq!(lanes(&geometry, corner), [r, g, b]);
+        }
+        assert_eq!(geometry.triangle_bytes.len() as u64, TRIANGLE_BYTES);
+
+        input.colors = None;
+        input.key += 1;
+        geometry.update(&[input]).unwrap();
+        for corner in 0..3 {
+            assert_eq!(lanes(&geometry, corner), [1.0; 3]);
+        }
     }
 }

@@ -1,6 +1,9 @@
 // Mesh intersections share the conservative BVH node layout and slab test with SDF tracing.
 struct TraceNode { lo: vec3<f32>, left: u32, hi: vec3<f32>, count: u32 }
-struct Vertex { position: vec3<f32>, material: u32, normal: vec3<f32>, padding: u32 }
+struct Vertex {
+    position: vec3<f32>, material: u32, normal: vec3<f32>, padding: u32,
+    color: vec3<f32>, color_padding: u32,
+}
 struct Triangle { a: Vertex, b: Vertex, c: Vertex }
 struct Material { base_roughness: vec4<f32>, emission_metallic: vec4<f32>, flags: vec4<u32> }
 struct Ray { origin: vec3<f32>, direction: vec3<f32> }
@@ -117,6 +120,13 @@ fn basis(n: vec3<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(tangent, cross(n, tangent), n);
 }
 
+fn hit_material(tri: Triangle, bary: vec2<f32>) -> Material {
+    var mat = materials[tri.a.material];
+    let color = tri.a.color * (1.0 - bary.x - bary.y) + tri.b.color * bary.x + tri.c.color * bary.y;
+    mat.base_roughness = vec4<f32>(mat.base_roughness.rgb * color, mat.base_roughness.w);
+    return mat;
+}
+
 fn f0(mat: Material) -> vec3<f32> {
     return mix(vec3<f32>(0.04), min(mat.base_roughness.rgb, vec3<f32>(1.0)), mat.emission_metallic.w);
 }
@@ -189,7 +199,12 @@ fn sun_and_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: 
             if distance >= light.position_range.w { continue; }
             let window = saturate(1.0 - pow(distance / light.position_range.w, 4.0));
             weight = window * window / max(distance * distance, 0.04);
-            if area { weight *= light.width * light.height * saturate(dot(travel, -l)); }
+            if area {
+                // Packed RGB is total intensity. Radiance is intensity / area,
+                // while the uniform-area sample has PDF 1 / area.
+                let area_size = light.width * light.height;
+                weight *= (area_size / max(area_size, 1e-8)) * saturate(dot(travel, -l));
+            }
             if light.kind == 1u { weight *= smoothstep(light.direction_outer.w, light.inner, dot(travel, -l)); }
         }
         let nl = saturate(dot(n, l));
@@ -277,7 +292,7 @@ fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
         }
         if !path && step == 0u { atomicAdd(&counters[GEOMETRY_HIT], 1u); }
         let tri = triangles[hit.object];
-        let mat = materials[tri.a.material];
+        let mat = hit_material(tri, hit.bary);
         let p = ray.origin + ray.direction * hit.t;
         let ng0 = normalize(cross(tri.b.position - tri.a.position, tri.c.position - tri.a.position));
         let ng = select(-ng0, ng0, dot(ng0, ray.direction) < 0.0);

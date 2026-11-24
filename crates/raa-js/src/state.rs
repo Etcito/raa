@@ -106,7 +106,7 @@ pub(crate) struct MeshSource {
     pub mesh: MeshData,
     pub uvs: Option<Vec<[f32; 2]>>,
     pub submeshes: Vec<(u32, u32)>,
-    pub has_colors: bool,
+    pub colors: Option<Vec<[f32; 4]>>,
 }
 
 impl MeshSource {
@@ -152,7 +152,7 @@ impl MeshSources {
                 mesh: mesh.base.clone(),
                 uvs: mesh.uvs.clone(),
                 submeshes,
-                has_colors: mesh.colors.is_some(),
+                colors: mesh.colors.clone(),
             },
         );
     }
@@ -1559,7 +1559,7 @@ mod tests {
         sources.retain(7, &mesh);
         let source = sources.get(7).expect("retained");
         assert_eq!(source.submeshes, [(0, 3), (3, 3)]);
-        assert!(!source.has_colors);
+        assert!(source.colors.is_none());
         let inputs = source.cluster_inputs().unwrap();
         assert_eq!(inputs.len(), 2);
         for input in &inputs {
@@ -1575,15 +1575,16 @@ mod tests {
         sources.retain(9, &attributed(4, &[0, 1, 2, 0, 2, 3], &[], false));
         let source = sources.get(9).unwrap();
         assert_eq!(source.submeshes, [(0, 6)]);
-        assert!(!source.has_colors);
+        assert!(source.colors.is_none());
         let inputs = source.cluster_inputs().unwrap();
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].mesh.triangle_count(), 2);
         assert_eq!(inputs[0].mesh.positions.len(), 4);
 
-        sources.retain(9, &attributed(3, &[0, 1, 2], &[(0, 3)], true));
+        let mesh = attributed(3, &[0, 1, 2], &[(0, 3)], true);
+        sources.retain(9, &mesh);
         let source = sources.get(9).unwrap();
-        assert!(source.has_colors);
+        assert_eq!(source.colors.as_deref(), mesh.colors.as_deref());
         assert_eq!(source.submeshes, [(0, 3)]);
         assert_eq!(source.cluster_inputs().unwrap().len(), 1);
 
