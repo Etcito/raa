@@ -49,8 +49,11 @@ export async function measureMirrorPriority({ engine, set, settle, capture, rend
         else await render();
       }
       const last = walk.at(-1);
-      check(walk.every(sample => sample.cache.originEpoch === home.cache.originEpoch),
-        'Sub-threshold camera movement recentered priority state', walk.map(row => row.cache.originEpoch));
+      const epochs = walk.map(sample => sample.cache.originEpoch);
+      check(epochs.slice(0, 3).every(epoch => epoch === home.cache.originEpoch)
+        && epochs.slice(1).every((epoch, i) => epoch >= epochs[i])
+        && last.cache.originEpoch > home.cache.originEpoch,
+        'Walk did not preserve the initial tolerance and recenter monotonically', epochs);
       engine.setCamera(translate(1.35));
       const recenter = await snapshot(`priority-motion-${policy}-recenter-first`);
       check(recenter.cache.originEpoch > last.cache.originEpoch && recenter.cache.readyFaces < last.cache.readyFaces,
