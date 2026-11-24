@@ -9,7 +9,50 @@ const VERTEX_WORDS: usize = 12;
 pub(super) const TRIANGLE_BYTES: u64 = (TRIANGLE_WORDS * 4) as u64;
 const TRIANGLE_WORDS: usize = 3 * VERTEX_WORDS;
 const MAX_TRIANGLES: usize = 250_000;
-type Bounds = ([f32; 3], [f32; 3]);
+type TriangleBounds = ([f32; 3], [f32; 3]);
+
+#[derive(Clone, Copy)]
+pub(super) struct Bounds {
+    min: [f32; 3],
+    max: [f32; 3],
+}
+
+impl Bounds {
+    pub(super) fn include(&mut self, other: Self) {
+        for axis in 0..3 {
+            self.min[axis] = self.min[axis].min(other.min[axis]);
+            self.max[axis] = self.max[axis].max(other.max[axis]);
+        }
+    }
+
+    pub(super) fn overlaps(self, min: [f64; 3], max: [f64; 3]) -> bool {
+        (0..3).all(|i| f64::from(self.min[i]) <= max[i] && min[i] <= f64::from(self.max[i]))
+    }
+
+    pub(super) fn radial_range(self, origin: [f32; 3]) -> (f64, f64) {
+        let mut min_sq = 0.0;
+        let mut max_sq = 0.0;
+        for (i, origin) in origin.into_iter().map(f64::from).enumerate() {
+            let lo = f64::from(self.min[i]) - origin;
+            let hi = f64::from(self.max[i]) - origin;
+            min_sq += 0.0_f64.max(lo).max(-hi).powi(2);
+            max_sq += lo.abs().max(hi.abs()).powi(2);
+        }
+        (min_sq.sqrt(), max_sq.sqrt())
+    }
+}
+
+// Bound the number of dirty regions when an update moves many independent meshes.
+const MAX_DIRTY_BOUNDS: usize = 32;
+
+fn record_dirty(dirty: &mut Vec<Bounds>, bounds: Option<Bounds>) {
+    let Some(bounds) = bounds else { return };
+    if dirty.len() == MAX_DIRTY_BOUNDS {
+        dirty.last_mut().expect("dirty bounds").include(bounds);
+    } else {
+        dirty.push(bounds);
+    }
+}
 
 /// One submesh range with the renderer's current material and world transform.
 pub struct MeshInput<'a> {
@@ -51,7 +94,9 @@ fn same_geometry(a: &Part, b: &Part) -> bool {
 #[derive(Default)]
 pub(super) struct Geometry {
     parts: Vec<Part>,
-    bounds: Vec<Bounds>,
+    bounds: Vec<TriangleBounds>,
+    part_bounds: Vec<Option<Bounds>>,
+    pub(super) dirty_bounds: Vec<Bounds>,
     triangles: Vec<[u32; TRIANGLE_WORDS]>,
     bvh: Bvh,
     pub revision: u64,
@@ -85,13 +130,41 @@ impl Geometry {
             return Ok(());
         }
 
+        // Find an unchanged suffix when insertions or removals shift part indices.
+        // This keeps common scene edits local even when the existing BVH must rebuild.
+        let prefix = self
+            .parts
+            .iter()
+            .zip(inputs)
+            .take_while(|(old, input)| **old == Part::from(*input))
+            .count();
+        let suffix = self.parts[prefix..]
+            .iter()
+            .rev()
+            .zip(inputs[prefix..].iter().rev())
+            .take_while(|(old, input)| **old == Part::from(*input))
+            .count();
+        let aligned = self.parts.len() == inputs.len();
+        let old_end = self.parts.len() - suffix;
+        let new_end = inputs.len() - suffix;
+
+        self.dirty_bounds.clear();
+        for i in prefix..old_end {
+            if !aligned || self.parts[i] != Part::from(&inputs[i]) {
+                record_dirty(&mut self.dirty_bounds, self.part_bounds[i]);
+            }
+        }
         self.triangles.resize(count, [0; TRIANGLE_WORDS]);
         self.bounds.resize(count, ([0.; 3], [0.; 3]));
+        self.part_bounds.resize(inputs.len(), None);
         let mut start = 0;
         for (i, input) in inputs.iter().enumerate() {
             let part = Part::from(input);
             if rebuild || self.parts[i] != part {
-                self.write_part(input, start);
+                self.part_bounds[i] = self.write_part(input, start);
+                if (prefix..new_end).contains(&i) && (!aligned || self.parts[i] != part) {
+                    record_dirty(&mut self.dirty_bounds, self.part_bounds[i]);
+                }
             }
             start += part.count;
         }
@@ -142,7 +215,8 @@ impl Geometry {
         Ok(())
     }
 
-    fn write_part(&mut self, input: &MeshInput<'_>, start: usize) {
+    fn write_part(&mut self, input: &MeshInput<'_>, start: usize) -> Option<Bounds> {
+        let mut part: Option<Bounds> = None;
         let normal_matrix = input.world.inverse().map(|matrix| matrix.transpose());
         for (i, indices) in input.indices.chunks_exact(3).enumerate() {
             let indices = [indices[0], indices[1], indices[2]].map(|index| index as usize);
@@ -180,7 +254,63 @@ impl Geometry {
             words[3] = input.material;
             self.triangles[start + i] = words;
             self.bounds[start + i] = (lo, hi);
+            let bounds = Bounds { min: lo, max: hi };
+            match &mut part {
+                Some(part) => part.include(bounds),
+                slot => *slot = Some(bounds),
+            }
         }
+        part
+    }
+
+    /// Visit candidate triangles in the same BVH used by mesh rays. The caller's
+    /// narrow phase decides whether to accept each triangle.
+    pub(super) fn find_triangle<R>(
+        &self,
+        min: [f64; 3],
+        max: [f64; 3],
+        mut visit: impl FnMut([[f32; 3]; 3]) -> Option<R>,
+    ) -> Option<R> {
+        self.find_triangle_in(0, min, max, &mut visit)
+    }
+
+    fn find_triangle_in<R>(
+        &self,
+        index: usize,
+        min: [f64; 3],
+        max: [f64; 3],
+        visit: &mut impl FnMut([[f32; 3]; 3]) -> Option<R>,
+    ) -> Option<R> {
+        let node = self.bvh.nodes.get(index)?;
+        if !(Bounds {
+            min: node.min,
+            max: node.max,
+        })
+        .overlaps(min, max)
+        {
+            return None;
+        }
+        let first = node.left as usize;
+        if node.count == 0 {
+            return self
+                .find_triangle_in(first, min, max, visit)
+                .or_else(|| self.find_triangle_in(first + 1, min, max, visit));
+        }
+        for &index in &self.bvh.order[first..first + node.count as usize] {
+            let index = index as usize;
+            let (lo, hi) = self.bounds[index];
+            if !(Bounds { min: lo, max: hi }).overlaps(min, max) {
+                continue;
+            }
+            let words = &self.triangles[index];
+            let points = std::array::from_fn(|i| {
+                std::array::from_fn(|axis| f32::from_bits(words[i * VERTEX_WORDS + axis]))
+            });
+            if let Some(hit) = visit(points) {
+                return Some(hit);
+            }
+        }
+        None
     }
 
     fn refit(&mut self, i: usize) {

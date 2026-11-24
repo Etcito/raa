@@ -22,6 +22,7 @@ mod tunables;
 pub mod vertex_colors;
 mod volume;
 
+pub use raa_sdf_trace::mesh::spherical;
 pub use stats::GiStats;
 
 pub use emissive::EmissiveSources;

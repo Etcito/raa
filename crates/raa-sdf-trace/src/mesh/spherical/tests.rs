@@ -1,0 +1,393 @@
+use raa_math::{Mat4, Vec3};
+
+use super::*;
+use crate::mesh::MeshInput;
+
+fn grid_config() -> SphericalGridConfig {
+    SphericalGridConfig {
+        angular_resolution: 1,
+        radial_shells: 3,
+        clip_start: 1.0,
+        z_max: 8.0,
+        radial_growth: 2.0,
+    }
+}
+
+fn config() -> SphericalSchedulerConfig {
+    SphericalSchedulerConfig {
+        grid: grid_config(),
+        near_shells: 1,
+        ..SphericalSchedulerConfig::default()
+    }
+}
+
+fn triangle(key: u64, positions: &[[f32; 3]; 3]) -> MeshInput<'_> {
+    MeshInput {
+        key,
+        mesh: key as u32,
+        positions,
+        normals: &[[1.0, 0.0, 0.0]; 3],
+        colors: None,
+        indices: &[0, 1, 2],
+        material: 0,
+        world: Mat4::IDENTITY,
+    }
+}
+
+fn facing_x(x: f32) -> [[f32; 3]; 3] {
+    [[x, -0.2, -0.1], [x, 0.2, -0.1], [x, 0.0, 0.2]]
+}
+
+fn update_geometry(scene: &mut MeshTraceScene, inputs: &[MeshInput<'_>]) {
+    scene.geometry.update(inputs).unwrap();
+}
+
+fn key(shell: u16, face: CubeFace) -> CellKey {
+    CellKey {
+        shell,
+        face,
+        x: 0,
+        y: 0,
+    }
+}
+
+#[test]
+fn radial_widths_are_geometric_with_z_max_as_the_outer_boundary() {
+    let grid = SphericalGrid::new(grid_config()).unwrap();
+    for (i, (inner, center, outer)) in [(1., 1.5, 2.), (2., 3., 4.), (4., 6., 8.)]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            grid.radial_shell(i as u16),
+            Some(RadialShell {
+                inner,
+                center,
+                outer
+            })
+        );
+    }
+    assert_eq!(grid.key_at([2.0, 0.0, 0.0]), Some(key(1, CubeFace::PosX)));
+    assert_eq!(grid.key_at([8.0, 0.0, 0.0]), Some(key(2, CubeFace::PosX)));
+    assert_eq!(grid.key_at([8.001, 0.0, 0.0]), None);
+    assert_eq!(grid.key_at([0.999, 0.0, 0.0]), None);
+    let last = grid.radial_shell(2).unwrap();
+    assert_eq!(last.center, 8.0 - (last.outer - last.inner) * 0.5);
+
+    let uniform = SphericalGrid::new(SphericalGridConfig {
+        radial_growth: 1.0,
+        ..grid_config()
+    })
+    .unwrap();
+    assert!((uniform.radial_shell(0).unwrap().outer - (1.0 + 7.0 / 3.0)).abs() < 1e-6);
+    assert_eq!(uniform.radial_shell(2).unwrap().outer, 8.0);
+    assert!(
+        SphericalGrid::new(SphericalGridConfig {
+            z_max: 1.0,
+            ..grid_config()
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn cubemap_center_and_lookup_round_trip_with_world_anchor() {
+    let mut grid = SphericalGrid::new(SphericalGridConfig {
+        angular_resolution: 5,
+        ..grid_config()
+    })
+    .unwrap();
+    grid.origin = [12.0, -2.0, 1.0];
+    for i in 0..u32::from(grid.shell_count()) * grid.cells_per_shell() {
+        let key = grid.key(i);
+        assert_eq!(grid.ordinal(key), i);
+        assert_eq!(grid.key_at(grid.center(key).unwrap()), Some(key));
+    }
+    let seam = grid.key_at([13.0, -1.0, 2.0]).unwrap();
+    assert_eq!(seam.face, CubeFace::PosX);
+}
+
+#[test]
+fn bvh_candidates_need_exact_angular_and_radial_overlap() {
+    let grid_settings = SphericalGridConfig {
+        radial_shells: 1,
+        z_max: 3.0,
+        ..grid_config()
+    };
+    let grid = SphericalGrid::new(grid_settings).unwrap();
+    let cell = grid.cell(key(0, CubeFace::PosX));
+    let misses_angle = [[1.7, 1.9, 0.0], [1.7, 2.0, 0.1], [1.7, 2.1, -0.1]];
+    let misses_radius = [[2.1, 1.8, 1.8], [2.1, 1.9, 1.8], [2.1, 1.8, 1.9]];
+    let crossing = [[2.0, -5.0, -5.0], [2.0, 5.0, -5.0], [2.0, 0.0, 5.0]];
+    let mut scene = MeshTraceScene::default();
+    update_geometry(
+        &mut scene,
+        &[triangle(1, &misses_angle), triangle(2, &misses_radius)],
+    );
+    assert!(
+        scene
+            .geometry
+            .find_triangle(cell.min, cell.max, Some)
+            .is_some()
+    );
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        grid: grid_settings,
+        ..config()
+    })
+    .unwrap();
+    scheduler.update(&scene, [0.0; 3], 0);
+    assert!(scheduler.progress(key(0, CubeFace::PosX)).is_none());
+
+    update_geometry(
+        &mut scene,
+        &[
+            triangle(1, &misses_angle),
+            triangle(2, &misses_radius),
+            triangle(3, &crossing),
+        ],
+    );
+    scheduler.update(&scene, [0.0; 3], 0);
+    let occupied = scheduler.progress(key(0, CubeFace::PosX)).unwrap();
+    assert_eq!(occupied.surface_position, [2.0, 0.0, 0.0]);
+    assert_eq!(occupied.normal, [1.0, 0.0, 0.0]);
+}
+
+#[test]
+fn near_and_far_budgets_track_each_face_and_retry_only_the_aborted_face() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(
+        &mut scene,
+        &[triangle(1, &facing_x(1.5)), triangle(2, &facing_x(-5.0))],
+    );
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    scheduler.update(&scene, [0.0; 3], 1);
+    assert_eq!(scheduler.stats().cells, 2);
+    assert_eq!(scheduler.stats().pending_faces, 12);
+    let jobs = scheduler.take_jobs(FaceBudget { near: 2, far: 1 });
+    assert_eq!(
+        jobs.iter()
+            .map(|job| (job.key.shell, job.face))
+            .collect::<Vec<_>>(),
+        [
+            (0, CubeFace::PosX),
+            (0, CubeFace::NegX),
+            (2, CubeFace::PosX)
+        ]
+    );
+    assert_eq!(scheduler.stats().in_flight_faces, 3);
+    assert!(scheduler.complete(jobs[0]));
+    assert!(scheduler.cancel(jobs[1]));
+    let retry = scheduler.take_jobs(FaceBudget { near: 1, far: 0 })[0];
+    assert_eq!(retry.face, jobs[1].face);
+    assert!(!scheduler.complete(jobs[1]));
+    assert!(scheduler.complete(retry));
+    assert!(scheduler.complete(jobs[2]));
+    assert!(!scheduler.complete(jobs[2]));
+    assert_eq!(scheduler.stats().ready_faces, 3);
+    assert_eq!(scheduler.stats().ready_cells, 0);
+
+    for job in scheduler.take_jobs(FaceBudget { near: 20, far: 20 }) {
+        assert!(scheduler.complete(job));
+    }
+    assert_eq!(scheduler.stats().ready_cells, 2);
+    assert_eq!(scheduler.stats().pending_faces, 0);
+}
+
+#[test]
+fn light_and_recenter_reject_old_faces_even_for_the_same_slot_and_key() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(&mut scene, &[triangle(1, &facing_x(1.7))]);
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    scheduler.update(&scene, [0.0; 3], 9);
+    let mut jobs = scheduler.take_jobs(FaceBudget { near: 2, far: 0 });
+    assert!(scheduler.complete(jobs[0]));
+    let stale_light_job = jobs.pop().unwrap();
+    let slot = stale_light_job.slot;
+    scheduler.update(&scene, [0.0; 3], 10);
+    assert_eq!(scheduler.stats().light_revision, 10);
+    assert_eq!(scheduler.stats().ready_faces, 0);
+    assert!(!scheduler.complete(stale_light_job));
+    let old_origin_job = scheduler.take_jobs(FaceBudget { near: 1, far: 0 })[0];
+    assert_eq!(old_origin_job.slot, slot);
+    scheduler.update(&scene, [0.3, 0.0, 0.0], 10);
+    let new_job = scheduler.take_jobs(FaceBudget { near: 1, far: 0 })[0];
+    assert_eq!(
+        (new_job.key, new_job.slot),
+        (old_origin_job.key, old_origin_job.slot)
+    );
+    assert_ne!(new_job.center, old_origin_job.center);
+    assert_ne!(new_job.epoch, old_origin_job.epoch);
+    assert!(scheduler.take_released_slots().contains(&slot));
+    assert!(!scheduler.complete(old_origin_job));
+    assert!(scheduler.complete(new_job));
+}
+
+#[test]
+fn sustained_walk_makes_face_progress_in_each_bounded_origin_epoch() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(&mut scene, &[triangle(1, &facing_x(1.9))]);
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    let mut ready_epochs = BTreeSet::new();
+    let mut previous = None;
+    for step in 0..48 {
+        let camera = [step as f32 * 0.02, 0.0, 0.0];
+        scheduler.update(&scene, camera, 0);
+        let anchor = scheduler.grid().origin();
+        assert!((camera[0] - anchor[0]).abs() <= config().origin_tolerance);
+        let epoch = scheduler.stats().origin_epoch;
+        if let Some((previous_epoch, previous_job)) = previous
+            && epoch != previous_epoch
+        {
+            assert!(ready_epochs.contains(&previous_epoch));
+            assert!(!scheduler.complete(previous_job));
+            assert_eq!(scheduler.stats().ready_faces, 0);
+        }
+        for job in scheduler.take_jobs(FaceBudget { near: 1, far: 1 }) {
+            assert!(scheduler.complete(job));
+            previous = Some((epoch, job));
+        }
+        if scheduler.stats().ready_cells == 1 {
+            ready_epochs.insert(epoch);
+        }
+    }
+    assert!(ready_epochs.len() >= 3);
+}
+
+#[test]
+fn geometry_refit_dirties_old_and_new_regions_and_preserves_an_unrelated_cell() {
+    let mut scene = MeshTraceScene::default();
+    let positions = facing_x(1.5);
+    let static_positions = [[-0.1, 1.5, -0.1], [0.1, 1.5, -0.1], [0.0, 1.5, 0.1]];
+    let extra = facing_x(20.0);
+    let mut inputs = [
+        triangle(1, &positions),
+        triangle(2, &static_positions),
+        triangle(3, &extra),
+        triangle(4, &extra),
+        triangle(5, &extra),
+    ];
+    update_geometry(&mut scene, &inputs);
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    scheduler.update(&scene, [0.0; 3], 0);
+    let old = key(0, CubeFace::PosX);
+    let static_key = key(0, CubeFace::PosY);
+    let stale = scheduler.take_jobs(FaceBudget { near: 1, far: 0 })[0];
+    assert_eq!(stale.key, old);
+    let unchanged = *scheduler.progress(static_key).unwrap();
+
+    inputs[0].world = Mat4::from_translation(Vec3::new(-3.0, 0.0, 0.0));
+    update_geometry(&mut scene, &inputs);
+    scheduler.update(&scene, [0.0; 3], 0);
+    assert!(scheduler.progress(old).is_none());
+    assert!(scheduler.progress(key(0, CubeFace::NegX)).is_some());
+    assert_eq!(scheduler.progress(static_key), Some(&unchanged));
+    assert!(!scheduler.complete(stale));
+    assert_eq!(scheduler.stats().cells, 2);
+
+    update_geometry(&mut scene, &inputs[1..]);
+    scheduler.update(&scene, [0.0; 3], 0);
+    assert!(scheduler.progress(key(0, CubeFace::NegX)).is_none());
+    assert_eq!(scheduler.progress(static_key), Some(&unchanged));
+}
+
+#[test]
+fn capacity_and_lookup_work_are_bounded_and_evicted_far_cells_can_return() {
+    let mut scene = MeshTraceScene::default();
+    let near = facing_x(1.5);
+    let far = facing_x(-5.0);
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        max_cells: 1,
+        cell_queries_per_update: 1,
+        ..config()
+    })
+    .unwrap();
+    update_geometry(&mut scene, &[triangle(2, &far)]);
+    let check = |scheduler: &mut SphericalScheduler, scene: &MeshTraceScene| {
+        for _ in 0..80 {
+            scheduler.update(scene, [0.0; 3], 0);
+            assert!(scheduler.stats().last_cell_queries <= 1);
+            assert!(scheduler.stats().cells <= 1);
+        }
+    };
+    let far_key = key(2, CubeFace::NegX);
+    check(&mut scheduler, &scene);
+    let initial = *scheduler.progress(far_key).unwrap();
+    update_geometry(&mut scene, &[triangle(1, &near), triangle(2, &far)]);
+    check(&mut scheduler, &scene);
+    assert!(scheduler.progress(far_key).is_none());
+    assert_eq!(
+        scheduler.progress(key(0, CubeFace::PosX)).unwrap().slot,
+        initial.slot
+    );
+    update_geometry(&mut scene, &[triangle(2, &far)]);
+    check(&mut scheduler, &scene);
+    let restored = scheduler.progress(far_key).unwrap();
+    assert_eq!(restored.slot, initial.slot);
+    assert_ne!(restored.epoch, initial.epoch);
+    update_geometry(&mut scene, &[]);
+    scheduler.update(&scene, [0.0; 3], 0);
+    assert_eq!(scheduler.stats().cells, 0);
+    assert_eq!(scheduler.stats().last_cell_queries, 0);
+}
+
+#[test]
+fn recenter_rechecks_far_cells_without_waiting_for_a_full_scan() {
+    let mut scene = MeshTraceScene::default();
+    let far = [[-0.1, -0.1, -6.0], [0.1, -0.1, -6.0], [0.0, 0.1, -6.0]];
+    update_geometry(&mut scene, &[triangle(1, &far)]);
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        cell_queries_per_update: 1,
+        ..config()
+    })
+    .unwrap();
+    for _ in 0..18 {
+        scheduler.update(&scene, [0.0; 3], 0);
+    }
+    let key = key(2, CubeFace::NegZ);
+    let old = scheduler.take_jobs(FaceBudget { near: 0, far: 1 })[0];
+    assert_eq!(old.key, key);
+
+    // Reaching the final grid cell by discovery alone takes 18 frames.
+    // A walk at this speed recenters every 13 frames.
+    let mut ready_epochs = BTreeSet::new();
+    for step in 1..50 {
+        scheduler.update(&scene, [step as f32 * 0.02, 0.0, 0.0], 0);
+        for job in scheduler.take_jobs(FaceBudget { near: 0, far: 1 }) {
+            assert!(scheduler.complete(job));
+        }
+        if scheduler.stats().origin_epoch > 1 {
+            assert!(!scheduler.complete(old));
+            assert!(scheduler.progress(key).is_some());
+            if scheduler.stats().ready_cells == 1 {
+                ready_epochs.insert(scheduler.stats().origin_epoch);
+            }
+        }
+    }
+    assert!(ready_epochs.len() >= 3);
+}
+
+#[test]
+fn materials_and_skipped_geometry_revisions_invalidate_current_faces() {
+    let mut scene = MeshTraceScene::default();
+    let points = facing_x(1.5);
+    let mut input = triangle(1, &points);
+    update_geometry(&mut scene, std::slice::from_ref(&input));
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    scheduler.update(&scene, [0.0; 3], 0);
+    let budget = FaceBudget { near: 1, far: 1 };
+    let old_material = scheduler.take_jobs(budget)[0];
+    scene.material_revision += 1;
+    scheduler.update(&scene, [0.0; 3], 0);
+    assert!(!scheduler.complete(old_material));
+    let old_geometry = scheduler.take_jobs(budget)[0];
+    assert_eq!(old_material.slot, old_geometry.slot);
+
+    input.world = Mat4::from_translation(Vec3::new(-3.0, 0.0, 0.0));
+    update_geometry(&mut scene, std::slice::from_ref(&input));
+    input.world = Mat4::from_translation(Vec3::new(-4.0, 0.0, 0.0));
+    update_geometry(&mut scene, &[input]);
+    scheduler.update(&scene, [0.0; 3], 0);
+    assert!(!scheduler.complete(old_geometry));
+    assert!(scheduler.progress(key(0, CubeFace::PosX)).is_none());
+    assert!(scheduler.progress(key(1, CubeFace::NegX)).is_some());
+}

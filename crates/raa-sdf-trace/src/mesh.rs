@@ -1,6 +1,7 @@
 //! Hybrid mesh reflections and an explicit full-frame path-traced reference.
 
 mod geometry;
+pub mod spherical;
 mod hybrid;
 mod pass;
 pub use geometry::MeshInput;
