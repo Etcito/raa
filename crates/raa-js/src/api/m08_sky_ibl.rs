@@ -1023,6 +1023,8 @@ mod web {
     pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
         let ibl = IblFeature::install(ctx.gpu, ctx.pipeline, ctx.lit)?;
         let sky = SkyFeature::install(ctx.gpu, ctx.pipeline, ctx.lit, ibl.clone())?;
+        // GI uses the same handle to replace the unoccluded IBL terms.
+        ctx.features.insert(ibl.clone());
         ctx.features.insert(EnvLighting {
             ibl,
             diffuse: 1.0,

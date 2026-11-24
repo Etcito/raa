@@ -69,6 +69,7 @@ struct RaaGiHit {
     hit: bool,
     t: f32,
     radiance: vec3<f32>,
+    escaped: bool,
 }
 
 // Sphere traces the volume from t = start. `hit_voxels` is how close counts as a hit, in
@@ -88,7 +89,7 @@ fn raa_gi_trace(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_s
         let p = origin + dir * t;
         level = raa_gi_level_at(p, level);
         if level >= count {
-            break;
+            return RaaGiHit(false, t, vec3<f32>(0.0), true);
         }
         let voxel = raa_gi_volume_params.levels[level].w;
         let s = raa_gi_sample(p, level);
@@ -101,13 +102,16 @@ fn raa_gi_trace(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_s
             let back = p - dir * (RAA_GI_HIT_PULL * voxel);
             let back_level = raa_gi_level_at(back, level);
             if back_level < count {
-                return RaaGiHit(true, t, raa_gi_sample(back, back_level).rgb);
+                return RaaGiHit(true, t, raa_gi_sample(back, back_level).rgb, false);
             }
-            return RaaGiHit(true, t, s.rgb);
+            return RaaGiHit(true, t, s.rgb, false);
         }
         t += max(s.a - voxel * 0.5, voxel * 0.6);
     }
-    return RaaGiHit(false, t, vec3<f32>(0.0));
+    // The last step can leave the field on the same iteration that used up the budget.
+    let end = origin + dir * min(t, max_t);
+    let escaped = raa_gi_level_at(end, level) >= count;
+    return RaaGiHit(false, t, vec3<f32>(0.0), escaped);
 }
 
 // 0 when the volume blocks the path along `dir`, else 1.
@@ -119,13 +123,14 @@ fn raa_gi_visibility(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, 
 // surface's radiance instead of the sky. When the trace misses before `max_t` at a point still in
 // the volume whose sampled distance is at most 3 voxels of its level (raa-gi volume_write.wgsl's
 // COLOR_BAND, where a texel holds its nearest surface's radiance), the result is a hit there at
-// the trace's t; a ray leaving the volume or reaching `max_t` stays a miss. Inside a closed room
+// the trace's t; a ray leaving the volume or reaching `max_t` stays a miss. Only an
+// escaped miss can sample sky radiance. Inside a closed room
 // grazing and corner rays exhaust the budget (the steps shrink to 0.6 voxel near walls), and
 // taking the sky for them lost part of every bounce. Visibility keeps `raa_gi_trace`: an
 // exhausted shadow ray must not darken.
 fn raa_gi_gather(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_steps: u32, hit_voxels: f32) -> RaaGiHit {
     let hit = raa_gi_trace(origin, dir, start, max_t, max_steps, hit_voxels);
-    if hit.hit || hit.t >= max_t {
+    if hit.hit || hit.escaped || hit.t >= max_t {
         return hit;
     }
     let p = origin + dir * hit.t;
@@ -135,7 +140,7 @@ fn raa_gi_gather(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_
     }
     let s = raa_gi_sample(p, level);
     if s.a <= 3.0 * raa_gi_volume_params.levels[level].w {
-        return RaaGiHit(true, hit.t, s.rgb);
+        return RaaGiHit(true, hit.t, s.rgb, false);
     }
     return hit;
 }

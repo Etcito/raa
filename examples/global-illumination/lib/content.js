@@ -17,25 +17,29 @@ function pushQuad(out, corners, normal) {
   out.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
 }
 
+// Appends a face of the given bounds, facing along sign * axis.
+function pushFace(out, min, max, axis, sign) {
+  const u = (axis + (sign > 0 ? 1 : 2)) % 3;
+  const v = (axis + (sign > 0 ? 2 : 1)) % 3;
+  const normal = [0, 0, 0];
+  normal[axis] = sign;
+  const corners = [[min, min], [max, min], [max, max], [min, max]].map(([su, sv]) => {
+    const p = [0, 0, 0];
+    p[axis] = (sign > 0 ? max : min)[axis];
+    p[u] = su[u];
+    p[v] = sv[v];
+    return p;
+  });
+  pushQuad(out, corners, normal);
+}
+
 // Appends a closed axis-aligned box with hard edges: 24 vertices, 12 triangles.
 function pushBox(out, center, half) {
-  for (let a = 0; a < 3; a++) {
-    for (const s of [1, -1]) {
-      // For +axis the in-face axes are (a+1, a+2); for -axis they swap, so cross(u, v)
-      // equals the outward normal.
-      const u = s > 0 ? (a + 1) % 3 : (a + 2) % 3;
-      const v = s > 0 ? (a + 2) % 3 : (a + 1) % 3;
-      const normal = [0, 0, 0];
-      normal[a] = s;
-      const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([su, sv]) => {
-        const p = [0, 0, 0];
-        p[a] = center[a] + s * half[a];
-        p[u] = center[u] + su * half[u];
-        p[v] = center[v] + sv * half[v];
-        return p;
-      });
-      pushQuad(out, corners, normal);
-    }
+  const min = center.map((c, axis) => c - half[axis]);
+  const max = center.map((c, axis) => c + half[axis]);
+  for (let axis = 0; axis < 3; axis++) {
+    pushFace(out, min, max, axis, 1);
+    pushFace(out, min, max, axis, -1);
   }
 }
 
@@ -162,6 +166,73 @@ export function roomShell({ width, height, depth, opening }) {
     [WALL / 2, height / 2, depth / 2]));
   part(() => pushBox(out, [width / 2 + WALL / 2, height / 2, -depth / 2],
     [WALL / 2, height / 2, depth / 2]));
+  return { ...finish(out), subMeshes };
+}
+
+/**
+ * Continuous opaque envelope with a square ceiling aperture. The inner and outer
+ * skins share their corner edges, and the four skylight reveals join the skins.
+ * The six material groups follow roomShell's order, with the front wall last.
+ * Pass opening = 0 for a closed ceiling.
+ */
+export function enclosedRoomShell({ width, height, depth, opening }, thickness) {
+  const out = { positions: [], normals: [], indices: [] };
+  const subMeshes = [];
+  const innerMin = [-width / 2, 0, -depth];
+  const innerMax = [width / 2, height, 0];
+  const outerMin = innerMin.map(value => value - thickness);
+  const outerMax = innerMax.map(value => value + thickness);
+  const apertureMin = [-opening / 2, height, (-depth - opening) / 2];
+  const apertureMax = [opening / 2, height + thickness, (-depth + opening) / 2];
+
+  const part = fill => {
+    const first = out.indices.length;
+    fill();
+    subMeshes.push({ first, count: out.indices.length - first });
+  };
+  const wall = (axis, inward) => part(() => {
+    const innerFace = (inward > 0 ? innerMin : innerMax)[axis];
+    const min = [...innerMin];
+    const max = [...innerMax];
+    min[axis] = max[axis] = innerFace;
+    pushFace(out, min, max, axis, inward);
+    pushFace(out, outerMin, outerMax, axis, -inward);
+  });
+  const roof = (boundsMin, boundsMax, y, sign) => {
+    const edge = (x0, x1, z0, z1) => pushFace(out, [x0, y, z0], [x1, y, z1], 1, sign);
+    const [x0, , z0] = boundsMin;
+    const [x1, , z1] = boundsMax;
+    if (opening === 0) {
+      edge(x0, x1, z0, z1);
+      return;
+    }
+    const [left, , far] = apertureMin;
+    const [right, , near] = apertureMax;
+    edge(x0, left, z0, z1);
+    edge(right, x1, z0, z1);
+    edge(left, right, z0, far);
+    edge(left, right, near, z1);
+  };
+
+  wall(1, 1);
+  part(() => {
+    roof(innerMin, innerMax, height, -1);
+    roof(outerMin, outerMax, height + thickness, 1);
+    if (opening > 0) {
+      for (const axis of [0, 2]) {
+        const min = [...apertureMin];
+        const max = [...apertureMax];
+        max[axis] = min[axis];
+        pushFace(out, min, max, axis, 1);
+        min[axis] = max[axis] = apertureMax[axis];
+        pushFace(out, min, max, axis, -1);
+      }
+    }
+  });
+  wall(2, 1);
+  wall(0, 1);
+  wall(0, -1);
+  wall(2, -1);
   return { ...finish(out), subMeshes };
 }
 

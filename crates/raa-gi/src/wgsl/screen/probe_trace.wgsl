@@ -38,18 +38,15 @@ override RAA_GI_PROBE_SCREEN_THICKNESS: f32 = 0.15;
 override RAA_GI_PROBE_VOLUME_DISTANCE: f32 = 320.0;
 override RAA_GI_PROBE_VOLUME_STEPS: u32 = 40u;
 override RAA_GI_PROBE_VOLUME_HIT_VOXELS: f32 = 0.85;
-// The hit distance stored for a ray that found neither the screen nor the volume.
-const RAA_GI_PROBE_MISS_DISTANCE: f32 = 1000.0;
-
-// The ray atlas: one texel per probe ray, rgb radiance and a what the ray hit: 0 the sky, 1 the
-// voxels, 2 the screen, 3 the screen blended with the voxels near the screen edge, -1 a far
-// probe (probe_project.wgsl turns it into the probe's hit code).
+// One texel per probe ray: RGB radiance and an alpha hit kind. 0 is sky, 1 is volume,
+// 2 is screen, 3 blends screen and volume at the screen edge, 4 is an unfinished volume
+// ray, and -1 is a far probe.
 @group(2) @binding(5) var raa_gi_rays_out: texture_storage_2d<rgba16float, write>;
 
 // Handoff: card 'raa-gi screen: passes.rs module builders, group-2 layouts and pipelines'
 // builds the trace pipeline on `raa_gi_probe_trace`, composed after screen_trace.wgsl and
 // attached through `probe_trace_module_wgsl()` with entry `PROBE_TRACE_ENTRY` and the
-// PROBE_RAYS constant; today the entry stores one probe ray's (radiance, hit distance) into
+// PROBE_RAYS constant; today the entry stores one probe ray's (radiance, hit kind) into
 // raa_gi_rays_out under the group-2 registry above. The pyramid entries' handoff by the same
 // card sits above `raa_gi_pyramid_copy` in depth_pyramid.wgsl:47.
 @compute @workgroup_size(8, 8)
@@ -96,14 +93,10 @@ fn raa_gi_probe_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     // The volume is coarse near its surfaces, so start clear of the local voxel. A ray that runs
-    // out of steps next to a surface takes its radiance; only a miss keeps the sky, read from the
-    // most filtered mip: one ray stands for a whole cone of the hemisphere, and the sharp mip 0
-    // made each probe flicker with the sky's detail.
-    let sky_lod = f32(textureNumLevels(raa_env_specular) - 1u);
-    // At the environment's diffuse intensity (sun_color.w), as the IBL ambient.
-    var radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, direction, sky_lod).rgb
-        * raa_gi_frame.sun_color.w;
-    var t = RAA_GI_PROBE_MISS_DISTANCE;
+    // out of steps next to a surface takes its radiance. A ray that escapes the clipmap
+    // samples the most filtered sky mip, since each probe ray covers a cone of directions.
+    var escaped = true;
+    var radiance = vec3<f32>(0.0);
     var kind = 0.0;
     let level_count = raa_gi_volume_params.level_count;
     if level_count > 0u {
@@ -117,16 +110,20 @@ fn raa_gi_probe_trace(@builtin(global_invocation_id) id: vec3<u32>) {
             RAA_GI_PROBE_VOLUME_STEPS,
             RAA_GI_PROBE_VOLUME_HIT_VOXELS,
         );
-        if hit.hit {
+        escaped = hit.escaped;
+        if !escaped {
             radiance = hit.radiance;
-            t = hit.t;
-            kind = 1.0;
+            kind = select(4.0, 1.0, hit.hit);
         }
+    }
+    if escaped {
+        let sky_lod = f32(textureNumLevels(raa_env_specular) - 1u);
+        radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, direction, sky_lod).rgb
+            * raa_gi_frame.sun_color.w;
     }
     if screen.hit && screen_radiance.a > 0.0 {
         // Near the screen edge, blend towards the volume so probes do not pop.
         radiance = mix(radiance, screen_radiance.rgb, screen.weight);
-        t = mix(t, screen.t, screen.weight);
         kind = 3.0;
     }
     textureStore(raa_gi_rays_out, id.xy, vec4<f32>(radiance, kind));

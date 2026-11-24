@@ -40,7 +40,7 @@ pub struct GiFrameGpu {
     pub previous_view_proj: Mat4,
     /// Camera position, w lit HDR age in real frames (0 for unavailable, offset 320).
     pub camera_position: [f32; 4],
-    /// Direction toward the sun, w 0 (offset 336).
+    /// Direction toward the sun, w TAA jitter X (offset 336).
     pub sun_direction: [f32; 4],
     /// Linear rgb times intensity; w the radiance scale of the rays that reach the sky, the
     /// authored raa-ibl diffuse intensity (1 without raa-ibl) (offset 352).
@@ -49,7 +49,7 @@ pub struct GiFrameGpu {
     pub viewport: [f32; 4],
     /// Active local lights, frame index, debug view code, level count (offset 384).
     pub counts: [u32; 4],
-    /// Intensity, environment diffuse, near, far (offset 400).
+    /// Intensity, TAA jitter Y, near, far (offset 400).
     pub settings: [f32; 4],
     /// History valid, screen traces, local-light shadows, reflections (offset 416).
     pub flags: [u32; 4],

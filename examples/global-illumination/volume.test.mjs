@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as volume from './scenes/volume.js';
 import { validateInventory } from './lib/inventory.js';
-import { box, plane, roomShell, sphere, volumeRoom } from './lib/content.js';
+import { box, enclosedRoomShell, plane, roomShell, sphere, volumeRoom } from './lib/content.js';
 
 // Volume stage of the global-illumination page, checked against contract gi-volume-rows. The
 // literals below repeat that contract; they are not read back from scenes/volume.js. Node only:
@@ -160,6 +160,41 @@ test('room shell has five sub-meshes; room, box, plane and sphere meshes index t
     assert.ok(part.count > 0 && part.first % 3 === 0 && part.count % 3 === 0);
     assert.ok(part.first + part.count <= shell.indices.length);
   }
+});
+
+test('the gallery shell has inward-facing walls and a single sealable aperture', () => {
+  const { room } = volumeRoom();
+  const open = enclosedRoomShell(room, 0.8);
+  const sealed = enclosedRoomShell({ ...room, opening: 0 }, 0.8);
+  function firstFace(mesh, origin, direction) {
+    let nearest = Infinity;
+    for (let first = 0; first < mesh.positions.length; first += 12) {
+      const normal = mesh.normals.subarray(first, first + 3);
+      const axis = normal.findIndex(value => value !== 0);
+      if (normal[axis] * direction[axis] >= 0) continue;
+      const distance = (mesh.positions[first + axis] - origin[axis]) / direction[axis];
+      if (distance <= 0 || distance >= nearest) continue;
+      const corners = [0, 3, 6, 9].map(offset => mesh.positions.subarray(first + offset, first + offset + 3));
+      if (origin.every((value, i) => {
+        const at = value + direction[i] * distance;
+        const coords = corners.map(corner => corner[i]);
+        return at >= Math.min(...coords) - 1e-6 && at <= Math.max(...coords) + 1e-6;
+      })) nearest = distance;
+    }
+    return nearest;
+  }
+  const inside = [0, 1, -4];
+  for (const [direction, distance] of [
+    [[0, -1, 0], 1], [[0, 0, 1], 4], [[0, 0, -1], 4],
+    [[-1, 0, 0], 3], [[1, 0, 0], 3], [[0, 1, -2], 2],
+    [[-3, 2, -4], 1], [[3, 2, -4], 1],
+  ]) {
+    assert.equal(firstFace(open, inside, direction), distance);
+    assert.equal(firstFace(sealed, inside, direction), distance);
+  }
+  assert.equal(firstFace(open, inside, [0, 1, 0]), Infinity);
+  assert.equal(firstFace(sealed, inside, [0, 1, 0]), 2);
+  assert.ok(Math.abs(firstFace(open, [0, 3.2, -4], [1, 0, 0]) - 0.6) < 1e-6);
 });
 
 const SETTLED = {

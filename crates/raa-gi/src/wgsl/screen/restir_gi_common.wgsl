@@ -233,6 +233,10 @@ fn raa_rgi_visible(s: RaaRgiSurface, x_s: vec3<f32>) -> bool {
     let origin = s.position + s.normal * voxel * 1.5;
     let d = x_s - origin;
     let len = length(d);
+    if len >= 0.5 * RAA_RGI_SKY_DISTANCE {
+        return raa_gi_trace(origin, d / len, voxel * 0.5, RAA_RGI_VISIBILITY_DISTANCE,
+            RAA_RGI_VISIBILITY_STEPS, 0.85).escaped;
+    }
     let max_t = min(len - 2.0 * voxel, RAA_RGI_VISIBILITY_DISTANCE);
     if max_t <= voxel {
         return true;

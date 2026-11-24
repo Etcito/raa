@@ -158,10 +158,10 @@ fn raa_gi_probe_ray_direction(
 // The view position of a pixel-centre coordinate at standard-Z clip depth `depth`: inv_proj
 // of its NDC point, divided by w. The depth target was drawn with the TAA-jittered projection
 // (NDC shifted by the jitter, which the gi.screen pass writes into sun_direction.w and
-// sun_color.w), so the jitter is taken off before the unjittered inverse: otherwise every
+// settings.y), so the jitter is taken off before the unjittered inverse: otherwise every
 // reconstructed position moves by up to half a pixel each frame.
 fn raa_gi_view_position(pixel: vec2<f32>, depth: f32) -> vec3<f32> {
-    let jitter = vec2<f32>(raa_gi_frame.sun_direction.w, raa_gi_frame.sun_color.w);
+    let jitter = vec2<f32>(raa_gi_frame.sun_direction.w, raa_gi_frame.settings.y);
     let ndc = vec4<f32>(
         2.0 * pixel.x * raa_gi_frame.viewport.z - 1.0 - jitter.x,
         1.0 - 2.0 * pixel.y * raa_gi_frame.viewport.w - jitter.y,

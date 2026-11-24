@@ -1,7 +1,9 @@
-import { box, roomShell, sphere, volumeRoom } from './content.js';
+import { box, enclosedRoomShell, sphere, volumeRoom } from './content.js';
 
 const identity = [0, 0, 0, 1];
 const unitScale = [1, 1, 1];
+const skylightWidth = 2;
+const shellThickness = 0.8;
 const options = [
   { id: 'gi', label: 'Global illumination', enabled: true },
   { id: 'screen-gi', label: 'Screen-space GI detail', enabled: true },
@@ -31,18 +33,21 @@ const performanceVariant = {
 };
 
 const fixtures = [
-  { position: [-1.55, 2.62, -3.4], size: [0.65, 1.45], color: [1, 0.79, 0.57], intensity: 18 },
+  { position: [-1.9, 2.62, -3.4], size: [0.65, 1.45], color: [1, 0.79, 0.57], intensity: 18 },
   { position: [1.45, 2.62, -5.65], size: [0.8, 1.7], color: [0.59, 0.79, 1], intensity: 23 },
 ];
 
 function setGi(engine, enabled, screenDetail, screenSpaceQuality) {
+  // The GI rays sample the authored sky. Keep the unoccluded IBL fill off,
+  // including when GI is disabled for a direct-light comparison.
+  engine.setEnvironmentLighting({ diffuse: enabled ? 0.65 : 0, specular: 0 });
   engine.setGlobalIllumination({
     enabled,
     screenSpace: enabled && screenDetail,
     screenSpaceQuality,
     reflections: enabled,
     localLightShadows: true,
-    environmentDiffuse: 0.1,
+    environmentDiffuse: 0,
     historyMax: 16,
   });
 }
@@ -51,13 +56,15 @@ function fixtureSurface(color, enabled) {
   return {
     model: 'flat',
     color: [0.14, 0.15, 0.17],
-    emissive: enabled ? color.map(channel => channel * 2) : [0.025, 0.025, 0.025],
+    emissive: enabled ? color.map(channel => channel * 2) : [0, 0, 0],
   };
 }
 
 function build(engine, _lib, selected = variant) {
   const room = volumeRoom();
+  const skylightBlocked = selected.skylightBlocked === true;
   const state = {
+    skylightBlocked,
     enabled: Object.fromEntries(options.map(option => [option.id, selected.effects?.[option.id] ?? option.enabled])),
     screenSpaceQuality: selected.screenSpaceQuality,
     fixtures: [],
@@ -66,9 +73,10 @@ function build(engine, _lib, selected = variant) {
   };
   engine.setSky({ preset: 'day' });
   engine.setWeather({ preset: 'clear' });
-  engine.setLight({ ...room.sun, intensity: 1.2 });
-  engine.setAmbient({ color: [0.65, 0.69, 0.77], intensity: 0.06 });
-  engine.setEnvironmentLighting({ diffuse: 0.18, specular: 0.25 });
+  engine.setPassEnabled('sunshafts', false);
+  engine.setLight({ ...room.sun, intensity: 5 });
+  engine.setAmbient({ color: [0, 0, 0], intensity: 0 });
+  engine.setShadows({ distance: 20 });
   engine.setGiQuality({ resolution: 64, levels: 3, probeRays: 8 });
   engine.setAreaLightShading({ mode: 'ltc' });
   engine.setAreaLightShadows({ tier: 'hero', heroCount: fixtures.length });
@@ -88,19 +96,22 @@ function build(engine, _lib, selected = variant) {
   const solid = (position, half, surface) => instance(withSurface(box([0, 0, 0], half), surface), position);
 
   const plaster = material(room.colors.white);
-  const floor = material([0.38, 0.36, 0.33], 0.28);
+  const floor = material([0.55, 0.52, 0.48], 0.28);
   const wood = material([0.37, 0.23, 0.13]);
   const dark = material([0.12, 0.15, 0.19]);
   const ceramic = material([0.88, 0.81, 0.68], 0.25);
   const copper = material([0.82, 0.43, 0.23], 0.31, 0.6);
-  const surfaces = [floor, plaster, plaster, material(room.colors.red), material(room.colors.green)];
-  const shell = roomShell(room.room);
+  const surfaces = [floor, plaster, plaster, material(room.colors.red), material(room.colors.green), plaster];
+  // A solid shell keeps the two sides of the walls distinct in the GI clipmap.
+  const shell = enclosedRoomShell({
+    ...room.room,
+    opening: skylightBlocked ? 0 : skylightWidth,
+  }, shellThickness);
   instance({
     ...shell,
     subMeshes: shell.subMeshes.map((part, index) => ({ ...part, material: surfaces[index] })),
   });
 
-  solid([0, 1.5, 0.2], [3.4, 1.5, 0.2], plaster);
   solid([-2.55, 0.55, -4.5], [0.42, 0.55, 1.1], wood);
   solid([2.32, 0.39, -4.9], [0.55, 0.39, 0.85], dark);
   solid([0.7, 0.24, -7.03], [1.9, 0.24, 0.57], wood);

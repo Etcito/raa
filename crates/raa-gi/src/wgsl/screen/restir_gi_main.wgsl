@@ -63,10 +63,9 @@ fn raa_rgi_initial(pixel: vec2<u32>, s: RaaRgiSurface) -> RaaRgiReservoir {
 
     var x_s = s.position + dir * RAA_RGI_SKY_DISTANCE;
     var n_s = -dir;
-    // At the environment's diffuse intensity (sun_color.w), as the IBL ambient.
-    var radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, dir, raa_rgi_sky_lod()).rgb
-        * raa_gi_frame.sun_color.w;
+    var radiance = vec3<f32>(0.0);
     var found = false;
+    var escaped = false;
     if raa_rgi_params.screen_traces == 1u {
         let origin = s.position + s.normal * 0.03;
         let screen = raa_gi_trace_screen(origin, dir, RAA_RGI_SCREEN_DISTANCE, RAA_RGI_SCREEN_STEPS,
@@ -92,11 +91,16 @@ fn raa_rgi_initial(pixel: vec2<u32>, s: RaaRgiSurface) -> RaaRgiReservoir {
         let origin = s.position + s.normal * voxel * 1.5;
         let hit = raa_gi_gather(origin, dir, voxel * 0.5, RAA_RGI_VOLUME_DISTANCE, RAA_RGI_VOLUME_STEPS,
             RAA_RGI_VOLUME_HIT_VOXELS);
+        escaped = hit.escaped;
         if hit.hit {
             x_s = origin + dir * hit.t;
             n_s = raa_rgi_field_normal(x_s, dir);
             radiance = hit.radiance;
         }
+    }
+    if !found && (escaped || level_count == 0u) {
+        radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, dir, raa_rgi_sky_lod()).rgb
+            * raa_gi_frame.sun_color.w;
     }
     var r = raa_rgi_empty();
     r.position = x_s;
@@ -124,8 +128,11 @@ fn raa_rgi_refresh(t: RaaRgiReservoir, s: RaaRgiSurface) -> RaaRgiReservoir {
         return r;
     }
     if len >= 0.5 * RAA_RGI_SKY_DISTANCE {
-        r.radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, d / len, raa_rgi_sky_lod()).rgb
-            * raa_gi_frame.sun_color.w;
+        r.radiance = vec3<f32>(0.0);
+        if raa_rgi_visible(s, t.position) {
+            r.radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, d / len, raa_rgi_sky_lod()).rgb
+                * raa_gi_frame.sun_color.w;
+        }
         return r;
     }
     if !raa_rgi_visible(s, t.position) {

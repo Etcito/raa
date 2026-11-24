@@ -75,6 +75,7 @@ fn raa_gi_probe_project(@builtin(global_invocation_id) id: vec3<u32>) {
     // hemisphere carrying the mean radiance so the harmonics do not ring below the horizon.
     var mean = vec3<f32>(0.0);
     // What the rays hit (screen, voxels, sky), from the trace's atlas alpha.
+    // An unfinished volume ray contributes no hit to these fractions.
     var kinds = vec3<f32>(0.0);
     for (var y = 0u; y < PROBE_RAYS; y++) {
         for (var x = 0u; x < PROBE_RAYS; x++) {
@@ -82,8 +83,10 @@ fn raa_gi_probe_project(@builtin(global_invocation_id) id: vec3<u32>) {
             let ray = textureLoad(raa_gi_rays, vec2<i32>(texel), 0);
             mean += ray.rgb;
             let kind = u32(max(ray.a + 0.5, 0.0));
-            kinds += select(select(select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), kind == 1u),
-                vec3<f32>(1.0, 0.0, 0.0), kind == 2u), vec3<f32>(0.5, 0.5, 0.0), kind == 3u);
+            if kind < 4u {
+                kinds += select(select(select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), kind == 1u),
+                    vec3<f32>(1.0, 0.0, 0.0), kind == 2u), vec3<f32>(0.5, 0.5, 0.0), kind == 3u);
+            }
         }
     }
     let ray_count = f32(PROBE_RAYS * PROBE_RAYS);

@@ -863,7 +863,7 @@ fn frame_record(core: &GiCore, history_age: Option<u64>) -> GiFrameGpu {
         ],
         settings: [
             settings.intensity,
-            settings.environment_diffuse,
+            0.0, // TAA jitter Y, written when the depth pass has prepared its camera.
             camera.near,
             camera.far,
         ],

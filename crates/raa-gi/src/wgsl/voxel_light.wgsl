@@ -234,10 +234,11 @@ fn raa_gi_voxel_light(@builtin(global_invocation_id) id: vec3<u32>) {
     let sun = raa_gi_frame.sun_direction.xyz;
     let sun_cos = dot(normal, sun);
     if sun_cos > 0.0 {
+        let path = raa_gi_trace(origin, sun, voxel, 400.0, 48u, 0.85);
         irradiance += raa_directional_radiance(raa_gi_frame.sun_color.rgb)
             * raa_cloud_shadow(center)
             * sun_cos
-            * raa_gi_visibility(origin, sun, voxel, 400.0, 48u);
+            * select(0.0, 1.0, path.escaped);
     }
 
     // Local lights, with visibility so that walls contain them.
@@ -274,10 +275,12 @@ fn raa_gi_voxel_light(@builtin(global_invocation_id) id: vec3<u32>) {
             basis,
         );
         let hit = raa_gi_gather(origin, direction, voxel, 320.0, 32u, 0.85);
-        // The sky at the environment's diffuse intensity (sun_color.w), as the IBL ambient.
-        let env = textureSampleLevel(raa_env_specular, raa_linear_clamp, direction,
-            f32(textureNumLevels(raa_env_specular) - 1u)).rgb * raa_gi_frame.sun_color.w;
-        gathered += select(env, hit.radiance, hit.hit);
+        gathered += hit.radiance;
+        if hit.escaped {
+            let sky_lod = f32(textureNumLevels(raa_env_specular) - 1u);
+            gathered += textureSampleLevel(raa_env_specular, raa_linear_clamp, direction, sky_lod).rgb
+                * raa_gi_frame.sun_color.w;
+        }
     }
     // With cosine-weighted rays, irradiance is pi times the mean radiance.
     irradiance += gathered / f32(rays) * RAA_GI_PI;

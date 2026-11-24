@@ -541,7 +541,14 @@ impl CpuVolume {
             t += (s[3] - voxel * 0.5).max(voxel * 0.6);
             steps += 1;
         }
-        CpuHit { hit, t, radiance }
+        let end = std::array::from_fn(|i| origin[i] + dir[i] * t.min(max_t));
+        let escaped = !hit && self.level_at(end, level) >= self.levels.len();
+        CpuHit {
+            hit,
+            t,
+            radiance,
+            escaped,
+        }
     }
 
     /// [`CpuVolume::trace`] for gathering light: a miss before `max_t` whose end point is still in
@@ -549,7 +556,8 @@ impl CpuVolume {
     /// voxels of that level (`COLOR_BAND` of `volume_write.wgsl`) is a hit at the trace's `t`
     /// with the sampled radiance, so a ray that ran out of steps next to a surface takes that
     /// surface's radiance instead of the sky. A hit, a ray leaving the volume or one reaching
-    /// `max_t` is returned as traced. CPU twin of `raa_gi_gather` in
+    /// `max_t` is returned as traced. Only an escaped miss reaches the sky. CPU twin of
+    /// `raa_gi_gather` in
     /// `crates/raa-shader/src/wgsl/gi_volume.wgsl`.
     pub fn gather(
         &self,
@@ -561,7 +569,7 @@ impl CpuVolume {
         hit_voxels: f32,
     ) -> CpuHit {
         let hit = self.trace(origin, dir, start, max_t, max_steps, hit_voxels);
-        if hit.hit || hit.t >= max_t {
+        if hit.hit || hit.escaped || hit.t >= max_t {
             return hit;
         }
         let p = [0, 1, 2].map(|i| origin[i] + dir[i] * hit.t);
@@ -575,6 +583,7 @@ impl CpuVolume {
                 hit: true,
                 t: hit.t,
                 radiance: [s[0], s[1], s[2]],
+                escaped: false,
             };
         }
         hit
@@ -675,12 +684,13 @@ impl CpuVolume {
     }
 }
 
-/// Result of [`CpuVolume::trace`] and [`CpuVolume::gather`]: whether a surface was hit at `t`,
-/// and its radiance.
+/// Result of [`CpuVolume::trace`] and [`CpuVolume::gather`]: a surface hit, a ray
+/// that escaped the clipmap, or an unfinished ray.
 pub struct CpuHit {
     pub hit: bool,
     pub t: f32,
     pub radiance: [f32; 3],
+    pub escaped: bool,
 }
 
 fn mix4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {

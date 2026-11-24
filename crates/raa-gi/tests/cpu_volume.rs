@@ -560,7 +560,10 @@ fn gather_counts_exhausted_rays_near_a_surface_as_hits() {
     let (origin, dir) = ([2.0, 2.0, 0.5], [0.0, 0.0, 1.0]);
 
     let traced = volume.trace(origin, dir, 0.25, 10.0, 1, 0.85);
-    assert!(!traced.hit, "the step budget ends before the plane");
+    assert!(
+        !traced.hit && !traced.escaped,
+        "the step budget ends inside the volume"
+    );
     assert_eq!(traced.t, 1.375);
     let gathered = volume.gather(origin, dir, 0.25, 10.0, 1, 0.85);
     assert!(
@@ -571,11 +574,21 @@ fn gather_counts_exhausted_rays_near_a_surface_as_hits() {
     assert_close3(gathered.radiance, colour);
 
     let far = volume.gather([0.5, 2.0, 0.75], [1.0, 0.0, 0.0], 0.25, 10.0, 1, 0.85);
-    assert!(!far.hit, "stopped 5 voxels from the plane");
+    assert!(!far.hit && !far.escaped, "stopped 5 voxels from the plane");
     assert_eq!(far.t, 1.375);
 
     let leaving = volume.gather([3.0, 2.0, 1.5], [1.0, 0.0, 0.0], 0.25, 10.0, 64, 0.85);
-    assert!(!leaving.hit, "left the volume inside the band");
+    assert!(
+        !leaving.hit && leaving.escaped,
+        "left the volume inside the band"
+    );
+    let last_step = volume.trace([3.0, 2.0, 1.5], [1.0, 0.0, 0.0], 0.25, 10.0, 1, 0.85);
+    assert!(last_step.escaped, "the final step reached the clipmap edge");
+    let distance_limit = volume.trace([3.0, 2.0, 1.5], [1.0, 0.0, 0.0], 0.25, 0.5, 1, 0.85);
+    assert!(
+        !distance_limit.escaped,
+        "the distance limit is inside the clipmap"
+    );
     assert_eq!(leaving.t, 0.625);
 
     let traced = volume.trace(origin, dir, 0.25, 10.0, 64, 0.85);
