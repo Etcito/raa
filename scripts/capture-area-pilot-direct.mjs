@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const [chromeArg, pageArg, outputArg, mode = 'area-pilot', comparison = 'fixed'] = process.argv.slice(2);
+const [chromeArg, pageArg, outputArg, mode = 'area-pilot', comparison = 'fixed', ...flags] = process.argv.slice(2);
+const headful = flags.includes('--headful');
 const op = mode === '--prediction' ? 'prediction' : mode;
 const capture = op === 'area-pilot' || op === 'gallery-path-capture';
 const gallery = op.startsWith('gallery-');
@@ -21,8 +22,9 @@ const liveSpherical = spherical && comparison === 'live';
 const liveMirror = mirror && comparison === 'live';
 const live = liveSpherical || liveMirror;
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
+    || flags.some(flag => flag !== '--headful')
     || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-reflection-model', 'gallery-mirror'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-reflection-model|gallery-mirror] [baseline|fixed|live|train|test|both|reflection|dataset|learned|coverage|sharp|priority]');
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-reflection-model|gallery-mirror] [baseline|fixed|live|train|test|both|reflection|dataset|learned|coverage|sharp|priority] [--headful]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
@@ -61,7 +63,8 @@ try {
     }
   }
   browser = spawn(chrome, [
-    '--headless=new', '--do-not-de-elevate', '--enable-logging=stderr', '--enable-unsafe-webgpu', '--enable-webgpu-developer-features', '--disable-software-rasterizer',
+    ...(headful ? ['--disable-background-timer-throttling', '--disable-renderer-backgrounding'] : ['--headless=new']),
+    '--do-not-de-elevate', '--enable-logging=stderr', '--enable-unsafe-webgpu', '--enable-webgpu-developer-features', '--disable-software-rasterizer',
     '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
@@ -168,7 +171,10 @@ try {
     ui.neural = await evalPage(`import('/lib/gallery-neural.js').then(module => module.verifyGalleryNeuralUi())`, 60000);
   }
   if ((spherical || mirror || sequence || predictionDataset || predictionLearned || op === 'gallery-reflection-model') && browserErrors.length) throw new Error(browserErrors.join('\n'));
-  const windows = { browser: version.Browser, renderer, device: nvidia, webgpu };
+  const userAgent = await evalPage('navigator.userAgent');
+  if (headful && /HeadlessChrome/.test(userAgent)) throw new Error('Expected a windowed Windows Chrome session');
+  const windows = { browser: version.Browser, mode: headful ? 'windowed' : 'headless',
+    userAgent, renderer, device: nvidia, webgpu };
   if (liveSpherical) {
     await mkdir(path.dirname(output), { recursive: true });
     await mkdir(output);
