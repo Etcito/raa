@@ -149,6 +149,7 @@ fn fitted_capture_matches_trainer() {
     };
     assert!(!cases.is_empty());
     let gpu = gpu();
+    eprintln!("fitted adapter={:?}", gpu.summary());
     let mut failed = 0;
     for case in cases {
         let JsonValue::Object(fields) = case else {

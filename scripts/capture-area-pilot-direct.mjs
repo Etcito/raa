@@ -42,7 +42,7 @@ let launchError;
 const stderr = [];
 try {
   browser = spawn(chrome, [
-    '--headless=new', '--do-not-de-elevate', '--enable-logging=stderr', '--enable-unsafe-webgpu', '--disable-software-rasterizer',
+    '--headless=new', '--do-not-de-elevate', '--enable-logging=stderr', '--enable-unsafe-webgpu', '--enable-webgpu-developer-features', '--disable-software-rasterizer',
     '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
@@ -114,7 +114,19 @@ try {
   if (!nvidia || !/RTX 3090/i.test(renderer) || /swiftshader|software|warp/i.test(renderer)) {
     throw new Error(`Expected native RTX 3090 Chrome rendering, got ${renderer}`);
   }
-  console.log(`Windows ${version.Browser}: ${renderer}`);
+  const webgpu = await evalPage(`(async () => {
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    const info = adapter?.info;
+    return info && {
+      vendor: info.vendor, device: info.device, description: info.description,
+      isFallbackAdapter: info.isFallbackAdapter,
+    };
+  })()`);
+  if (!webgpu || webgpu.isFallbackAdapter !== false || !/nvidia|10de/i.test(webgpu.vendor) ||
+      !/3090|2204/i.test(`${webgpu.device} ${webgpu.description}`)) {
+    throw new Error(`Expected native RTX 3090 WebGPU, got ${JSON.stringify(webgpu)}`);
+  }
+  console.log(`Windows ${version.Browser}: ${renderer}; WebGPU ${JSON.stringify(webgpu)}`);
   const capture = await evalPage(`(async () => {
     const result = await window.nmcGpu.ops['area-pilot'](${JSON.stringify({ buildId: receipt.buildId, remainingMs: 280000 })});
     const files = await Promise.all(result.files.map(async ({ name, blob }) => {
@@ -128,7 +140,7 @@ try {
   const data = capture.json;
   const adapter = data.facts?.adapter;
   if (!data.facts?.hardware || !/Windows/.test(data.facts.browser) ||
-      !/nvidia|10de/i.test(adapter?.vendor ?? '') || data.buildId !== receipt.buildId) {
+      adapter?.isFallbackAdapter !== false || !/3090|2204/i.test(adapter.device) || data.buildId !== receipt.buildId) {
     throw new Error(`Area WebGPU adapter or build provenance mismatch: ${JSON.stringify(data.facts)}`);
   }
   await mkdir(path.dirname(output), { recursive: true });
@@ -146,7 +158,7 @@ try {
   }
   const source = { revision: receipt.inputs.revision, receiptSha256: createHash('sha256').update(receiptBytes).digest('hex') };
   const manifest = path.join(output, 'manifest.json');
-  await writeFile(manifest, JSON.stringify({ ...data, source, windows: { browser: version.Browser, renderer, device: nvidia } }, null, 2) + '\n', { flag: 'wx' });
+  await writeFile(manifest, JSON.stringify({ ...data, source, windows: { browser: version.Browser, renderer, device: nvidia, webgpu } }, null, 2) + '\n', { flag: 'wx' });
   console.log(manifest);
 } catch (error) {
   if (stderr.length) console.error(stderr.join('').trim());

@@ -34,3 +34,14 @@ The offline teacher freezes pose and time, checks an exact same-seed repeat at e
 label, and accumulates independent batches over complete 2×2 strata. The label is
 the ratio of the combined sums, with visibility 1 for zero total weight. A frame
 fails after 256 samples per batch if independent-batch visibility RMSE exceeds 0.02.
+
+When managed execution credentials are unavailable, the same built page can be run
+locally on the Windows RTX 3090 with Kong's Windows Node and installed Chrome:
+
+```powershell
+node scripts/capture-area-pilot-direct.mjs 'C:\Program Files\Google\Chrome\Application\chrome.exe' dist/global-illumination out/area-pilot-win
+```
+
+The direct driver uses a temporary Chrome profile and loopback-only HTTP and DevTools.
+The manifest records Chrome's native renderer, the WebGPU adapter identity, the build
+receipt hash and the verified capture array hashes.
