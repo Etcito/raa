@@ -36,7 +36,7 @@ export function mountLightingNotice(container, controls) {
     if (selection === previous) return;
     previous = selection;
     exact.disabled = !reference;
-    for (const option of fitted) option.disabled = reference || !model;
+    for (const option of fitted) option.disabled = reference || !model || !state.secondaryCache;
     view.value = selected;
     depth.disabled = selected !== 'bounce';
     solver.disabled = reference || state.values['gi-grid'] === 'spherical';

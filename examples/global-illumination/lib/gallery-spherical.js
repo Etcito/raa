@@ -24,8 +24,8 @@ export function isSphericalOption(id) {
   return id === 'gi-grid' || id.startsWith(prefix);
 }
 
-function available(settings) {
-  return settings.gi && !settings['path-reference'];
+function available(settings, state) {
+  return settings.gi && !settings['path-reference'] && (!settings['model-assisted-path'] || state.secondaryCache);
 }
 
 function sphericalEnabled(settings) {
@@ -46,8 +46,10 @@ export function applySpherical(engine, state, settings) {
       exponentialPower: settings['spherical-exponent'],
       clipStart: settings['spherical-clip-start'],
       zMax: settings['spherical-z-max'],
-      mirrorCache: settings['spherical-mirror-cache'],
-      mirrorChannelMask: Number(settings['spherical-mirror-lighting']),
+      ...(state.secondaryCache && {
+        mirrorCache: settings['spherical-mirror-cache'],
+        mirrorChannelMask: Number(settings['spherical-mirror-lighting']),
+      }),
       debug: settings['spherical-debug'],
     });
   } else if (state.sphericalActive) {
@@ -57,7 +59,7 @@ export function applySpherical(engine, state, settings) {
 }
 
 export function syncSphericalControls(controls, state) {
-  const applicable = available(state.enabled);
+  const applicable = available(state.enabled, state);
   const selected = state.values['gi-grid'] === 'spherical';
   const selector = controls.get('gi-grid');
   selector.disabled = !applicable;
@@ -65,7 +67,7 @@ export function syncSphericalControls(controls, state) {
   for (const { id } of sphericalOptions.slice(1)) {
     const downstream = id.startsWith('spherical-mirror-');
     const tracing = state.enabled['geometry-reflections'] || state.enabled['model-assisted-path'];
-    controls.get(id).disabled = !applicable || !selected || (downstream && !tracing)
+    controls.get(id).disabled = !applicable || !selected || (downstream && (!tracing || !state.secondaryCache))
       || (id === 'spherical-mirror-lighting' && state.values['spherical-mirror-cache'] === 'off');
   }
 }
