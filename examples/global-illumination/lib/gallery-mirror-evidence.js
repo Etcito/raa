@@ -83,7 +83,8 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
     async function capture(id, traced, raw = false) {
       checkTime();
       const { data, size } = await engine.captureMeshLighting(timeMs, traced, raw);
-      requireEvidence(size.join() === extent.join(), 'Capture extent changed', { id, size });
+      const expected = raw && !engine.meshTracingStats()?.referencePixels ? extent.map(value => value / 2) : extent;
+      requireEvidence(size.join() === expected.join(), 'Capture extent changed', { id, size, expected });
       const frame = engine.stats().frames - 1;
       let trace = engine.meshTracingStats();
       for (let i = 0; traced && trace?.frame !== frame && i < 80; i++) {
@@ -91,7 +92,7 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
         trace = engine.meshTracingStats();
       }
       if (traced) requireEvidence(trace?.frame === frame, 'Mesh counters were not recorded for the captured frame', { id, frame, trace });
-      const entry = { id, frame, ...await save(id, data, 'rgba16f'), trace: traced ? trace : null,
+      const entry = { id, frame, size, ...await save(id, data, 'rgba16f'), trace: traced ? trace : null,
         cache: engine.sphericalGiStats(), grid: engine.sphericalGi() };
       captures.push(entry);
       return { ...entry, rgb: rgbPlane(data, size) };
