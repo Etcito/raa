@@ -1,7 +1,7 @@
 import { setCanvasSize } from '../../../web/common/page-runner.js';
 import { interactiveInterior } from './interactive-interior.js';
 import { panel } from './content.js';
-import { measureLearnedSecondary } from './gallery-secondary-evidence.js';
+import { inspectMirrorCoverage, measureLearnedSecondary, measureSharpSecondary } from './gallery-secondary-evidence.js';
 import { digest } from './gallery-path-model.js';
 
 const scene = interactiveInterior.default;
@@ -41,7 +41,7 @@ function compare(a, b, accept = () => true) {
 }
 
 export async function measureGalleryMirror({ target, canvas, raa }, {
-  buildId, remainingMs = 280000, baseline = false,
+  buildId, remainingMs = 280000, baseline = false, coverageOnly = false,
 } = {}) {
   requireEvidence(/Windows.+Chrome\//.test(target.navigator.userAgent) && buildId, 'Pinned Windows Chrome build required');
   const deadline = target.performance.now() + remainingMs;
@@ -126,9 +126,18 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
       && mirrorChange.changedPixels > 10 && bounceChange.changedPixels > 10,
     'Gallery mirror fixture failed to exercise BVH geometry, offscreen, misses and the second ray', baselineFacts);
     set('gi-grid', 'spherical');
+    const cold = baseline ? null : await capture('default-spherical-cold', true, true);
     const residency = await settle('spherical');
     const sphere = await capture('spherical-default-mirror', true);
     const comparison = compare(sphere.rgb, volume.rgb);
+    const coverage = baseline ? null : inspectMirrorCoverage(cold,
+      await capture('default-spherical-warm', true, true), residency, requireEvidence);
+    const facts = { hardware, adapter, browser: target.navigator.userAgent, devicePixelRatio: target.devicePixelRatio };
+    const manifest = { source: { kind: 'windows-render', buildId, facts }, size: extent, camera: preset.selection.camera,
+      timeMs, preset: preset.id, initial, baseline, layout: 'linear-scene RGBA16F little-endian top-down',
+      baselineFacts, residency, comparison, captures, coverage };
+    if (coverageOnly || coverage?.zeroCoverage) return { json: { ...manifest, coverageOnly }, files };
+    const sharp = baseline ? null : await measureSharpSecondary({ engine, capture, check: requireEvidence, compare });
     const learned = baseline ? null : await measureLearnedSecondary({ engine, state, set, settle, capture,
       check: requireEvidence, compare });
     let reference;
@@ -167,12 +176,7 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
     const miss = await capture('isolated-mirror-sky-miss', true, true);
     requireEvidence(miss.trace.traced > 100 && miss.trace.geometryHit === 0,
       'The isolated mirror did not reflect into empty space', miss.trace);
-    const facts = { hardware, adapter, browser: target.navigator.userAgent, devicePixelRatio: target.devicePixelRatio };
-    return { json: {
-      source: { kind: 'windows-render', buildId, facts }, size: extent, camera: preset.selection.camera, timeMs,
-      preset: preset.id, initial, baseline, layout: 'linear-scene RGBA16F little-endian top-down',
-      baselineFacts, residency, comparison, learned, reference, missCamera, miss: miss.trace, captures,
-    }, files };
+    return { json: { ...manifest, sharp, learned, reference, missCamera, miss: miss.trace }, files };
   } finally {
     engine.dispose();
   }
