@@ -36,6 +36,12 @@ test('the fitted gallery switches the live grid and restores raster fallback', (
   select('model-assisted-path', false);
   assert.deepEqual(live, { mode: 'off', volume: true, spherical: true });
 
+  engine.setGlobalIllumination({ enabled: false });
+  select('gi-grid', 'volume');
+  assert.deepEqual(live, { mode: 'off', volume: false, spherical: false });
+  select('gi-grid', 'spherical');
+  assert.deepEqual(live, { mode: 'off', volume: false, spherical: true });
+
   select('path-reference', true);
   syncSphericalControls(controls, state);
   assert.equal(controls.get('gi-grid').disabled, true);

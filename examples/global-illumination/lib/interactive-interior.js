@@ -290,7 +290,9 @@ function setOption(engine, state, id, enabled) {
       throw new TypeError(`Invalid interactive interior value for ${id}`);
     }
     if (state.values[id] !== enabled) {
-      if (id === 'indirect-solver' || id === 'gi-grid') setGi(engine, state, { [id]: enabled });
+      if (id === 'indirect-solver' || (id === 'gi-grid' && state.enabled['model-assisted-path'])) {
+        setGi(engine, state, { [id]: enabled });
+      }
       else if (id === 'spherical-mirror-cache') setTracing(engine, state, { [id]: enabled });
       else if (isSphericalOption(id)) applySpherical(engine, state, { ...state.enabled, ...state.values, [id]: enabled });
       else if (id !== 'bounce-depth' || state.values['lighting-view'] === 'bounce') {
