@@ -3,13 +3,14 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use raa_core::{
     AdapterSummary, CanvasSurface, DeviceRequest, FrameGraph, GpuContext, GpuOptions, RaaError,
 };
 use wasm_bindgen::JsValue;
 
+use crate::presentation::{PredictionKey, PresentTarget, Selection, select};
 use crate::stats::CpuRing;
 use crate::{FrameCounters, FrameInput, FrameStats, WebApp};
 
@@ -62,6 +63,23 @@ pub struct FrameTiming {
     pub present_returned_ms: Option<f64>,
 }
 
+struct RetainedReal {
+    retired: bool,
+    target: PresentTarget,
+    frame: u64,
+    texture: wgpu::Texture,
+    ready: Arc<AtomicBool>,
+}
+
+struct RetainedPrediction {
+    retired: bool,
+    key: PredictionKey,
+    source_id: u64,
+    texture: wgpu::Texture,
+    ready: Arc<AtomicBool>,
+    deadline_ms: f64,
+}
+
 /// Owns the GPU context, the canvas surface, the frame graph and the application, and runs
 /// one frame per [`WebRuntime::frame`] call.
 pub struct WebRuntime {
@@ -83,6 +101,9 @@ pub struct WebRuntime {
     /// then). wgpu requires the `on_submitted_work_done` callback to be `Send`, which rules
     /// out `Rc<Cell<Option<f64>>>`; an `Arc<AtomicU64>` is the Send equivalent without unsafe.
     first_frame_bits: Arc<AtomicU64>,
+    pending_real: Option<RetainedReal>,
+    ready_real: Option<RetainedReal>,
+    prediction: Option<RetainedPrediction>,
 }
 
 impl WebRuntime {
@@ -137,6 +158,9 @@ impl WebRuntime {
             cpu_ms: CpuRing::new(opts.stats_window),
             scratch: RefCell::new(Vec::with_capacity(opts.stats_window)),
             first_frame_bits: Arc::new(AtomicU64::new(FIRST_FRAME_UNSET)),
+            pending_real: None,
+            ready_real: None,
+            prediction: None,
         })
     }
 
@@ -175,6 +199,7 @@ impl WebRuntime {
         self.gpu.ensure_live()?;
         let allocs_before = self.alloc_probe.map(|probe| probe());
         let t0 = self.performance.now();
+        self.clear_retained_frames();
         self.update(now_ms)?;
         if let Some(timing) = &mut timing {
             timing.acquire_start_ms = Some(self.performance.now());
@@ -203,9 +228,203 @@ impl WebRuntime {
         Ok(())
     }
 
+    pub fn supports_split_presentation(&self) -> bool {
+        self.surface.supports_copy_dst()
+    }
+
+    /// Produce a real frame without acquiring a drawable. Bound the backlog to one
+    /// unfinished image. The caller checks capacity before opening a scene invocation.
+    pub fn can_produce_real(&mut self) -> bool {
+        self.promote_real();
+        self.supports_split_presentation() && self.pending_real.is_none()
+    }
+
+    pub fn clear_retained_frames(&mut self) {
+        // Keep unfinished queue fences for admission, while retiring their contents.
+        if let Some(pending) = &mut self.pending_real {
+            pending.retired = true;
+        }
+        self.ready_real = None;
+        if let Some(prediction) = &mut self.prediction {
+            prediction.retired = true;
+        }
+    }
+
+    fn promote_real(&mut self) {
+        if self
+            .pending_real
+            .as_ref()
+            .is_some_and(|real| real.ready.load(Ordering::Acquire))
+        {
+            self.ready_real = self.pending_real.take().filter(|real| !real.retired);
+        }
+    }
+
+    pub fn produce_real(&mut self, now_ms: f64, target: PresentTarget) -> Result<u64, RaaError> {
+        self.gpu.ensure_live()?;
+        if !self.can_produce_real() {
+            return Err(RaaError::Unsupported(
+                "retained real production is unavailable".into(),
+            ));
+        }
+        if self.ready_real.as_ref().is_some_and(|real| {
+            target.revision < real.target.revision
+                || (target.revision == real.target.revision && target < real.target)
+        }) {
+            return Err(RaaError::Unsupported("real frame target moves backward".into()));
+        }
+        self.update(now_ms)?;
+        let (width, height) = self.surface.size();
+        let texture = self.gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa-retained-real"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.surface.format(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let commands = self.graph.execute(&self.gpu, &view, (width, height))?;
+        let frame = self.frame;
+        self.submit([commands], None);
+        let ready = Arc::new(AtomicBool::new(false));
+        let completed = Arc::clone(&ready);
+        self.gpu
+            .queue()
+            .on_submitted_work_done(move || completed.store(true, Ordering::Release));
+        self.pending_real = Some(RetainedReal {
+            retired: false,
+            target,
+            frame,
+            texture,
+            ready,
+        });
+        Ok(frame)
+    }
+
+    /// Last completed real submission usable as a prediction source for this target.
+    pub fn prediction_source(&mut self, target: PresentTarget) -> Option<u64> {
+        self.promote_real();
+        self.ready_real.as_ref()
+            .filter(|real| target != real.target && target.includes(real.target))
+            .map(|real| real.frame)
+    }
+
+    /// Submit presentation-only work prepared on this runtime's device. The renderer
+    /// owns admission measurements and must supply a fully resolved, HUD-free image.
+    /// The deadline is on the window performance clock.
+    pub fn submit_prediction(
+        &mut self,
+        key: PredictionKey,
+        source_id: u64,
+        deadline_ms: f64,
+        measured_cost_ms: f64,
+        texture: wgpu::Texture,
+        commands: wgpu::CommandBuffer,
+    ) -> Result<bool, RaaError> {
+        self.gpu.ensure_live()?;
+        self.promote_real();
+        let now = self.performance.now();
+        let (width, height) = self.surface.size();
+        if self.pending_real.is_some()
+            || self
+                .prediction
+                .as_ref()
+                .is_some_and(|p| !p.ready.load(Ordering::Acquire))
+            || !(0.0..=now).contains(&key.cutoff_ms)
+            || !deadline_ms.is_finite()
+            || !measured_cost_ms.is_finite()
+            || measured_cost_ms <= 0.0
+            || now + measured_cost_ms >= deadline_ms
+            || !self.ready_real.as_ref().is_some_and(|source| {
+                source.frame == source_id
+                    && source.target != key.target
+                    && key.target.includes(source.target)
+            })
+            || texture.width() != width
+            || texture.height() != height
+            || texture.depth_or_array_layers() != 1
+            || texture.dimension() != wgpu::TextureDimension::D2
+            || texture.sample_count() != 1
+            || texture.format() != self.surface.format()
+            || !texture.usage().contains(wgpu::TextureUsages::COPY_SRC)
+        {
+            return Ok(false);
+        }
+        let ready = Arc::new(AtomicBool::new(false));
+        let completed = Arc::clone(&ready);
+        self.gpu.queue().submit([commands]);
+        self.gpu
+            .queue()
+            .on_submitted_work_done(move || completed.store(true, Ordering::Release));
+        self.prediction = Some(RetainedPrediction {
+            retired: false,
+            key,
+            source_id,
+            texture,
+            ready,
+            deadline_ms,
+        });
+        Ok(true)
+    }
+
+    /// Select without waiting for the queue. Presentation never executes the graph.
+    /// An empty selection leaves the canvas alone.
+    pub fn present_ready(
+        &mut self,
+        target: PresentTarget,
+        request: Option<&PredictionKey>,
+    ) -> Result<Option<(u64, bool)>, RaaError> {
+        self.gpu.ensure_live()?;
+        self.promote_real();
+        let candidate = self
+            .prediction
+            .as_ref()
+            .filter(|p| self.performance.now() <= p.deadline_ms && p.ready.load(Ordering::Acquire));
+        let real = self.ready_real.as_ref();
+        let (id, texture, predicted) = match select(
+            target,
+            real.map(|real| (real.target, real.frame)),
+            request.filter(|key| (0.0..=now).contains(&key.cutoff_ms)),
+            candidate.map(|p| (&p.key, p.source_id)),
+        ) {
+            Selection::Real => {
+                let real = real.expect("real selection");
+                (real.frame, &real.texture, false)
+            }
+            Selection::Prediction => {
+                let prediction = candidate.expect("prediction selection");
+                (prediction.source_id, &prediction.texture, true)
+            }
+            Selection::Hold => return Ok(None),
+        };
+        let frame = self.surface.acquire(&self.gpu)?;
+        let mut encoder =
+            self.gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("raa-present-real"),
+                });
+        encoder.copy_texture_to_texture(
+            texture.as_image_copy(),
+            frame.texture().as_image_copy(),
+            texture.size(),
+        );
+        self.gpu.queue().submit([encoder.finish()]);
+        frame.present();
+        Ok(Some((id, predicted)))
+    }
+
     /// Resizes the surface (zero sizes clamp to 1) and tells the app; graph targets follow
     /// the new size at the next execute.
     pub fn resize(&mut self, width: u32, height: u32) {
+        self.clear_retained_frames();
         self.surface.resize(&self.gpu, width, height);
         self.app.resize(&self.gpu, self.surface.size());
     }
@@ -289,6 +508,7 @@ impl WebRuntime {
     /// `core.gpu`.
     pub async fn probe_non_empty(&mut self, now_ms: f64) -> Result<bool, RaaError> {
         self.gpu.ensure_live()?;
+        self.clear_retained_frames();
         let format = self.surface.format();
         let swap_red_blue = match format {
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => true,

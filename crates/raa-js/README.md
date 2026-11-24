@@ -83,3 +83,27 @@ verbatim; `raa_web::error_to_js` throws it as a JS `RaaError` with `code`.
 the build.rs output lists every api file and calls install/frame in order);
 `cargo check --target wasm32-unknown-unknown -p raa-js` and wasm32 clippy for the
 engine. The package build is `scripts/build-package.sh`.
+
+### Split presentation experiment
+
+The existing `render(nowMs)` path remains the default. For a single HUD-free canvas, a host can
+check `supportsSplitPresentation()`, apply the engine's render state, call `produceReal(nowMs,
+snapshot)`, and independently call `presentReady(snapshot)` at a display opportunity. Use the
+engine's cutoff `PredictionSnapshot` for speculation. Keep the HUD outside the scene texture and
+compose it once from current host state at the display opportunity. Reset presentation on cuts
+and graph, model, or view changes. Resize and normal rendering retire retained images
+automatically. A missing selection leaves the previous canvas image in place.
+
+The native renderer extension must retain linear HDR and primary geometry guides for the returned
+real source ID. It owns target-geometry reprojection, selective refresh, inference, and the display
+transform. It may submit one resolved image through the Rust `Engine::submit_prediction` path
+after it has measured headroom. The deadline passed there must cover prediction cost, the
+presentation copy, and the next real cutoff. Selection checks the cutoff snapshot again and
+prefers a completed real image for the target. Presentation submits only a texture copy, so it
+does not advance the scene clock or graph history.
+
+The existing FP32 area-light package is an area-filter ABI. No compatible predictive manifest,
+live-trained weights, or renderer extension producing target HDR is supplied here. The shipped
+browser API therefore uses the retained-real fallback. Predictive activation still requires the
+ticket 10 target capture format and ticket 12 cutoff snapshot to agree with the decoder's
+versioned signal schema and golden vectors.

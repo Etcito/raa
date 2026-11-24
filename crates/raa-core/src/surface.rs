@@ -30,11 +30,8 @@ impl CanvasSurface {
             .copied()
             .unwrap_or(wgpu::CompositeAlphaMode::Auto);
         let copy_src = caps.usages.contains(wgpu::TextureUsages::COPY_SRC);
-        let usage = if copy_src {
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
-        } else {
-            wgpu::TextureUsages::RENDER_ATTACHMENT
-        };
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | (caps.usages & (wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST));
         let config = wgpu::SurfaceConfiguration {
             usage,
             format,
@@ -66,6 +63,10 @@ impl CanvasSurface {
     /// True when the surface texture also has COPY_SRC usage.
     pub fn supports_copy_src(&self) -> bool {
         self.copy_src
+    }
+
+    pub fn supports_copy_dst(&self) -> bool {
+        self.config.usage.contains(wgpu::TextureUsages::COPY_DST)
     }
 
     pub fn size(&self) -> (u32, u32) {

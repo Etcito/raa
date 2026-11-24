@@ -48,6 +48,8 @@ export interface EngineOptions {
   maxMaterials?: number;
   /** GPU adapter preference. Default 'high-performance'. Another value throws `api.invalid_argument`. */
   powerPreference?: 'high-performance' | 'low-power';
+  /** Set false to require a hardware adapter. Default true. */
+  allowSoftware?: boolean;
 }
 
 /** A material description for {@link Engine.addMaterial} and {@link Engine.setMaterial}. */
@@ -250,6 +252,15 @@ export interface RaaError extends Error {
  * `scene.stale_instance`. After {@link Engine.dispose} every method throws `api.disposed`.
  */
 export interface Engine {
+  /** Offline single-view area trace. Planes are tightly packed little-endian raw RGBA16F
+   * plus metric R32F, normal RGBA16F and motion RGBA16F when guides are requested. */
+  captureAreaSample(nowMs: number, seed: number, guides: boolean): Promise<{
+    size: [width: number, height: number];
+    lightIndex: number;
+    lightGeneration: number;
+    planes: Uint8Array[];
+  }>;
+
   /**
    * Adds a material and returns its handle.
    * @throws RaaError `material.invalid`, `api.invalid_argument`, `render.too_many_materials`.
@@ -417,6 +428,14 @@ export interface Engine {
    * @throws RaaError `api.disposed` or `api.invalid_argument` for invalid context or time.
    */
   renderInstrumented(nowMs: number, context: FrameTraceContext): FrameTrace;
+  supportsSplitPresentation(): boolean;
+  /** Retire retained images after a cut or graph/model change. */
+  resetPresentation(): void;
+  /** Produce a retained real frame, when the surface supports it and capacity is available. */
+  produceReal(nowMs: number, snapshot: { revision: number; target: { tick: number; phase: number } }): number | undefined;
+  /** Select a completed image. Compose the current HUD after selection. */
+  presentReady(snapshot: { revision: number; target: { tick: number; phase: number } }):
+    { realFrameId: number; predicted: boolean } | undefined;
 
   /**
    * Frame statistics, the adapter and the hardware flag.

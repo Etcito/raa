@@ -36,7 +36,7 @@ use raa_pipeline::Pipeline;
 use raa_scene::{NodeId, OrbitController, RenderList, Scene, Transform};
 use raa_tonemap::{ToneMapping, TonemapPass};
 use raa_web::{
-    FrameCounters, FrameInput, FrameTiming, RuntimeOptions, WebApp, WebRuntime, error_to_js,
+    FrameCounters, FrameInput, FrameTiming, PredictionKey, PresentTarget, RuntimeOptions, WebApp, WebRuntime, error_to_js,
     stats_to_js,
 };
 use wasm_bindgen::prelude::*;
@@ -416,6 +416,36 @@ impl Engine {
         f(runtime.gpu(), s).map_err(|e| js_err(&e))
     }
 
+    /// Real source ID for the native renderer preparing a prediction. The renderer
+    /// must have retained HDR and guides for this same submission.
+    pub fn prediction_source(&mut self, snapshot: &JsValue) -> Result<Option<u64>, JsValue> {
+        let target = present_target(snapshot).map_err(|e| js_err(&e))?;
+        if prediction_key(snapshot, target).is_none() {
+            return Ok(None);
+        }
+        Ok(self.runtime()?.prediction_source(target))
+    }
+
+    /// Accept a device-side prediction from a renderer extension. The same engine
+    /// snapshot is validated again at presentation, after any newer input or rollback.
+    pub fn submit_prediction(
+        &mut self,
+        snapshot: &JsValue,
+        source_id: u64,
+        deadline_ms: f64,
+        measured_cost_ms: f64,
+        texture: wgpu::Texture,
+        commands: wgpu::CommandBuffer,
+    ) -> Result<bool, JsValue> {
+        let target = present_target(snapshot).map_err(|e| js_err(&e))?;
+        let Some(key) = prediction_key(snapshot, target) else {
+            return Ok(false);
+        };
+        self.runtime()?
+            .submit_prediction(key, source_id, deadline_ms, measured_cost_ms, texture, commands)
+            .map_err(|e| js_err(&e))
+    }
+
     /// Opens one scene invocation: clear the observation and open the renderer's index.
     fn begin_scene_invocation(&mut self) -> Result<(), RaaError> {
         let runtime = self.runtime.as_ref().ok_or_else(disposed_error)?;
@@ -477,6 +507,68 @@ impl Engine {
             gi.observe_submission(s.sky_invocation_id(), complete);
         }
     }
+}
+
+/// Consume the identity from the engine RenderSnapshot / PredictionSnapshot.
+fn present_target(snapshot: &JsValue) -> Result<PresentTarget, RaaError> {
+    fn integer(object: &JsValue, name: &str) -> Result<u64, RaaError> {
+        let value = js::required_f64(object, name)?;
+        if (0.0..=9_007_199_254_740_991.0).contains(&value) && value.fract() == 0.0 {
+            Ok(value as u64)
+        } else {
+            Err(invalid(format!("'{name}' must be a nonnegative safe integer")))
+        }
+    }
+    let target = js_sys::Reflect::get(snapshot, &JsValue::from_str("target"))
+        .map_err(|_| invalid("cannot read snapshot target".into()))?;
+    let phase = js::required_f64(&target, "phase")?;
+    if !(0.0..=1.0).contains(&phase) {
+        return Err(invalid("snapshot phase must be in [0, 1]".into()));
+    }
+    Ok(PresentTarget {
+        revision: integer(snapshot, "revision")?,
+        tick: integer(&target, "tick")?,
+        phase,
+    })
+}
+
+/// Missing or unconfirmed evidence disables speculation while preserving real fallback.
+fn prediction_key(snapshot: &JsValue, target: PresentTarget) -> Option<PredictionKey> {
+    let field = |object: &JsValue, name: &str| {
+        js_sys::Reflect::get(object, &JsValue::from_str(name)).ok()
+    };
+    let array = |object: &JsValue, name: &str| {
+        field(object, name)?.dyn_into::<js_sys::Array>().ok()
+    };
+    let inputs = field(snapshot, "inputs")?;
+    let cutoff_ms = js::required_f64(&inputs, "cutoffMs").ok()?;
+    if cutoff_ms < 0.0 || js::required_f64(snapshot, "observedAtMs").ok()? != cutoff_ms
+        || js::required_f64(&inputs, "inputTick").ok()? != target.tick.checked_sub(1)? as f64
+        || array(snapshot, "discontinuities")?.length() != 0
+    {
+        return None;
+    }
+    array(snapshot, "poses")?;
+    array(snapshot, "lights")?;
+    let ids = array(&inputs, "inputIds")?;
+    let receipts = array(&inputs, "receivedAtMs")?;
+    let confirmed = array(&inputs, "confirmedMask")?;
+    if ids.length() != receipts.length() || ids.length() != confirmed.length() {
+        return None;
+    }
+    for i in 0..ids.length() {
+        if confirmed.get(i).as_bool() != Some(true)
+            || ids.get(i).as_string().is_none_or(|id| id.is_empty())
+            || receipts.get(i).as_f64().is_none_or(|ms| !(0.0..=cutoff_ms).contains(&ms))
+        {
+            return None;
+        }
+    }
+    Some(PredictionKey {
+        target,
+        cutoff_ms,
+        snapshot_identity: js_sys::JSON::stringify(snapshot).ok()?.as_string()?,
+    })
 }
 
 fn finite(name: &str, x: f64) -> Result<f32, RaaError> {
@@ -628,6 +720,53 @@ impl Engine {
     /// Renders one frame at `nowMs`; one invocation, one scene-frame index.
     pub fn render(&mut self, now_ms: f64) -> Result<(), JsValue> {
         self.render_frame(now_ms, None).map_err(|e| js_err(&e))
+    }
+
+    /// Whether the canvas supports the copy used by split presentation.
+    #[wasm_bindgen(js_name = supportsSplitPresentation)]
+    pub fn supports_split_presentation(&self) -> Result<bool, JsValue> {
+        let runtime = self.runtime.as_ref().ok_or_else(disposed)?;
+        Ok(runtime.supports_split_presentation())
+    }
+
+    /// Retire pending presentation images after a cut or configuration change.
+    #[wasm_bindgen(js_name = resetPresentation)]
+    pub fn reset_presentation(&mut self) -> Result<(), JsValue> {
+        self.runtime()?.clear_retained_frames();
+        Ok(())
+    }
+
+    /// Opt-in split production. Returns no ID while a real image is pending.
+    #[wasm_bindgen(js_name = produceReal)]
+    pub fn produce_real(&mut self, now_ms: f64, snapshot: JsValue) -> Result<Option<f64>, JsValue> {
+        let target = present_target(&snapshot).map_err(|e| js_err(&e))?;
+        if !now_ms.is_finite() {
+            return Err(js_err(&invalid("nowMs must be finite".into())));
+        }
+        if !self.runtime()?.can_produce_real() {
+            return Ok(None);
+        }
+        self.begin_scene_invocation().map_err(|e| js_err(&e))?;
+        let result = self.runtime.as_mut().ok_or_else(disposed_error)
+            .and_then(|runtime| runtime.produce_real(now_ms, target));
+        self.finish_scene_invocation(result.is_ok());
+        result.map(|id| Some(id as f64)).map_err(|e| js_err(&e))
+    }
+
+    /// Select a completed image from the current engine timeline. The host composites
+    /// the current HUD once after selection.
+    #[wasm_bindgen(js_name = presentReady)]
+    pub fn present_ready(&mut self, snapshot: JsValue) -> Result<JsValue, JsValue> {
+        let target = present_target(&snapshot).map_err(|e| js_err(&e))?;
+        let key = prediction_key(&snapshot, target);
+        let selection = self.runtime()?.present_ready(target, key.as_ref()).map_err(|e| js_err(&e))?;
+        let Some((id, predicted)) = selection else {
+            return Ok(JsValue::UNDEFINED);
+        };
+        let result = js_sys::Object::new();
+        js_sys::Reflect::set(&result, &"realFrameId".into(), &JsValue::from_f64(id as f64))?;
+        js_sys::Reflect::set(&result, &"predicted".into(), &JsValue::from_bool(predicted))?;
+        Ok(result.into())
     }
 
     /// Renders one frame and returns CPU timing keyed by the caller's trial IDs and accepted input.

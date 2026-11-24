@@ -8,8 +8,12 @@ use raa_core::{FrameGraph, GpuContext, RaaError};
 
 #[cfg(target_arch = "wasm32")]
 mod js;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod presentation;
 #[cfg(target_arch = "wasm32")]
 mod runtime;
+#[cfg(any(test, target_arch = "wasm32"))]
+pub use presentation::{PredictionKey, PresentTarget};
 pub mod stats;
 
 /// Information about the frame being updated.
