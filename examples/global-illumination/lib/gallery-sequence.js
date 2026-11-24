@@ -353,7 +353,7 @@ export async function captureGallerySrReplay({ target, canvas, raa }, { buildId,
   const sequences = [], files = [];
   const guideGraph = await reflectionGraph();
   let facts, weightsSha256;
-  for (const arm of ['analytic', 'joint']) {
+  for (const arm of ['analytic', 'sr-reflection', 'joint']) {
     const view = await create(target, raa, canvas, displaySize, heldout, false, guideGraph);
     const { engine } = view;
     try {
@@ -364,8 +364,8 @@ export async function captureGallerySrReplay({ target, canvas, raa }, { buildId,
       weightsSha256 = model.manifest.weightsSha256;
       const selected = engine.setRenderGraphSelection(model.graph, undefined, ...sceneSize);
       if (!selected.ok) throw new Error('SR replay graph refused: ' + JSON.stringify(selected.issues));
-      engine.setNeuralReconstruction(arm === 'joint'
-        ? { model: model.id, area: true, reflection: true, sr: true } : null);
+      const fitted = arm !== 'analytic', area = arm === 'joint';
+      engine.setNeuralReconstruction(fitted ? { model: model.id, area, reflection: true, sr: true } : null);
       view.apply(replay[0]);
       await warmSequence(engine, replay[0].timeMs);
       const frames = [];
@@ -377,8 +377,8 @@ export async function captureGallerySrReplay({ target, canvas, raa }, { buildId,
         });
         if (real.error || !Number.isInteger(real.frameIndex)) throw new Error('SR replay real submission failed');
         const dispatch = engine.neuralReconstructionStats();
-        if (arm === 'joint'
-          ? !dispatch?.ran.area || !dispatch.ran.reflection || !dispatch.ran.sr
+        if (fitted
+          ? !dispatch?.ran.sr || !dispatch.ran.reflection || dispatch.ran.area !== area
             || dispatch.realFrame !== real.frameIndex || dispatch.weightsSha256 !== weightsSha256
           : dispatch !== null) {
           throw new Error('SR replay actual dispatch differs from the requested mode: ' + JSON.stringify(dispatch));
@@ -462,4 +462,7 @@ export async function verifyGalleryReflection({ target, canvas, raa }, { buildId
   }
 }
 
-export { create as createGalleryReplay, floats as decodeGalleryTap, warmSequence as warmGalleryReplay };
+export {
+  create as createGalleryReplay, floats as decodeGalleryTap, warmSequence as warmGalleryReplay,
+  realSignals as galleryReplaySignals, guideChannels as galleryGuideChannels, save as saveGalleryPlane,
+};

@@ -42,7 +42,7 @@ function waitForFrame(target) {
 }
 
 export async function measureGallerySrTiming({ target, canvas, raa }, { buildId, modelHeads = 'sr' } = {}) {
-  if (!buildId || !/Windows.+Chrome\//.test(target.navigator.userAgent) || !['sr', 'joint'].includes(modelHeads)) {
+  if (!buildId || !/Windows.+Chrome\//.test(target.navigator.userAgent) || !['sr', 'sr-reflection', 'joint'].includes(modelHeads)) {
     throw new Error('SR timing requires a pinned Windows Chrome build and a recognized model configuration');
   }
   [canvas.width, canvas.height] = display;
@@ -60,8 +60,11 @@ export async function measureGallerySrTiming({ target, canvas, raa }, { buildId,
     engine.setToneMapping({ exposureEv: unitExposureEv });
     const model = await loadGalleryNeural(engine);
     if (!model) throw new Error('No fitted SR model in the Windows timing stage');
-    if (modelHeads === 'joint' && !['area', 'reflection', 'display'].every(head => model.manifest.trainedHeads.includes(head))) {
-      throw new Error('Joint timing needs a package with area, reflection and display heads');
+    const heads = ['display'];
+    if (modelHeads !== 'sr') heads.push('reflection');
+    if (modelHeads === 'joint') heads.push('area');
+    if (!heads.every(head => model.manifest.trainedHeads.includes(head))) {
+      throw new Error('SR timing model lacks the requested fitted heads');
     }
     const rotation = [0, 0, 0, 1], scale = [1, 1, 1];
     function apply(tick) {
@@ -86,8 +89,7 @@ export async function measureGallerySrTiming({ target, canvas, raa }, { buildId,
     for (const [block, mode] of runOrder.entries()) {
       const switchGraph = engine.setRenderGraphSelection(model.graph, undefined, ...source);
       if (!switchGraph.ok) throw new Error('SR timing graph refused: ' + JSON.stringify(switchGraph.issues));
-      const selection = modelHeads === 'sr' ? { model: model.id, sr: true }
-        : { model: model.id, area: true, reflection: true, sr: true };
+      const selection = { model: model.id, sr: true, area: modelHeads === 'joint', reflection: modelHeads !== 'sr' };
       engine.setNeuralReconstruction(mode === 'learned' ? selection : null);
       engine.setCameraJitter(true);
       await engine.submittedWorkDone();
@@ -137,7 +139,10 @@ export async function measureGallerySrTiming({ target, canvas, raa }, { buildId,
         throw new Error('SR timing source/display extents differ from the paired contract');
       }
       const dispatch = engine.neuralReconstructionStats();
-      if (mode === 'learned' ? !dispatch?.ran.sr || dispatch.weightsSha256 !== model.manifest.weightsSha256 : dispatch !== null) {
+      if (mode === 'learned'
+        ? !dispatch?.ran.sr || dispatch.ran.area !== selection.area || dispatch.ran.reflection !== selection.reflection
+          || dispatch.weightsSha256 !== model.manifest.weightsSha256
+        : dispatch !== null) {
         throw new Error('SR model dispatch does not match the timing arm');
       }
       const loa = longFrames.filter(row => row.startMs >= begin && row.startMs <= end);

@@ -34,7 +34,7 @@ if (rayBudget && (!headful || !raySelection)) {
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
     || flags.some(flag => flag !== '--headful')
     || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-sr-replay', 'gallery-sr-timing', 'gallery-reflection-model', 'gallery-ray-budget', 'gallery-mirror'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-sr-replay|gallery-sr-timing|gallery-reflection-model|gallery-ray-budget|gallery-mirror] [baseline|fixed|live|live-ui|train|test|both|reflection|joint-train-a|joint-train-b|joint-train-c|joint-development|joint-final-a|joint-final-b|sr|joint|dataset|learned|coverage|sharp|priority] [--headful]');
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-sr-replay|gallery-sr-timing|gallery-reflection-model|gallery-ray-budget|gallery-mirror] [baseline|fixed|live|live-ui|train|test|both|reflection|joint-train-a|joint-train-b|joint-train-c|joint-development|joint-final-a|joint-final-b|sr|sr-reflection|joint|dataset|learned|coverage|sharp|priority] [--headful]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
@@ -167,7 +167,7 @@ try {
     const result = await window.nmcGpu.ops[${JSON.stringify(op)}](${JSON.stringify({
       buildId: receipt.buildId, remainingMs: 280000, requireFixed: comparison !== 'baseline',
       ...(mirror && { baseline: comparison === 'baseline', coverageOnly: comparison === 'coverage', sharpOnly: comparison === 'sharp', priorityOnly: comparison === 'priority' }),
-      ...(srTiming && { modelHeads: comparison === 'joint' ? 'joint' : 'sr' }), ...(sequence && { split: jointTrajectory || ['fixed', 'reflection'].includes(comparison) ? 'both' : comparison, reflection: comparison === 'reflection', trajectory: jointTrajectory }), ...(predictionDataset && { dataset: true }), ...(predictionLearned && { learned: true }),
+      ...(srTiming && { modelHeads: comparison === 'fixed' ? 'sr' : comparison }), ...(sequence && { split: jointTrajectory || ['fixed', 'reflection'].includes(comparison) ? 'both' : comparison, reflection: comparison === 'reflection', trajectory: jointTrajectory }), ...(predictionDataset && { dataset: true }), ...(predictionLearned && { learned: true }),
       ...(raySelection && { head: raySelection[1], trajectory: raySelection[2], budget: Number(raySelection[3] || 0) }),
     })});
     const files = await Promise.all(result.files.map(async ({ name, blob, base64 }) => {
@@ -249,8 +249,8 @@ try {
         row.sha256 = createHash('sha256').update(bytes).digest('hex');
         await writeFile(path.join(output, row.file), bytes, { flag: 'wx' });
       }
-    } else if (sequence || predictionDataset) {
-      for (const clip of data.sequences) {
+    } else if (sequence || predictionDataset || (rayBudget && data.developmentPlanes)) {
+      for (const clip of data.sequences ?? [data.developmentPlanes]) {
         for (const frame of clip.frames) {
           for (const record of Object.values(frame.planes)) {
             const bytes = files.get(record.file);
