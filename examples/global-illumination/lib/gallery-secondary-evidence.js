@@ -82,13 +82,10 @@ export function inspectMirrorCoverage(cold, warm, residency, check) {
     zeroCoverage: stats.sphericalDiffuseHits === 0 || (inGrid > 0 && supported === 0) };
 }
 
-export async function measureSharpSecondary({ engine, capture, check, compare }) {
-  const policy = indirectGrid => {
-    engine.setMeshTracing({ indirectGrid });
-    // The default UI continues to use screen confidence. Only this bracket
-    // bypasses it, and the captured counters must show all eligible rays traced.
-    engine.setPassEnabled('ssr.confidence', false);
-  };
+export async function measureSharpSecondary({ engine, capture, check, compare, defaultConfidence }) {
+  // Keep the confidence pass's inputs and raise only its threshold during
+  // this bracket. All eligible rays must actually take the BVH route.
+  const policy = indirectGrid => engine.setMeshTracing({ indirectGrid, confidenceThreshold: 1 });
   const groups = channelMask => engine.setSphericalGi({ channelMask });
   try {
     policy('auto');
@@ -137,7 +134,7 @@ export async function measureSharpSecondary({ engine, capture, check, compare })
       groups: responses, debug: { sceneLinear, presentation } };
   } finally {
     engine.setSphericalGi({ channelMask: 7, debug: 'off' });
-    engine.setMeshTracing({ indirectGrid: 'auto' });
+    engine.setMeshTracing({ indirectGrid: 'auto', confidenceThreshold: defaultConfidence });
   }
 }
 export async function measureLearnedSecondary({ engine, state, set, settle, capture, check, compare }) {

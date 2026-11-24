@@ -137,7 +137,8 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
       timeMs, preset: preset.id, initial, baseline, layout: 'linear-scene RGBA16F little-endian top-down',
       baselineFacts, residency, comparison, captures, coverage };
     if (coverageOnly || coverage?.zeroCoverage) return { json: { ...manifest, coverageOnly }, files };
-    const sharp = baseline ? null : await measureSharpSecondary({ engine, capture, check: requireEvidence, compare });
+    const sharp = baseline ? null : await measureSharpSecondary({ engine, capture, check: requireEvidence, compare,
+      defaultConfidence: initial['reflection-confidence'] });
     const learned = baseline ? null : await measureLearnedSecondary({ engine, state, set, settle, capture,
       check: requireEvidence, compare });
     let reference;
@@ -153,7 +154,9 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
       const detached = await capture('reference-cache-released', true, true, 73030, true);
       const neutral = compare(attached.rgb, detached.rgb);
       requireEvidence(neutral.peak === 0 && [attached, detached].every(sample =>
-        sample.trace.referencePixels > 0 && sample.trace.modelPixels === 0 && !sample.roughEvidence),
+        sample.trace.referencePixels > 0 && sample.trace.modelPixels === 0 && !sample.roughEvidence
+        && ['sphericalDiffuseHits', 'sphericalSpecularHits', 'volumeDiffuseHits', 'volumeSpecularHits']
+          .every(key => sample.trace[key] === 0)),
       'Independent reference output moved when the resident spherical cache was released', { neutral, attached: attached.trace, detached: detached.trace });
       reference = { seed: 73030, residentCells: attached.cache.readyCells, ...neutral };
       engine.setMeshTracing({ reference: false, pathMode: 'off' });
@@ -229,6 +232,7 @@ export async function verifyGalleryMirrorUi({ fitted = false } = {}) {
       await wait(ran, `Fitted dispatch disappeared in ${lobe}`);
     }
     change('spherical-mirror-lighting', '1');
+    await new Promise(resolve => requestAnimationFrame(resolve));
     change('spherical-mirror-lighting', '7');
     change('spherical-mirror-cache', 'off');
     await wait(() => option('spherical-mirror-lighting').disabled, 'Cache bypass kept group controls active');
