@@ -41,7 +41,7 @@ function compare(a, b, accept = () => true) {
 }
 
 export async function measureGalleryMirror({ target, canvas, raa }, {
-  buildId, remainingMs = 280000, baseline = false, coverageOnly = false,
+  buildId, remainingMs = 280000, baseline = false, coverageOnly = false, sharpOnly = false,
 } = {}) {
   requireEvidence(/Windows.+Chrome\//.test(target.navigator.userAgent) && buildId, 'Pinned Windows Chrome build required');
   const deadline = target.performance.now() + remainingMs;
@@ -139,6 +139,7 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
     if (coverageOnly || coverage?.zeroCoverage) return { json: { ...manifest, coverageOnly }, files };
     const sharp = baseline ? null : await measureSharpSecondary({ engine, capture, check: requireEvidence, compare,
       defaultConfidence: initial['reflection-confidence'] });
+    if (sharpOnly) return { json: { ...manifest, sharp, sharpOnly }, files };
     const learned = baseline ? null : await measureLearnedSecondary({ engine, state, set, settle, capture,
       check: requireEvidence, compare });
     let reference;
