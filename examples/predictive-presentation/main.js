@@ -66,7 +66,7 @@ const asset = async name => {
 };
 
 let running = false;
-async function run({ buildId, trajectory } = {}) {
+async function run({ buildId, trajectory, model } = {}) {
   if (running) throw new Error('Prediction fixture is already running');
   require(/Windows/.test(navigator.userAgent), 'Prediction verification requires Windows Chrome');
   running = true;
@@ -191,6 +191,35 @@ async function run({ buildId, trajectory } = {}) {
     require(engine.stats().frames === 1, 'Prediction advanced real history');
     require(predicted.hud === `Tick ${target.target.tick} · prediction`, 'Prediction HUD did not use the current snapshot');
 
+    let learnedProof;
+    if (model) {
+      const registration = engine.setGeneratedFrameModel(model.manifest, model.weights);
+      require(registration.weightsSha256 === model.digest && registration.kind === 'windows-capture-fit',
+        'Generated model receipt mismatch');
+      require(submit(target, needed), 'Learned prediction was refused');
+      const learned = await waitFor(target, frame => frame.predicted);
+      let warpedChanged = 0, freshPreserved = 0, maxDisplayDelta = 0;
+      for (let p = 0; p < width * height; p++) {
+        const lane = p * 4;
+        const delta = Math.max(...[0, 1, 2, 3].map(c => Math.abs(predicted.pixels[lane + c] - learned.pixels[lane + c])));
+        maxDisplayDelta = Math.max(maxDisplayDelta, delta);
+        if (inputs.fresh[lane + 3] === 1) {
+          require(delta === 0, `Learned display changed fresh pixel ${p}`);
+          freshPreserved++;
+        } else if (delta > 0) {
+          warpedChanged++;
+        }
+      }
+      require(warpedChanged > 0 && freshPreserved === needed, 'Learned GPU A/B produced no eligible change or skipped repair');
+      require(engine.stats().frames === 1, 'Learned prediction advanced real history');
+      engine.clearGeneratedFrameModel();
+      require(submit(target, needed), 'Analytic prediction was refused after disabling the model');
+      const disabled = await waitFor(target, frame => frame.predicted);
+      require(disabled.pixels.every((value, i) => value === predicted.pixels[i]), 'Analytic prediction changed after disabling the model');
+      learnedProof = { ...registration, warpedChanged, freshPreserved, maxDisplayDelta,
+        analyticRestored: true, generatedAdvancedRealHistory: false };
+    }
+
     // Render the same target only after selecting prediction. These pixels cannot feed the candidate.
     const targetRenderStartedMs = performance.now();
     move(to);
@@ -233,7 +262,7 @@ async function run({ buildId, trajectory } = {}) {
     require(flashed.hud === `Tick ${flashTarget.target.tick} · real`, 'Flash HUD did not use the current snapshot');
     status.textContent = 'Prediction fixture passed';
     const files = [];
-    const packet = trajectory && {
+    const packet = trajectory && !model && {
       id: trajectory.id, sourceRealFrameId: source, sourceAgeRealFrames: targetReal - source,
       sourceAvailableMs, guidesAvailableMs, cutoffMs: targetCutoffMs, targetRenderStartedMs,
       targetRealFrameId: targetReal, analytic: scorePrediction(inputs, label), sourceSnapshot: first, acceptedTarget: target,
@@ -243,7 +272,7 @@ async function run({ buildId, trajectory } = {}) {
     return { json: { buildId, facts: { adapter, hardware, browser: navigator.userAgent },
       size: [width, height], sourceFrameId: source, targetReal, flashReal, maximumError, movingPixels, holes: guides.holes,
       refreshedLightingPixels: guides.lightPixels, predictionHud: predicted.hud, flashHud: hud.textContent,
-      realSubmissions: engine.stats().frames, ...(packet && { packet }) }, files };
+      realSubmissions: engine.stats().frames, ...(learnedProof && { learnedProof }), ...(packet && { packet }) }, files };
   } catch (error) {
     status.textContent = error.message;
     throw error;
@@ -278,8 +307,18 @@ async function captureDataset({ buildId }) {
     sequences }, files };
 }
 
+async function compareLearned({ buildId }) {
+  const manifest = await asset('./model/manifest.json');
+  const { weightsSha256: digest } = JSON.parse(manifest);
+  const response = await fetch(new URL('./model/weights.fp32le', import.meta.url));
+  if (!response.ok) throw new Error(`Generated model weights: HTTP ${response.status}`);
+  const weights = new Uint8Array(await response.arrayBuffer());
+  const trajectory = { id: 'wide-left', from: 42, to: 32.375, stops: [[0.06, 0.18, 0.45], [0.42, 0.06, 0.62]] };
+  return run({ buildId, trajectory, model: { manifest, weights, digest } });
+}
+
 window.nmcGpu = { ops: { prediction: input => {
   const args = input?.args ?? input;
-  return args?.dataset ? captureDataset(args) : run(args);
+  return args?.dataset ? captureDataset(args) : args?.learned ? compareLearned(args) : run(args);
 } } };
 button.addEventListener('click', () => run().catch(console.error));

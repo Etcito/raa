@@ -23,6 +23,11 @@ cp "$EGE_WASM" "$OUT/ege.wasm"
 cp "$ENGINE/examples/core/scenes/falling.scene.json" "$OUT/scene.json"
 cp "$ENGINE/examples/core/scenes/demo.schema.json" "$OUT/schema.json"
 cp examples/predictive-presentation/{index.html,main.js,nmc.gpu.json,training.js} "$OUT/"
+rm -rf "$OUT/model"
+if [ -n "${RAA_GENERATED_FRAME_MODEL_DIR:-}" ]; then
+  mkdir "$OUT/model"
+  cp "$RAA_GENERATED_FRAME_MODEL_DIR"/{manifest.json,weights.fp32le} "$OUT/model/"
+fi
 node --input-type=module - "$OUT" "$(git rev-parse HEAD)" "$(git -C "$ENGINE" rev-parse HEAD)" <<'JS'
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
