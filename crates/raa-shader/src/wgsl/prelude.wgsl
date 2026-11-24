@@ -155,6 +155,13 @@ fn raa_previous_model(r: RaaPreviousInstanceGpu) -> mat4x4<f32> {
 @group(1) @binding(5) var raa_brdf_lut: texture_2d<f32>;
 @group(1) @binding(6) var raa_linear_clamp: sampler;
 @group(1) @binding(7) var raa_ao_tex: texture_2d<f32>;
+
+// Clamp to the neutral 1x1 texture when the screen-space AO pass is disabled.
+fn raa_gtao_at(frag: vec4<f32>) -> f32 {
+    let size = vec2<i32>(textureDimensions(raa_ao_tex));
+    let pixel = clamp(vec2<i32>(frag.xy), vec2<i32>(0), size - vec2<i32>(1));
+    return textureLoad(raa_ao_tex, pixel, 0).r;
+}
 @group(1) @binding(8) var raa_contact_tex: texture_2d<f32>;
 @group(1) @binding(9) var raa_opaque_color: texture_2d<f32>;
 @group(1) @binding(10) var raa_opaque_depth: texture_2d<f32>;

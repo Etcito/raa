@@ -182,8 +182,10 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
           status.textContent = `Preparing ${scene.id}/${variant.id}`;
           interactive = createInteractiveView({
             target, canvas, lib, scene, variant, settings: display, previous,
+            beforeFrame(engine, state) {
+              if (showAo) galleryAo.apply(engine, state?.enabled?.['path-reference'] === true);
+            },
             onFrame(engine, time, width, height) {
-              if (showAo) galleryAo.apply(engine);
               syncNativeSize();
               stats?.update(engine, time, width, height);
             },

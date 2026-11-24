@@ -90,11 +90,14 @@ fn particles_plush_and_gi_slots_apply_ao_once() {
     assert!(PLUSH.contains("+ raa_slot_ambient(o, c);"));
     assert!(!PLUSH.contains("raa_slot_ambient(o, c) *"));
 
-    assert!(SLOT_AO.contains("min(raa_gi_ao_gtao(frag), raa_gi_ao_screen(frag).a)"));
+    assert!(SLOT_AO.contains("min(raa_gtao_at(frag), raa_gi_ao_screen(frag).a)"));
     assert!(!SLOT_AO.contains("* raa_gi_ao_screen(frag).a"));
 
-    assert!(SLOT_INDIRECT.contains("s.ao"));
+    assert!(SLOT_INDIRECT.contains("var ao = s.ao;"));
+    let opt_in = braced(SLOT_INDIRECT, "if raa_feature_enabled(RAA_INDIRECT_DIFFUSE_AO_FEATURE)");
+    assert!(opt_in.contains("ao = min(ao, raa_gtao_at(c.frag));"));
     assert!(!SLOT_INDIRECT.contains("c.ao"));
+    assert!(!SLOT_INDIRECT.contains("g.a"));
 }
 
 #[test]

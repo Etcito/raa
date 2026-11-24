@@ -43,12 +43,12 @@ test('gallery AO edits and enable state reach the renderer and survive an engine
   const group = container.children[0];
   const [toggle, ...sliders] = group.children
     .filter(element => element.tag === 'label').map(label => label.children.find(element => element.tag === 'input'));
-  const defaults = { radius: 0.8, intensity: 0.6, power: 1, slices: 4, steps: 8 };
+  const defaults = { radius: 0.8, intensity: 0.6, power: 1, slices: 4, steps: 8, indirectDiffuse: true };
   controls.apply(engine);
   controls.apply(engine);
   assert.deepEqual(engine.calls, [['settings', defaults], ['ao.gtao', true]]);
 
-  const settings = { radius: 1.5, intensity: 0.25, power: 2, slices: 6, steps: 12 };
+  const settings = { radius: 1.5, intensity: 0.25, power: 2, slices: 6, steps: 12, indirectDiffuse: true };
   for (const slider of sliders) {
     slider.value = settings[slider.id.replace('gallery-ao-', '')];
     slider.dispatchEvent(new Event('input'));
@@ -70,4 +70,18 @@ test('gallery AO edits and enable state reach the renderer and survive an engine
   controls.apply(rebuilt);
   assert.deepEqual(rebuilt.calls.slice(-2), [['settings', defaults], ['ao.gtao', true]]);
   assert.ok(sliders.every(input => !input.disabled));
+
+  const notice = group.children.find(element => element.role === 'status');
+  const reset = group.children.find(element => element.tag === 'button');
+  assert.ok(notice.hidden);
+  controls.apply(rebuilt, true);
+  assert.deepEqual(rebuilt.calls.at(-1), ['ao.gtao', false]);
+  assert.ok([toggle, reset, ...sliders].every(input => input.disabled));
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /reference bypasses artistic AO/);
+
+  controls.apply(rebuilt, false);
+  assert.deepEqual(rebuilt.calls.at(-1), ['ao.gtao', true]);
+  assert.ok([toggle, reset, ...sliders].every(input => !input.disabled));
+  assert.equal(notice.hidden, true);
 });

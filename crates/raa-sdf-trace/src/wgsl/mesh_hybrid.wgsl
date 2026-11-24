@@ -3,6 +3,7 @@ struct HybridOptions { mode: u32, seed: u32, capture: u32, samples: u32 }
 @group(1) @binding(0) var<uniform> hybrid: HybridOptions;
 @group(1) @binding(1) var<storage, read> path_head: array<f32, 131>;
 @group(1) @binding(2) var<storage, read_write> path_capture: array<f32>;
+@group(1) @binding(3) var diffuse_ao: texture_2d<f32>;
 
 const PATH_MODEL_PIXELS: u32 = 12u;
 const PATH_REFRESH_PIXELS: u32 = 13u;
@@ -90,6 +91,23 @@ fn write_hybrid_capture(index: u32, rgb: vec3<f32>, n: vec3<f32>, z: f32, roughn
     path_capture[base + 5u] = n.z;
     path_capture[base + 6u] = z;
     path_capture[base + 7u] = roughness;
+}
+
+// Reuse raster GTAO only when the raster and ray hits describe the same surface.
+fn hybrid_diffuse_ao(pixel: vec2<i32>, dims: vec2<u32>, z: f32, view_z: f32,
+                     view_normal: vec3<f32>) -> f32 {
+    if (frame.flags[INDIRECT_DIFFUSE_AO_WORD] & INDIRECT_DIFFUSE_AO_MASK) == 0u || z >= 1.0 {
+        return 1.0;
+    }
+    let raster_position = world_at(uv_at(pixel, dims), z);
+    let raster_z = (frame.view * vec4<f32>(raster_position, 1.0)).z;
+    let raster_normal = textureLoad(normals, pixel, 0).xyz;
+    if abs(raster_z - view_z) > max(0.01, abs(view_z) * 0.01)
+        || dot(raster_normal, view_normal) < 0.8 {
+        return 1.0;
+    }
+    let last = vec2<i32>(textureDimensions(diffuse_ao)) - vec2<i32>(1);
+    return textureLoad(diffuse_ao, min(pixel, last), 0).r;
 }
 
 @compute @workgroup_size(8, 8)
@@ -187,7 +205,8 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     // The screen mirror gate says nothing about incident diffuse. There is no
     // confidence-qualified current diffuse input in this mode; trace this lobe.
     atomicAdd(&counters[DIFFUSE_MISSING_PIXELS], 1u);
-    let indirect_diffuse = hybrid_diffuse(p, ng, n, mat, &diffuse_seed);
+    let indirect_diffuse = hybrid_diffuse(p, ng, n, mat, &diffuse_seed)
+        * hybrid_diffuse_ao(pixel, dims, z, pos.z, view_n);
     var direct_seed = hybrid_seed(id.xy, 0x217c6407u);
     let direct = sun_and_lights(p, ng, n, v, mat, &direct_seed, diffuse_output != 0u);
     if diffuse_output != 0u {

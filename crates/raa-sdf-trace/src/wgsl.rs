@@ -80,9 +80,15 @@ pub fn mesh_trace_module() -> String {
 }
 
 pub fn mesh_hybrid_module() -> String {
-    let mut source = mesh_trace_module();
-    source.push_str(include_str!("wgsl/mesh_hybrid.wgsl"));
-    source
+    let source = mesh_trace_module();
+    let (word, bit) = raa_shader::feature_address(raa_shader::RAA_INDIRECT_DIFFUSE_AO_FEATURE)
+        .expect("indirect diffuse AO has a frame feature address");
+    let hybrid = include_str!("wgsl/mesh_hybrid.wgsl");
+    format!(
+        "{source}\nconst INDIRECT_DIFFUSE_AO_WORD: u32 = {word}u;\n\
+         const INDIRECT_DIFFUSE_AO_MASK: u32 = {}u;\n{hybrid}",
+        1u32 << bit,
+    )
 }
 
 const TRACE_WGSL: &str = include_str!("wgsl/trace_wgsl.wgsl");

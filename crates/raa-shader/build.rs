@@ -15,6 +15,7 @@ fn main() {
         ("TILE_SIZE", "u32", 16),
         ("TILE_MAX_LIGHTS", "u32", 127),
         ("TILE_WORDS", "u32", 128),
+        ("RAA_INDIRECT_DIFFUSE_AO_FEATURE", "u32", 41),
     ];
     let (first_word, word_bits, word_count) = (2, 32, 2);
     let mut rust = String::new();

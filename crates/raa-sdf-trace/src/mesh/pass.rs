@@ -158,6 +158,7 @@ impl FeaturePass for MeshTracePass {
         ctx.encoder.clear_buffer(&gpu.counters, 0, None);
         let (width, height) = images.trace_size;
         if path_mode != PathMode::Off {
+            let ao = ctx.lighting.slot_view(7).expect("lighting AO slot");
             self.hybrid
                 .get_or_insert_with(|| HybridGpu::new(device, &gpu.compute_layout))
                 .record(
@@ -165,6 +166,7 @@ impl FeaturePass for MeshTracePass {
                     ctx.encoder,
                     ctx.frame,
                     &group,
+                    &ao,
                     &mut scene.path,
                     path_mode,
                     images.trace_size,
@@ -384,7 +386,7 @@ pub(super) fn buffer_entry(binding: u32, value: &wgpu::Buffer) -> wgpu::BindGrou
     }
 }
 
-fn image_entry(binding: u32, value: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+pub(super) fn image_entry(binding: u32, value: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: wgpu::BindingResource::TextureView(value),

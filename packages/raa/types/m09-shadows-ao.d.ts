@@ -52,6 +52,11 @@ export interface AoSettings {
    * Sampling effort: horizon samples per side of a slice, a whole number in 1..16. Default 8.
    */
   steps?: number;
+  /**
+   * Apply artistic GTAO to diffuse GI and model-assisted diffuse bounce. Default false.
+   * The independent path reference always bypasses screen-space AO.
+   */
+  indirectDiffuse?: boolean;
 }
 
 /**

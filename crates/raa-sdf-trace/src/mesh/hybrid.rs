@@ -1,6 +1,6 @@
 use raa_core::{GpuContext, RaaError};
 
-use super::pass::{buffer, buffer_entry};
+use super::pass::{buffer, buffer_entry, image_entry};
 use crate::wgsl::mesh_hybrid_module;
 
 const LABEL: &str = "trace.mesh.hybrid_path";
@@ -76,6 +76,16 @@ impl HybridGpu {
                 binding(0, B::Uniform),
                 binding(1, B::Storage { read_only: true }),
                 binding(2, B::Storage { read_only: false }),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -111,6 +121,7 @@ impl HybridGpu {
         encoder: &mut wgpu::CommandEncoder,
         frame: u64,
         scene: &wgpu::BindGroup,
+        ao: &wgpu::TextureView,
         state: &mut PathState,
         mode: PathMode,
         size: (u32, u32),
@@ -140,6 +151,7 @@ impl HybridGpu {
                 buffer_entry(0, &self.options),
                 buffer_entry(1, &self.weights),
                 buffer_entry(2, sample_buffer.as_ref().unwrap_or(&self.dummy)),
+                image_entry(3, ao),
             ],
         });
         {

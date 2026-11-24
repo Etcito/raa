@@ -23,9 +23,9 @@ const SLOT_LOCAL_VISIBILITY_WGSL: &str = include_str!("../wgsl/slots/slot_local_
 
 /// The `Indirect` slot provider `gi` (priority 10): `raa_slot_indirect` adds the screen-space GI
 /// irradiance `(1 - s.metallic) * s.base_color / PI * g.rgb * raa_gi_volume_params.intensity *
-/// s.ao`, with `g` the clamped `textureLoad` of `raa_gi_screen` at `c.frag`. Only the material
-/// ao applies: `g.rgb` is traced irradiance with its own visibility and `g.a` belongs to the
-/// same traces, so neither GTAO nor `g.a` is stacked on it.
+/// ao`, with `g` the clamped `textureLoad` of `raa_gi_screen` at `c.frag`. The default AO is
+/// material occlusion. The indirect diffuse AO feature uses the minimum of material and
+/// GTAO occlusion. Both paths leave the visibility already in `g.rgb` intact.
 ///
 /// Handoff: `indirect_provider` is one of the three providers that card 'raa-gi screen:
 /// screen_variants.rs (modules, layouts, gi compositions)' composes with [`ao_provider`] and

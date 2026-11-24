@@ -11,6 +11,7 @@ use js_sys::Reflect;
 use raa_contact::{ContactFeature, ContactHandle};
 use raa_core::{GpuContext, RaaError};
 use raa_gtao::{GtaoFeature, GtaoHandle};
+use raa_shader::RAA_INDIRECT_DIFFUSE_AO_FEATURE;
 use raa_shadow::{ShadowFeature, ShadowHandle};
 use raa_web::FrameInput;
 use wasm_bindgen::prelude::*;
@@ -145,8 +146,8 @@ impl Engine {
         })
     }
 
-    /// Sets the ambient occlusion: `{radius?, intensity?, power?, slices?, steps?}` merged
-    /// over the current settings. `slices` (1..8 directions per pixel) and `steps` (1..16
+    /// Sets ambient occlusion, merging the supplied fields over the current settings.
+    /// `indirectDiffuse` opts into attenuating diffuse GI and model-assisted diffuse bounce. `slices` (1..8 directions per pixel) and `steps` (1..16
     /// horizon samples per side) are the sampling effort, 4 x 8 by default; fewer is cheaper
     /// and noisier. Out-of-range values throw `ao.invalid` naming the field; nothing changes
     /// on a refusal.
@@ -154,6 +155,12 @@ impl Engine {
     pub fn set_ao(&mut self, settings: JsValue) -> Result<(), JsValue> {
         self.with_state(|_, st| {
             require_object(&settings, "setAo")?;
+            let indirect_diffuse = get(&settings, "indirectDiffuse")?
+                .map(|v| {
+                    v.as_bool()
+                        .ok_or_else(|| invalid("'indirectDiffuse' must be a boolean".into()))
+                })
+                .transpose()?;
             let ao = st.features.require_mut::<GtaoHandle>("ao")?;
             let mut d = ao.get();
             read_f32(&settings, "radius", &mut d.radius_m)?;
@@ -165,7 +172,11 @@ impl Engine {
             d.validate()?;
             q.validate()?;
             ao.set(d)?;
-            ao.set_quality(q)
+            ao.set_quality(q)?;
+            if let Some(enabled) = indirect_diffuse {
+                st.lit.set_frame_feature(RAA_INDIRECT_DIFFUSE_AO_FEATURE, enabled);
+            }
+            Ok(())
         })
     }
 

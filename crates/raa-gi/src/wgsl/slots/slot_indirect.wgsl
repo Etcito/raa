@@ -1,8 +1,8 @@
 // The `gi` provider of the `Indirect` slot (S11/S39): the screen-space GI irradiance of the lit
 // renderer (S10 group 1 binding 14) read at the fragment's pixel and clamped into the texture,
-// added as indirect diffuse. Only the material ao `s.ao` applies: `g.rgb` is traced irradiance
-// with its own visibility and `g.a` belongs to the same traces, so neither GTAO nor `g.a` is
-// stacked on it. Transparent fragments and fur shells read the opaque pixel behind
+// added as indirect diffuse. The traced irradiance includes its own visibility. An optional
+// artistic control combines material AO with raw GTAO, excluding the GI alpha from that mix.
+// Transparent fragments and fur shells read the opaque pixel behind
 // them, the same approximation as S12 tiling.
 //
 // Adapted from solstice@7e465b5,
@@ -44,6 +44,10 @@ fn raa_gi_indirect_screen(frag: vec4<f32>) -> vec4<f32> {
 
 fn raa_slot_indirect(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let g = raa_gi_indirect_screen(c.frag);
+    var ao = s.ao;
+    if raa_feature_enabled(RAA_INDIRECT_DIFFUSE_AO_FEATURE) {
+        ao = min(ao, raa_gtao_at(c.frag));
+    }
     return (1.0 - s.metallic) * s.base_color / RAA_GI_INDIRECT_PI
-        * g.rgb * raa_gi_volume_params.intensity * s.ao;
+        * g.rgb * raa_gi_volume_params.intensity * ao;
 }

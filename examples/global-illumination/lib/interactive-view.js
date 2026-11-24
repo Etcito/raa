@@ -123,7 +123,7 @@ function attachCamera({ target, canvas, engine, camera, signal, pose }) {
   };
 }
 
-export function createInteractiveView({ target, canvas, lib, scene, variant, onReady, onError, settings, onFrame, previous }) {
+export function createInteractiveView({ target, canvas, lib, scene, variant, onReady, onError, settings, beforeFrame, onFrame, previous }) {
   const lifetime = new AbortController();
   const { signal } = lifetime;
   const camera = variant.selection.camera;
@@ -217,6 +217,7 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
           }
           controls.update(dt);
           scene.frame?.(engine, timeMs, variant, state, frameOptions);
+          beforeFrame?.(engine, state);
           engine.render(timeMs);
           // Some scenes finish setup only after their first GPU frames.
           if (!sceneReady) sceneReady = scene.ready(engine, state, variant).ready;

@@ -7,9 +7,14 @@ const fields = [
 ];
 
 export function createGalleryAoControls() {
-  const defaults = Object.fromEntries(fields.map(field => [field.key, field.initial]));
+  const defaults = {
+    ...Object.fromEntries(fields.map(field => [field.key, field.initial])),
+    indirectDiffuse: true,
+  };
   let settings = defaults;
   let enabled = true;
+  let bypassed = false;
+  let syncMountedInputs;
   let appliedEngine;
   let appliedSettings;
   let appliedEnabled;
@@ -58,10 +63,13 @@ export function createGalleryAoControls() {
 
     function syncInputs() {
       toggle.checked = enabled;
+      toggle.disabled = bypassed;
+      reset.disabled = bypassed;
+      notice.hidden = !bypassed;
       for (const { key, control, value } of inputs) {
         control.value = settings[key];
         value.value = control.value;
-        control.disabled = !enabled;
+        control.disabled = !enabled || bypassed;
       }
     }
 
@@ -77,18 +85,27 @@ export function createGalleryAoControls() {
       settings = defaults;
       syncInputs();
     });
-    group.append(reset);
+    const notice = doc.createElement('span');
+    notice.setAttribute('role', 'status');
+    notice.textContent = 'The path-traced reference bypasses artistic AO.';
+    group.append(reset, notice);
+    syncMountedInputs = syncInputs;
     syncInputs();
     container.append(group);
   }
 
-  function apply(engine) {
+  function apply(engine, reference = false) {
+    if (reference !== bypassed) {
+      bypassed = reference;
+      syncMountedInputs?.();
+    }
+    const passEnabled = enabled && !bypassed;
     const newEngine = engine !== appliedEngine;
     if (newEngine || appliedSettings !== settings) engine.setAo(settings);
-    if (newEngine || enabled !== appliedEnabled) engine.setPassEnabled('ao.gtao', enabled);
+    if (newEngine || passEnabled !== appliedEnabled) engine.setPassEnabled('ao.gtao', passEnabled);
     appliedEngine = engine;
     appliedSettings = settings;
-    appliedEnabled = enabled;
+    appliedEnabled = passEnabled;
   }
 
   return { mount, apply };
