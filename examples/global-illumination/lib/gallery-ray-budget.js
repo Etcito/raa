@@ -9,7 +9,7 @@ import {
 
 const size = [160, 90];
 const pixels = size[0] * size[1];
-const budgetSteps = { reflection: [1, 2, 4, 8, 12, 16, 24], area: [2, 3, 5, 6, 7, 8, 9, 16] };
+const budgetSteps = { reflection: [1, 2, 4, 8, 12, 16, 20, 24], area: [2, 3, 5, 6, 7, 8, 9, 16] };
 const timedPasses = {
   reflection: ['ssr.hiz#hiz', 'ssr.trace#ssrTrace', 'ssr.incident#incident', 'ssr.replace#replace'],
   area: ['area.trace#trace', 'area.mask#mask', 'forward', 'ssr.replace#replace'],
@@ -268,7 +268,8 @@ export async function measureGalleryRayBudget(context, { buildId, head, trajecto
     throw new Error('Final replay needs an extra-ray count frozen from development');
   }
   const graph = await reflectionGraph();
-  const diagnostic = head === 'area' && development && budgetSteps.area.includes(budget);
+  const fixedBudget = budgetSteps[head].includes(budget);
+  const diagnostic = head === 'area' && development && fixedBudget;
   const label = head === 'reflection' ? await reflectionLabels(trajectory, tape.replay)
     : await areaLabels(context, graph, tape);
   const baseline = await measureCase(context, graph, tape, head,
@@ -278,7 +279,7 @@ export async function measureGalleryRayBudget(context, { buildId, head, trajecto
   let weights;
   for (const settings of [
     { name: 'baseline', budget: 0 }, { name: 'learned', learned: true },
-    ...(development && !diagnostic ? budgetSteps[head] : [budget]).map(budget => ({ name: 'extra-rays', budget })),
+    ...(development && !fixedBudget ? budgetSteps[head] : [budget]).map(budget => ({ name: 'extra-rays', budget })),
   ]) {
     const run = settings.name === 'baseline' ? baseline : await measureCase(context, graph, tape, head, settings);
     weights ??= run.weights;
