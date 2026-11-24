@@ -287,3 +287,31 @@ Pass `json` (or the parsed object) to `setRenderGraph` to install a starter.
 
 `presets` lists the compute-node presets and `frozen` the names of the frozen pipelines for the
 same installation.
+
+### Experimental neural routing
+
+Area reconstruction consumes and produces stratified visibility pairs between
+`area.trace.raw` and `area.mask.src`. Reflection reconstruction consumes and
+produces RGBA32F incident radiance between `ssr.incident.incident` and
+`ssr.replace.incident`. Its fitted head refines accepted screen hits and
+preserves the surrounding native signal and confidence. Temporal SR owns the
+scene-resolution color, depth, motion and previous display history at the
+temporal resolve boundary. These three nodes share the recurrent features
+when wired together and require the same registered package ID. Register
+the package with `registerNeuralModel` before selecting the graph. Each
+selected head must appear in the package's `trainedHeads`;
+`neuralReconstructionStats` reports selected and executed heads separately.
+
+`neural.frame-generation.color` connects to the same real HDR endpoint as
+the tonemap input. It is a presentation branch with no real-frame output or
+history link. A saved graph can store the ID of a package registered with
+`registerGeneratedFrameModel`. An empty ID selects analytic reprojection.
+The Game camera profile uses a retained native HDR/depth image and the
+motion derived from both cameras. It requires a static scene, a contained
+target frustum, the same camera eye and valid render-graph history. The
+GPU decoder only refines the accepted warp. The host presents an eligible
+candidate before its deadline or uses the available real image.
+`generatedFrameModelStats` counts learned work and learned presentations.
+The fitted weights were trained on causal target-guide actor motion.
+The camera profile uses optical guides and remains experimental. Physical
+input-to-display latency and camera quality require separate qualification.
