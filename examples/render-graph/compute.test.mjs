@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { areaInput, areaReference } from '../global-illumination/lib/area-pilot-capture.js';
 import { readFileSync } from 'node:fs';
 import * as interpreter from './scenes/interpreter.js';
 import * as views from './scenes/views.js';
@@ -134,3 +135,49 @@ test('WGSL error refusal keeps Custom denoise active and caption includes its li
   assert.deepEqual(assertions(failed.state), [['wgsl-error-on-node', false]]);
 });
 
+
+function capturePlanes({ s = 0x3800, u = 0x3c00, reject = 0 } = {}) {
+  const halfPlane = (...lanes) => {
+    const bytes = new Uint8Array(8);
+    const view = new DataView(bytes.buffer);
+    lanes.forEach((lane, i) => view.setUint16(i * 2, lane, true));
+    return bytes;
+  };
+  const metric = new Uint8Array(4);
+  new DataView(metric.buffer).setFloat32(0, 3.125, true);
+  return {
+    size: [1, 1], lightIndex: 9, lightGeneration: 0xfedcba98,
+    planes: [halfPlane(s, u), metric, halfPlane(0xbc00, 0, 0x3c00), halfPlane(0, 0, reject)],
+  };
+}
+
+test('area capture packs native guides and accepts only consistent previous pairs', () => {
+  const previous = capturePlanes({ s: 0x3400 });
+  const decode = bytes => {
+    const view = new DataView(bytes.buffer);
+    return Array.from({ length: 12 }, (_, i) => view.getFloat32(i * 4, true));
+  };
+  assert.deepEqual(decode(areaInput(capturePlanes(), previous, false)),
+    [0.5, 1, 0.25, 1, -1, 0, 1, 3.125, 0, 0, 1, 0]);
+  const rejected = [0.5, 1, 0, 0, -1, 0, 1, 3.125, 0, 0, 0, 0];
+  assert.deepEqual(decode(areaInput(capturePlanes({ reject: 0x3c00 }), previous, false)), rejected);
+  assert.deepEqual(decode(areaInput(capturePlanes(), previous, true)), rejected);
+  const padded = capturePlanes();
+  padded.planes[0] = new Uint8Array(256);
+  assert.throws(() => areaInput(padded, previous, false), /tight raw/);
+});
+
+test('area teacher freezes disjoint stratum batches and divides summed weights once', async () => {
+  const sample = seed => {
+    const row = seed % 4 === 0 ? capturePlanes({ s: 0, u: 0x4000 }) : capturePlanes({ s: 0x3c00 });
+    return { ...row, planes: row.planes.slice(0, 1) };
+  };
+  const reference = await areaReference([1, 1], sample, [4]);
+  assert.deepEqual(reference.seedBatches, [[4096, 4097, 4098, 4099], [8192, 8193, 8194, 8195]]);
+  assert.equal(reference.rmse, 0);
+  assert.equal(new DataView(reference.bytes.buffer).getFloat32(0, true), Math.fround(3 / 5));
+  assert.deepEqual(await areaReference([1, 1], sample, [4]), reference);
+  await assert.rejects(areaReference([1, 1], seed => ({
+    ...sample(seed), planes: [capturePlanes({ s: seed < 8192 ? 0 : 0x3c00 }).planes[0]],
+  }), [4, 8]), /batch RMSE/);
+});

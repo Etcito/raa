@@ -1,6 +1,9 @@
 #!/usr/bin/env node
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { publishGpuPage, runGpuPageOp } from './gpu-job.mjs';
 import { createPageJob, runCli } from './page-job.mjs';
 
 /**
@@ -67,3 +70,34 @@ export const {
 } = job;
 
 runCli(job, import.meta.url);
+
+/** Publishes a built GI page and validates the downloaded training dataset before exposing it. */
+export async function captureAreaPilot(page, out) {
+  const { buildId, inputs } = readBuildReceipt(page);
+  const timeoutMs = 300000;
+  await mkdir(path.dirname(out), { recursive: true });
+  await mkdir(out);
+  const { pageRef } = await publishGpuPage(page, { timeoutMs });
+  const { jobId, clientId, result } = await runGpuPageOp(
+    pageRef, 'area-pilot', { buildId, remainingMs: 280000 }, { out, timeoutMs },
+  );
+  if (result?.format !== 'raa.area-pilot-capture/1' || result.buildId !== buildId ||
+      !result.facts?.hardware || !/Windows/.test(result.facts.browser) || !result.frames?.length) {
+    throw new Error('invalid Windows area pilot capture result');
+  }
+  const names = new Set();
+  for (const frame of result.frames) {
+    for (const record of [frame.input, frame.reference, ...Object.values(frame.native)]) {
+      const { file, sha256, byteLength } = record;
+      if (!/^[a-z0-9-]+\.bin$/.test(file) || names.has(file)) throw new Error(`invalid capture file ${file}`);
+      names.add(file);
+      const bytes = await readFile(path.join(out, file));
+      if (bytes.length !== byteLength || createHash('sha256').update(bytes).digest('hex') !== sha256) {
+        throw new Error(`capture length or hash mismatch: ${file}`);
+      }
+    }
+  }
+  const manifest = path.join(out, 'manifest.json');
+  await writeFile(manifest, JSON.stringify({ ...result, source: inputs, jobId, clientId, pageRef }, null, 2) + '\n', { flag: 'wx' });
+  return manifest;
+}

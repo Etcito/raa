@@ -1,7 +1,7 @@
 import { registerNmcGpu } from '../../web/common/nmc-gpu.js';
 import * as content from './lib/content.js';
 import { validateInventory } from './lib/inventory.js';
-import { createGiPageRunner } from './lib/runtime.js';
+import { captureAreaPilot, createGiPageRunner } from './lib/runtime.js';
 import { runNeuralBaseline } from './lib/neural-baseline-runner.js';
 
 const stages = ['volume', 'lighting', 'virtual'];
@@ -92,6 +92,11 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
         throw error;
       }
     };
+    target.nmcGpu.ops['area-pilot'] = input => exclusively(() => {
+      runner?.dispose();
+      runner = null;
+      return captureAreaPilot({ target, canvas, raa: lib.raa }, input?.args ?? input);
+    });
     const entries = [...scenes.values()];
     for (const namespace of entries) {
       const option = target.document.createElement('option');

@@ -87,3 +87,5 @@ export function createGiPageRunner(options) {
     settle,
   });
 }
+
+export { captureAreaPilot } from './area-pilot-capture.js';

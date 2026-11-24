@@ -1,4 +1,4 @@
 {
   "page": "index.html",
-  "ops": ["run", "baseline"]
+  "ops": ["run", "baseline", "area-pilot"]
 }
