@@ -1,6 +1,7 @@
 //! Sparse CPU index and six-face work scheduler for spherical GI.
 
 mod grid;
+mod lighting;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -8,9 +9,11 @@ use std::ops::Range;
 use raa_core::RaaError;
 
 pub use grid::{CellKey, CubeFace, RadialShell, SphericalGrid, SphericalGridConfig};
+pub use lighting::{SKY_LIGHT_ID, SUN_LIGHT_ID, SphericalLight};
 
 use super::{MeshTraceScene, geometry::Bounds};
 use grid::{dot, sub};
+use lighting::{FaceLighting, light_changes, light_hash};
 
 pub const ALL_FACES: u8 = 0b11_1111;
 
@@ -58,6 +61,8 @@ pub struct CellProgress {
     pub normal: [f32; 3],
     pub ready_faces: u8,
     pub in_flight_faces: u8,
+    /// Hash of the reported contributing IDs and their capture light values.
+    pub light_hash: u64,
 }
 
 impl CellProgress {
@@ -90,11 +95,28 @@ pub struct SchedulerStats {
     pub origin_epoch: u64,
     pub light_revision: u64,
     pub last_cell_queries: u32,
+    /// Resident cells with lighting metadata from all six current faces.
+    pub lighting_metadata_ready_cells: u32,
+    /// Cumulative cells with ready or in-flight work cleared by lighting changes.
+    pub light_invalidated_cells: u64,
+    pub light_invalidated_faces: u64,
 }
 
 struct Entry {
     progress: CellProgress,
     tickets: [u64; 6],
+    lighting: FaceLighting,
+}
+
+impl Entry {
+    fn reset_faces(&mut self, serial: &mut u64) {
+        *serial += 1;
+        self.progress.epoch = *serial;
+        self.progress.ready_faces = 0;
+        self.progress.in_flight_faces = 0;
+        self.progress.light_hash = 0;
+        self.lighting = FaceLighting::default();
+    }
 }
 
 struct DirtyScan {
@@ -113,6 +135,9 @@ pub struct SphericalScheduler {
     released: BTreeSet<u32>,
     serial: u64,
     revisions: Option<(u64, u64, u64)>,
+    local_lights: Vec<SphericalLight>,
+    light_invalidated_cells: u64,
+    light_invalidated_faces: u64,
     origin_epoch: u64,
     discovery: Range<u32>,
     reprojected: BTreeSet<CellKey>,
@@ -142,6 +167,9 @@ impl SphericalScheduler {
             released: BTreeSet::new(),
             serial: 0,
             revisions: None,
+            local_lights: Vec::new(),
+            light_invalidated_cells: 0,
+            light_invalidated_faces: 0,
             origin_epoch: 0,
             discovery: 0..0,
             reprojected: BTreeSet::new(),
@@ -163,27 +191,59 @@ impl SphericalScheduler {
         self.cells.get(&key).map(|entry| &entry.progress)
     }
 
+    /// Contributing stable light IDs once all six current face observations arrived.
+    pub fn contributing_light_ids(&self, key: CellKey) -> Option<&[u64]> {
+        let lighting = &self.cells.get(&key)?.lighting;
+        lighting
+            .is_known()
+            .then_some(lighting.contributors.as_slice())
+    }
+
     /// Slots vacated since the previous drain, including any reused by this update.
     /// Apply clears before recording writes for the new occupants.
     pub fn take_released_slots(&mut self) -> BTreeSet<u32> {
         std::mem::take(&mut self.released)
     }
 
-    /// Update before dispatch and lookup. Returns whether the anchor, residency or
-    /// face validity changed. Geometry updates use old and new world bounds from the
-    /// shared mesh BVH. Light and material revisions can affect every resident cell.
+    /// Update a scene with sun and environment lighting and no local lights.
     pub fn update(
         &mut self,
         scene: &MeshTraceScene,
         camera_origin: [f32; 3],
         light_revision: u64,
     ) -> bool {
+        self.update_with_lights(scene, camera_origin, light_revision, &[])
+    }
+
+    /// Update before dispatch and lookup. Returns whether the anchor, residency or
+    /// face validity changed. The global revision covers sun and environment,
+    /// while local lights carry their own stable IDs and shading values.
+    pub fn update_with_lights(
+        &mut self,
+        scene: &MeshTraceScene,
+        camera_origin: [f32; 3],
+        global_light_revision: u64,
+        local_lights: &[SphericalLight],
+    ) -> bool {
         self.last_cell_queries = 0;
         if !camera_origin.into_iter().all(f32::is_finite) {
             return false;
         }
         let geometry = &scene.geometry;
-        let revisions = (geometry.revision, scene.material_revision, light_revision);
+        let revisions = (
+            geometry.revision,
+            scene.material_revision,
+            global_light_revision,
+        );
+        let local_changes = if self.local_lights == local_lights {
+            Vec::new()
+        } else {
+            let mut sorted = local_lights.to_vec();
+            sorted.sort_unstable_by_key(|light| light.id());
+            let changes = light_changes(&self.local_lights, &sorted);
+            self.local_lights = sorted;
+            changes
+        };
         let displacement = sub(
             camera_origin.map(f64::from),
             self.grid.origin.map(f64::from),
@@ -210,14 +270,26 @@ impl SphericalScheduler {
                     self.restart();
                 }
             }
-            if old_material != revisions.1 || old_light != revisions.2 {
+            let global_changed = old_light != revisions.2;
+            let material_changed = old_material != revisions.1;
+            if global_changed || material_changed || !local_changes.is_empty() {
+                let scene_bounds = geometry.world_bounds();
                 for entry in self.cells.values_mut() {
-                    self.serial += 1;
-                    entry.progress.epoch = self.serial;
-                    entry.progress.ready_faces = 0;
-                    entry.progress.in_flight_faces = 0;
+                    let work = entry.progress.ready_faces | entry.progress.in_flight_faces;
+                    if work == 0 {
+                        continue;
+                    }
+                    let light_changed =
+                        global_changed || entry.lighting.affected_by(&local_changes, scene_bounds);
+                    if light_changed {
+                        self.light_invalidated_cells += 1;
+                        self.light_invalidated_faces += u64::from(work.count_ones());
+                    }
+                    if light_changed || material_changed {
+                        entry.reset_faces(&mut self.serial);
+                        changed = true;
+                    }
                 }
-                changed |= !self.cells.is_empty();
             }
         }
         self.revisions = Some(revisions);
@@ -285,8 +357,10 @@ impl SphericalScheduler {
                         normal: surface.normal,
                         ready_faces: 0,
                         in_flight_faces: 0,
+                        light_hash: 0,
                     },
                     tickets: [0; 6],
+                    lighting: FaceLighting::default(),
                 },
             );
             changed = true;
@@ -351,15 +425,51 @@ impl SphericalScheduler {
         self.finish(job, false)
     }
 
+    /// Attach asynchronous metadata from a submitted face. A retired epoch or
+    /// a canceled and retried face cannot overwrite the current dependencies.
+    pub fn record_face_lighting(
+        &mut self,
+        job: FaceJob,
+        hit_bounds: Option<([f32; 3], [f32; 3])>,
+        contributing_ids: &[u64],
+    ) -> bool {
+        let Some(entry) = self.cells.get_mut(&job.key) else {
+            return false;
+        };
+        let bit = 1 << job.face as u8;
+        if entry.progress.slot != job.slot
+            || entry.progress.epoch != job.epoch
+            || entry.progress.ready_faces & bit == 0
+            || entry.tickets[job.face as usize] != job.ticket
+        {
+            return false;
+        }
+        let bounds = hit_bounds.map(|(min, max)| Bounds { min, max });
+        if bounds.is_some_and(|b| {
+            (0..3).any(|i| !b.min[i].is_finite() || !b.max[i].is_finite() || b.min[i] > b.max[i])
+        }) || !entry.lighting.record(bit, bounds, contributing_ids)
+        {
+            return false;
+        }
+        let global = self.revisions.map_or(0, |(_, _, light)| light);
+        entry.progress.light_hash =
+            light_hash(global, &entry.lighting.contributors, &self.local_lights);
+        true
+    }
+
     pub fn stats(&self) -> SchedulerStats {
         let mut stats = SchedulerStats {
             cells: self.cells.len() as u32,
             origin_epoch: self.origin_epoch,
             light_revision: self.revisions.map_or(0, |(_, _, light)| light),
             last_cell_queries: self.last_cell_queries,
+            light_invalidated_cells: self.light_invalidated_cells,
+            light_invalidated_faces: self.light_invalidated_faces,
             ..SchedulerStats::default()
         };
-        for cell in self.cells() {
+        for entry in self.cells.values() {
+            let cell = entry.progress;
+            stats.lighting_metadata_ready_cells += u32::from(entry.lighting.is_known());
             stats.near_cells += u32::from(cell.key.shell < self.config.near_shells);
             stats.ready_cells += u32::from(cell.is_ready());
             stats.ready_faces += cell.ready_faces.count_ones();

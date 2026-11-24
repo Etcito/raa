@@ -391,3 +391,152 @@ fn materials_and_skipped_geometry_revisions_invalidate_current_faces() {
     assert!(scheduler.progress(key(0, CubeFace::PosX)).is_none());
     assert!(scheduler.progress(key(1, CubeFace::NegX)).is_some());
 }
+
+fn light(id: u64, position: [f32; 3], range: f32, intensity: f32) -> SphericalLight {
+    let lanes = [
+        position[0],
+        position[1],
+        position[2],
+        range,
+        intensity,
+        0.,
+        0.,
+        0.,
+        0.,
+        0.,
+        -1.,
+        0.9,
+        0.95,
+        0.,
+        1.,
+        1.,
+    ];
+    let record: Vec<_> = lanes.into_iter().flat_map(f32::to_le_bytes).collect();
+    SphericalLight::from_packed(id, &record).unwrap()
+}
+
+fn capture_light_metadata(scheduler: &mut SphericalScheduler, ids: impl Fn(CellKey) -> Vec<u64>) {
+    for job in scheduler.take_jobs(FaceBudget { near: 32, far: 32 }) {
+        let hit = if job.key.shell == 0 {
+            [3.0, 0.0, 0.0]
+        } else {
+            [-6.0, 0.0, 0.0]
+        };
+        assert!(scheduler.complete(job));
+        assert!(scheduler.record_face_lighting(job, Some((hit, hit)), &ids(job.key)));
+    }
+}
+
+#[test]
+fn local_light_mutations_preserve_unaffected_ready_cells_and_hashes() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(
+        &mut scene,
+        &[triangle(1, &facing_x(1.5)), triangle(2, &facing_x(-5.0))],
+    );
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    let near = key(0, CubeFace::PosX);
+    let far = key(2, CubeFace::NegX);
+    let contributor = light(10, [3.1, 0.0, 0.0], 0.5, 1.0);
+    let removed_irrelevant = light(20, [3.1, 0.0, 0.0], 0.5, 1.0);
+    let far_contributor = light(30, [-6.1, 0.0, 0.0], 0.5, 1.0);
+    scheduler.update_with_lights(
+        &scene,
+        [0.0; 3],
+        5,
+        &[contributor, removed_irrelevant, far_contributor],
+    );
+    capture_light_metadata(&mut scheduler, |key| {
+        if key == near {
+            vec![10, SUN_LIGHT_ID]
+        } else {
+            vec![30, SKY_LIGHT_ID]
+        }
+    });
+    let initial_near = *scheduler.progress(near).unwrap();
+    let initial_far = *scheduler.progress(far).unwrap();
+    assert_eq!(
+        scheduler.contributing_light_ids(near),
+        Some([10, SUN_LIGHT_ID].as_slice())
+    );
+    assert_eq!(scheduler.stats().lighting_metadata_ready_cells, 2);
+    let remote = light(40, [60.0, 0.0, 0.0], 0.5, 1.0);
+    // The remaining records can be reordered or shifted by removal of a dense GPU index.
+    assert!(!scheduler.update_with_lights(
+        &scene,
+        [0.0; 3],
+        5,
+        &[remote, far_contributor, contributor]
+    ));
+    assert_eq!(scheduler.progress(near), Some(&initial_near));
+    assert_eq!(scheduler.progress(far), Some(&initial_far));
+    assert_eq!(scheduler.stats().light_invalidated_cells, 0);
+
+    let edited = light(10, [3.1, 0.0, 0.0], 0.5, 2.0);
+    assert!(scheduler.update_with_lights(&scene, [0.0; 3], 5, &[edited, far_contributor, remote]));
+    assert!(!scheduler.progress(near).unwrap().is_ready());
+    assert_eq!(scheduler.progress(far), Some(&initial_far));
+    assert_eq!(scheduler.stats().light_invalidated_cells, 1);
+    assert_eq!(scheduler.stats().light_invalidated_faces, 6);
+    capture_light_metadata(&mut scheduler, |_| vec![10, SUN_LIGHT_ID]);
+    assert_ne!(
+        scheduler.progress(near).unwrap().light_hash,
+        initial_near.light_hash
+    );
+
+    assert!(scheduler.update_with_lights(&scene, [0.0; 3], 5, &[far_contributor, remote]));
+    assert!(!scheduler.progress(near).unwrap().is_ready());
+    assert_eq!(scheduler.progress(far), Some(&initial_far));
+}
+
+#[test]
+fn new_or_moved_lights_cover_previously_occluded_hits() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(
+        &mut scene,
+        &[triangle(1, &facing_x(1.5)), triangle(2, &facing_x(-5.0))],
+    );
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    let near = key(0, CubeFace::PosX);
+    let far = key(2, CubeFace::NegX);
+    scheduler.update(&scene, [0.0; 3], 0);
+    capture_light_metadata(&mut scheduler, |_| vec![]);
+    let initial_far = *scheduler.progress(far).unwrap();
+
+    let occluded = light(70, [3.1, 0.0, 0.0], 0.4, 1.0);
+    assert!(scheduler.update_with_lights(&scene, [0.0; 3], 0, &[occluded]));
+    assert!(!scheduler.progress(near).unwrap().is_ready());
+    assert_eq!(scheduler.progress(far), Some(&initial_far));
+    capture_light_metadata(&mut scheduler, |_| vec![]);
+    let initial_near = *scheduler.progress(near).unwrap();
+
+    let brighter = light(70, [3.1, 0.0, 0.0], 0.4, 5.0);
+    assert!(!scheduler.update_with_lights(&scene, [0.0; 3], 0, &[brighter]));
+    assert_eq!(scheduler.progress(near), Some(&initial_near));
+    let moved = light(70, [-6.1, 0.0, 0.0], 0.4, 5.0);
+    assert!(scheduler.update_with_lights(&scene, [0.0; 3], 0, &[moved]));
+    assert_eq!(scheduler.progress(near), Some(&initial_near));
+    assert!(!scheduler.progress(far).unwrap().is_ready());
+}
+
+#[test]
+fn pending_light_metadata_is_conservative_and_stale_readback_is_rejected() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(&mut scene, &[triangle(1, &facing_x(1.5))]);
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    scheduler.update(&scene, [0.0; 3], 0);
+    let old = scheduler.take_jobs(FaceBudget { near: 1, far: 0 })[0];
+    assert!(scheduler.complete(old));
+    let remote = light(10, [60.0, 0.0, 0.0], 0.5, 1.0);
+    assert!(!scheduler.update_with_lights(&scene, [0.0; 3], 0, &[remote]));
+    let overlapping = light(20, [1.5, 0.0, 0.0], 0.5, 1.0);
+    assert!(scheduler.update_with_lights(&scene, [0.0; 3], 0, &[remote, overlapping]));
+    assert!(!scheduler.record_face_lighting(old, Some(([1.5, 0.0, 0.0], [1.5, 0.0, 0.0])), &[20]));
+    assert_eq!(scheduler.stats().light_invalidated_faces, 1);
+    let retried = scheduler.take_jobs(FaceBudget { near: 1, far: 0 })[0];
+    assert_eq!(retried.slot, old.slot);
+    assert_ne!(retried.epoch, old.epoch);
+    assert!(scheduler.complete(retried));
+    assert!(scheduler.record_face_lighting(retried, None, &[SKY_LIGHT_ID]));
+    assert!(!scheduler.record_face_lighting(retried, None, &[20]));
+}

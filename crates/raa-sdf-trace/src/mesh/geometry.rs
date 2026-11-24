@@ -13,8 +13,8 @@ type TriangleBounds = ([f32; 3], [f32; 3]);
 
 #[derive(Clone, Copy)]
 pub(super) struct Bounds {
-    min: [f32; 3],
-    max: [f32; 3],
+    pub(super) min: [f32; 3],
+    pub(super) max: [f32; 3],
 }
 
 impl Bounds {
@@ -261,6 +261,13 @@ impl Geometry {
             }
         }
         part
+    }
+
+    pub(super) fn world_bounds(&self) -> Option<Bounds> {
+        self.bvh.nodes.first().map(|root| Bounds {
+            min: root.min,
+            max: root.max,
+        })
     }
 
     /// Visit candidate triangles in the same BVH used by mesh rays. The caller's
