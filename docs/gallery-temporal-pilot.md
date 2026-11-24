@@ -58,6 +58,16 @@ RGB samples. Misses are zero-filled and masked. This conditional reference
 estimates radiance visible at the screen hit. Physical radiance along a BVH
 reflection ray and offscreen or volume fallback remain separate estimators.
 
+On the pinned combined package, compare the typed node with its model off, on,
+then off on a fixed gallery pose. The check compares each submitted frame's
+raw incident buffer with the node output. It records GPU timestamps, workload
+and fitted hash, and asserts that all confidence lanes and masked pixels stay
+exact.
+
+```powershell
+node scripts/capture-area-pilot-direct.mjs $Chrome dist/global-illumination out/reflection-ab gallery-reflection-model
+```
+
 ## Separate causal prediction target
 
 Train a distinct decoder against the fully rendered HDR for the predicted
