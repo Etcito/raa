@@ -1,7 +1,7 @@
 // Consumer fixture of the shipped @etcito/raa declarations (npm run typecheck:types).
 // Every v0 loadRaa option of packages/raa/index.js must be callable here without a cast.
 import { loadRaa } from '@etcito/raa';
-import type { RaaModule } from '@etcito/raa';
+import type { Engine, FrameTrace, RaaModule } from '@etcito/raa';
 
 declare const bytes: ArrayBuffer;
 declare const view: Uint8Array<ArrayBuffer>;
@@ -17,6 +17,19 @@ export async function consumers(): Promise<RaaModule[]> {
     await loadRaa({ wasmUrl: 'https://example.invalid/raa_js_bg.wasm' }),
     await loadRaa({ wasmUrl: new URL('https://example.invalid/raa_js_bg.wasm') }),
   ];
+}
+
+export function renderAfterKey(engine: Engine, event: KeyboardEvent, acceptedMs: number): FrameTrace {
+  const inputCutoffMs = performance.now();
+  return engine.renderInstrumented(inputCutoffMs, {
+    viewId: 'main',
+    trialId: 'trial-1',
+    presentId: 'present-1',
+    inputCutoffMs,
+    eventId: 'blocker-step',
+    eventMs: event.timeStamp,
+    acceptedMs,
+  });
 }
 
 // Negative cases: the declarations must refuse these. (A string for `wasm` is NOT a usable

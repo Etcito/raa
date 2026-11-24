@@ -1,8 +1,8 @@
 //! Shared web runtime types and frame statistics.
 //!
 //! On every target: [`FrameInput`], [`FrameCounters`], [`FrameStats`], the [`WebApp`] trait
-//! and the [`stats`] helpers. On wasm32 only: [`WebRuntime`], [`RuntimeOptions`] and the
-//! JS conversions [`stats_to_js`] and [`error_to_js`].
+//! and the [`stats`] helpers. On wasm32 only: [`WebRuntime`], [`RuntimeOptions`],
+//! [`FrameTiming`] and the JS conversions [`stats_to_js`] and [`error_to_js`].
 
 use raa_core::{FrameGraph, GpuContext, RaaError};
 
@@ -52,7 +52,7 @@ pub trait WebApp {
 #[cfg(target_arch = "wasm32")]
 pub use js::{error_to_js, stats_to_js};
 #[cfg(target_arch = "wasm32")]
-pub use runtime::{RuntimeOptions, WebRuntime};
+pub use runtime::{FrameTiming, RuntimeOptions, WebRuntime};
 pub use stats::FrameStats;
 
 /// Quantises a linear colour to the 8-bit RGBA a canvas stores: sRGB-encoded when the

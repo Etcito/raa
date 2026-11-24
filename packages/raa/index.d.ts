@@ -144,6 +144,53 @@ export interface FrameStats {
   allocsPerFrameTotal: number | null;
 }
 
+/** Correlation keys supplied by the caller and shared with browser evidence. */
+export interface FrameTraceContext {
+  /** Non-blank identifier of the observed view. */
+  viewId: string;
+  /** Non-blank identifier of the trial. */
+  trialId: string;
+  /** Non-blank identifier of this presentation attempt within the view and trial. */
+  presentId: string;
+  /** Timestamp from this window's performance.now() when this frame's inputs were finalized. */
+  inputCutoffMs: number;
+  /** Non-blank ID of the keyboard or scripted event applied in this frame, if any. */
+  eventId?: string | null;
+  /** The accepted KeyboardEvent.timeStamp, supplied together with eventId and acceptedMs. */
+  eventMs?: number | null;
+  /** performance.now() when the key was accepted, at or before inputCutoffMs. */
+  acceptedMs?: number | null;
+}
+
+/**
+ * CPU observations for one render attempt. Stage timestamps use this window's performance.now()
+ * clock. A null stage timestamp means the attempt stopped before that step.
+ */
+export interface FrameTrace extends FrameTraceContext {
+  eventId: string | null;
+  eventMs: number | null;
+  acceptedMs: number | null;
+  /** Frame clock passed to renderInstrumented, which may be a scripted time. */
+  nowMs: number;
+  /** performance.timeOrigin, in milliseconds since the Unix epoch. */
+  timeOriginMs: number;
+  renderStartMs: number;
+  acquireStartMs: number | null;
+  /** When the acquire call returned, including on failure. */
+  acquireEndMs: number | null;
+  /** Start of the final surface queue submission. */
+  submitStartMs: number | null;
+  /** Return from the final surface queue submission. */
+  submitEndMs: number | null;
+  /** Zero-based runtime frame index assigned on surface submission. */
+  frameIndex: number | null;
+  /** When the runtime selected the real frame for handoff to the browser. */
+  presentSelectedMs: number | null;
+  /** When the handoff returned. Browser refresh feedback can be joined separately by the IDs. */
+  presentReturnedMs: number | null;
+  error: { code: string; message: string } | null;
+}
+
 /** The result of {@link Engine.loadPrimsAsset}. */
 export interface AssetInfo {
   /** Asset handle, for {@link Engine.spawnAsset}. */
@@ -361,6 +408,13 @@ export interface Engine {
    * @throws RaaError `core.surface`, `core.gpu`, `api.disposed`.
    */
   render(nowMs: number): void;
+
+  /**
+   * Renders one frame through the same path as render() and returns its timing record.
+   * A rendering failure returns the partial record with its error.
+   * @throws RaaError `api.disposed` or `api.invalid_argument` for invalid context or time.
+   */
+  renderInstrumented(nowMs: number, context: FrameTraceContext): FrameTrace;
 
   /**
    * Frame statistics, the adapter and the hardware flag.

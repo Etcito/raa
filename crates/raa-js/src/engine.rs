@@ -36,7 +36,8 @@ use raa_pipeline::Pipeline;
 use raa_scene::{NodeId, OrbitController, RenderList, Scene, Transform};
 use raa_tonemap::{ToneMapping, TonemapPass};
 use raa_web::{
-    FrameCounters, FrameInput, RuntimeOptions, WebApp, WebRuntime, error_to_js, stats_to_js,
+    FrameCounters, FrameInput, FrameTiming, RuntimeOptions, WebApp, WebRuntime, error_to_js,
+    stats_to_js,
 };
 use wasm_bindgen::prelude::*;
 
@@ -139,7 +140,11 @@ fn js_err(e: &RaaError) -> JsValue {
 }
 
 fn disposed() -> JsValue {
-    js_err(&api_error(DISPOSED, "the engine was disposed"))
+    js_err(&disposed_error())
+}
+
+fn disposed_error() -> RaaError {
+    api_error(DISPOSED, "the engine was disposed")
 }
 
 fn invalid(message: String) -> RaaError {
@@ -420,20 +425,35 @@ impl Engine {
     }
 
     /// Opens one scene invocation: clear the observation and open the renderer's index.
-    fn begin_scene_invocation(&mut self) -> Result<(), JsValue> {
-        let runtime = self.runtime.as_ref().ok_or_else(disposed)?;
-        runtime.gpu().ensure_live().map_err(|e| js_err(&e))?;
+    fn begin_scene_invocation(&mut self) -> Result<(), RaaError> {
+        let runtime = self.runtime.as_ref().ok_or_else(disposed_error)?;
+        runtime.gpu().ensure_live()?;
         let mut guard = self.state.borrow_mut();
-        let s = guard.as_mut().ok_or_else(disposed)?;
-        let mut pipeline = s
-            .pipeline
-            .try_borrow_mut()
-            .map_err(|_| js_err(&pipeline_busy()))?;
-        crate::state::next_sky_invocation(&mut s.sky_invocation_id).map_err(|e| js_err(&e))?;
+        let s = guard.as_mut().ok_or_else(disposed_error)?;
+        let mut pipeline = s.pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
+        crate::state::next_sky_invocation(&mut s.sky_invocation_id)?;
         let index = s.scene_invocation.begin();
         pipeline.begin_scene_submission();
         s.lit.begin_scene_frame(index);
         Ok(())
+    }
+
+    fn render_frame(
+        &mut self,
+        now_ms: f64,
+        timing: Option<&mut FrameTiming>,
+    ) -> Result<(), RaaError> {
+        self.begin_scene_invocation()?;
+        let result = self
+            .runtime
+            .as_mut()
+            .ok_or_else(disposed_error)
+            .and_then(|runtime| match timing {
+                Some(timing) => runtime.frame_with_timing(now_ms, timing),
+                None => runtime.frame(now_ms),
+            });
+        self.finish_scene_invocation(result.is_ok());
+        result
     }
 
     /// Closes it from the pipeline observation (only real submissions are acknowledged).
@@ -526,6 +546,46 @@ fn number_array(values: &[u32]) -> Array {
     values.iter().map(|&v| JsValue::from(v)).collect()
 }
 
+fn check_frame_trace_id(id: &str, key: &str) -> Result<(), RaaError> {
+    if id.trim().is_empty() {
+        return Err(invalid(format!("'{key}' must be non-blank")));
+    }
+    Ok(())
+}
+
+fn frame_trace_id(context: &JsValue, key: &str) -> Result<String, RaaError> {
+    let id = js::string(context, key)?;
+    check_frame_trace_id(&id, key)?;
+    Ok(id)
+}
+
+fn check_frame_trace_event(
+    event_id: Option<&str>,
+    event_ms: Option<f64>,
+    accepted_ms: Option<f64>,
+    cutoff_ms: f64,
+) -> Result<(), RaaError> {
+    if let Some(event_id) = event_id {
+        check_frame_trace_id(event_id, "eventId")?;
+    }
+    match (event_ms, accepted_ms) {
+        (None, None) => Ok(()),
+        (Some(event), Some(accepted)) if event_id.is_some() => {
+            if 0.0 <= event && event <= accepted && accepted <= cutoff_ms {
+                Ok(())
+            } else {
+                Err(invalid(
+                    "key timestamps must satisfy 0 <= eventMs <= acceptedMs <= inputCutoffMs"
+                        .into(),
+                ))
+            }
+        }
+        _ => Err(invalid(
+            "key timestamps require 'eventId', 'eventMs' and 'acceptedMs' together".into(),
+        )),
+    }
+}
+
 #[wasm_bindgen(js_class = Engine)]
 impl Engine {
     /// Creates the engine on `canvas` at its current width and height. `options`:
@@ -570,12 +630,74 @@ impl Engine {
 
     /// Renders one frame at `nowMs`; one invocation, one scene-frame index.
     pub fn render(&mut self, now_ms: f64) -> Result<(), JsValue> {
-        self.begin_scene_invocation()?;
-        let result = self
-            .runtime()
-            .and_then(|rt| rt.frame(now_ms).map_err(|e| js_err(&e)));
-        self.finish_scene_invocation(result.is_ok());
-        result
+        self.render_frame(now_ms, None).map_err(|e| js_err(&e))
+    }
+
+    /// Renders one frame and returns CPU timing keyed by the caller's trial IDs and accepted input.
+    /// A rendering failure returns a partial record with its error for the same IDs.
+    #[wasm_bindgen(js_name = renderInstrumented)]
+    pub fn render_instrumented(
+        &mut self,
+        now_ms: f64,
+        context: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let runtime = self.runtime.as_ref().ok_or_else(disposed)?;
+        let view_id = frame_trace_id(&context, "viewId").map_err(|e| js_err(&e))?;
+        let trial_id = frame_trace_id(&context, "trialId").map_err(|e| js_err(&e))?;
+        let present_id = frame_trace_id(&context, "presentId").map_err(|e| js_err(&e))?;
+        let input_cutoff_ms =
+            js::required_f64(&context, "inputCutoffMs").map_err(|e| js_err(&e))?;
+        let event_id = js::optional_string(&context, "eventId").map_err(|e| js_err(&e))?;
+        let event_ms = js::optional_f64(&context, "eventMs").map_err(|e| js_err(&e))?;
+        let accepted_ms = js::optional_f64(&context, "acceptedMs").map_err(|e| js_err(&e))?;
+        check_frame_trace_event(event_id.as_deref(), event_ms, accepted_ms, input_cutoff_ms)
+            .map_err(|e| js_err(&e))?;
+        if !now_ms.is_finite() {
+            return Err(js_err(&invalid("'nowMs' must be finite".into())));
+        }
+        let mut timing = runtime.start_frame_timing();
+        if !(0.0..=timing.render_start_ms).contains(&input_cutoff_ms) {
+            return Err(js_err(&invalid(
+                "'inputCutoffMs' must be a timestamp from performance.now() at or before render start"
+                    .into(),
+            )));
+        }
+
+        let result = self.render_frame(now_ms, Some(&mut timing));
+        let trace = Object::new();
+        set(&trace, "viewId", &JsValue::from_str(&view_id));
+        set(&trace, "trialId", &JsValue::from_str(&trial_id));
+        set(&trace, "presentId", &JsValue::from_str(&present_id));
+        set(
+            &trace,
+            "eventId",
+            &event_id.as_deref().map_or(JsValue::NULL, JsValue::from_str),
+        );
+        for (key, value) in [
+            ("nowMs", Some(now_ms)),
+            ("inputCutoffMs", Some(input_cutoff_ms)),
+            ("eventMs", event_ms),
+            ("acceptedMs", accepted_ms),
+            ("timeOriginMs", Some(timing.time_origin_ms)),
+            ("renderStartMs", Some(timing.render_start_ms)),
+            ("acquireStartMs", timing.acquire_start_ms),
+            ("acquireEndMs", timing.acquire_end_ms),
+            ("submitStartMs", timing.submit_start_ms),
+            ("submitEndMs", timing.submit_end_ms),
+            ("frameIndex", timing.frame_index.map(|index| index as f64)),
+            ("presentSelectedMs", timing.present_selected_ms),
+            ("presentReturnedMs", timing.present_returned_ms),
+        ] {
+            set(&trace, key, &value.map_or(JsValue::NULL, JsValue::from_f64));
+        }
+        let error = result.err().map_or(JsValue::NULL, |error| {
+            let detail = Object::new();
+            set(&detail, "code", &JsValue::from_str(error.code()));
+            set(&detail, "message", &JsValue::from_str(error.message()));
+            detail.into()
+        });
+        set(&trace, "error", &error);
+        Ok(trace.into())
     }
 
     /// Frame statistics, the adapter and the hardware flag.
@@ -587,7 +709,7 @@ impl Engine {
     /// Renders one frame and tells whether any pixel differs from the clear colour.
     #[wasm_bindgen(js_name = probeNonEmpty)]
     pub async fn probe_non_empty(&mut self, now_ms: f64) -> Result<bool, JsValue> {
-        self.begin_scene_invocation()?;
+        self.begin_scene_invocation().map_err(|e| js_err(&e))?;
         let result = match self.runtime() {
             Ok(rt) => rt.probe_non_empty(now_ms).await.map_err(|e| js_err(&e)),
             Err(e) => Err(e),

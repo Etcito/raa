@@ -42,6 +42,26 @@ impl Default for RuntimeOptions {
     }
 }
 
+/// CPU-side timings for one frame attempt, relative to the window's performance time origin.
+/// A missing timestamp means that the attempt did not reach that step.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameTiming {
+    /// The window's performance time origin in milliseconds since the Unix epoch.
+    pub time_origin_ms: f64,
+    pub render_start_ms: f64,
+    pub acquire_start_ms: Option<f64>,
+    pub acquire_end_ms: Option<f64>,
+    /// The final surface submission. A graph may issue earlier intermediate submissions.
+    pub submit_start_ms: Option<f64>,
+    pub submit_end_ms: Option<f64>,
+    /// The zero-based runtime frame index assigned on surface submission.
+    pub frame_index: Option<u64>,
+    /// When the runtime selected this real frame for the canvas handoff.
+    pub present_selected_ms: Option<f64>,
+    /// When the handoff returned to the runtime. The browser controls scanout.
+    pub present_returned_ms: Option<f64>,
+}
+
 /// Owns the GPU context, the canvas surface, the frame graph and the application, and runs
 /// one frame per [`WebRuntime::frame`] call.
 pub struct WebRuntime {
@@ -124,18 +144,59 @@ impl WebRuntime {
     /// (`performance.now()` delta) in the ring and, with an alloc probe, the allocation count
     /// of the frame. Allocates nothing itself after warm-up, except the frame-0 callback.
     pub fn frame(&mut self, now_ms: f64) -> Result<(), RaaError> {
+        self.run_frame(now_ms, None)
+    }
+
+    /// Starts an observation before the host prepares a scene invocation.
+    pub fn start_frame_timing(&self) -> FrameTiming {
+        FrameTiming {
+            render_start_ms: self.performance.now(),
+            time_origin_ms: self.performance.time_origin(),
+            ..FrameTiming::default()
+        }
+    }
+
+    /// Runs the usual frame path and fills a fresh observation, including on failure.
+    pub fn frame_with_timing(
+        &mut self,
+        now_ms: f64,
+        timing: &mut FrameTiming,
+    ) -> Result<(), RaaError> {
+        self.run_frame(now_ms, Some(timing))
+    }
+
+    fn run_frame(
+        &mut self,
+        now_ms: f64,
+        mut timing: Option<&mut FrameTiming>,
+    ) -> Result<(), RaaError> {
         // A lost device cannot record or present a frame; refuse before any upload or pipeline
         // work touches wgpu (which would panic on a destroyed device).
         self.gpu.ensure_live()?;
         let allocs_before = self.alloc_probe.map(|probe| probe());
         let t0 = self.performance.now();
-        let frame = self.update_and_acquire(now_ms)?;
+        self.update(now_ms)?;
+        if let Some(timing) = &mut timing {
+            timing.acquire_start_ms = Some(self.performance.now());
+        }
+        let acquired = self.surface.acquire(&self.gpu);
+        if let Some(timing) = &mut timing {
+            timing.acquire_end_ms = Some(self.performance.now());
+        }
+        let frame = acquired?;
         let commands = self
             .graph
             .execute(&self.gpu, &frame.view, self.surface.size())?;
-        self.submit([commands]);
+        self.submit([commands], timing.as_deref_mut());
+        if let Some(timing) = &mut timing {
+            timing.present_selected_ms = Some(self.performance.now());
+        }
         frame.present();
-        self.cpu_ms.push(self.performance.now() - t0);
+        let presented_ms = self.performance.now();
+        if let Some(timing) = timing {
+            timing.present_returned_ms = Some(presented_ms);
+        }
+        self.cpu_ms.push(presented_ms - t0);
         if let (Some(probe), Some(before)) = (self.alloc_probe, allocs_before) {
             self.allocs_last_frame = Some(probe().saturating_sub(before));
         }
@@ -177,8 +238,8 @@ impl WebRuntime {
         self.app.as_mut()
     }
 
-    /// Runs `app.update` with the frame clock, then acquires the surface texture.
-    fn update_and_acquire(&mut self, now_ms: f64) -> Result<raa_core::SurfaceFrame, RaaError> {
+    /// Runs `app.update` with the frame clock before surface acquisition.
+    fn update(&mut self, now_ms: f64) -> Result<(), RaaError> {
         let dt_ms = self.last_now_ms.map_or(0.0, |last| now_ms - last);
         self.last_now_ms = Some(now_ms);
         let input = FrameInput {
@@ -188,12 +249,23 @@ impl WebRuntime {
             size: self.surface.size(),
         };
         self.counters = self.app.update(&self.gpu, &input)?;
-        self.surface.acquire(&self.gpu)
+        Ok(())
     }
 
     /// Submits the frame's commands; on frame 0 registers the first-frame callback.
-    fn submit<I: IntoIterator<Item = wgpu::CommandBuffer>>(&mut self, commands: I) {
+    fn submit<I: IntoIterator<Item = wgpu::CommandBuffer>>(
+        &mut self,
+        commands: I,
+        mut timing: Option<&mut FrameTiming>,
+    ) {
+        if let Some(timing) = &mut timing {
+            timing.submit_start_ms = Some(self.performance.now());
+        }
         self.gpu.queue().submit(commands);
+        if let Some(timing) = timing {
+            timing.submit_end_ms = Some(self.performance.now());
+            timing.frame_index = Some(self.frame);
+        }
         if self.frame == 0 {
             let first = Arc::clone(&self.first_frame_bits);
             self.gpu.queue().on_submitted_work_done(move || {
@@ -236,7 +308,8 @@ impl WebRuntime {
             depth_or_array_layers: 1,
         };
 
-        let frame = self.update_and_acquire(now_ms)?;
+        self.update(now_ms)?;
+        let frame = self.surface.acquire(&self.gpu)?;
         let commands = self
             .graph
             .execute(&self.gpu, &frame.view, (width, height))?;
@@ -295,6 +368,7 @@ impl WebRuntime {
             std::iter::once(commands)
                 .chain(offscreen_commands)
                 .chain(std::iter::once(copy)),
+            None,
         );
         // The copy is submitted, so presenting (and the texture expiring at the await) is safe.
         frame.present();
