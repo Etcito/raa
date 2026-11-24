@@ -203,8 +203,12 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
 
   const local = engine.addLight({ kind: 'point', position: [0.2, 0.35, -2.8], range: 0.7, intensity: 15 });
   let beforeLightChange = record('local-light-added', await warm());
+  check(beforeLightChange.lightInvalidatedFaces > removedRemote.lightInvalidatedFaces
+    && beforeLightChange.capturedFaces > removedRemote.capturedFaces,
+  'adding a light over the open floor did not schedule its captures', beforeLightChange);
   for (const [id, change] of [
     ['local-light-edited', () => engine.updateLight(local, { intensity: 4 })],
+    ['local-light-moved', () => engine.updateLight(local, { position: [0.25, 0.35, -2.8] })],
     ['local-light-removed', () => engine.removeLight(local)],
   ]) {
     change();

@@ -335,7 +335,7 @@ export interface SphericalGiStats {
   /** Total faces recorded since the active grid was allocated. */
   capturedFaces: number;
   captureFrames: number;
-  /** Hexadecimal representation of the full light revision. */
+  /** Revision of the global lighting inputs, encoded as hexadecimal. */
   lightRevision: string;
   /** World-space grid anchor retained across sub-threshold camera movement. */
   origin: [number, number, number];
