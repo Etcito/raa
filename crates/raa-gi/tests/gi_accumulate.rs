@@ -73,11 +73,12 @@ fn change_test_keeps_noise_and_cuts_a_lighting_change() {
     assert!((change_keep(10.0, 0.0, 1.0, 4.0, 2.5) - (2.0 - 10.0 / 2.5001 / 2.5)).abs() < 1e-5);
     // A larger jump (history 10, mean 0, noise sigma 1): z = 10 / 1.5001 = 6.67 > 5: nothing kept.
     assert_eq!(change_keep(10.0, 0.0, 1.0, 0.0, 2.5), 0.0);
-    // Inside: nothing. Certain (keep 0): cut. In the band: mark first, cut when marked already.
-    assert_eq!(change_action(1.0, true), (false, false));
-    assert_eq!(change_action(0.0, false), (true, false));
-    assert_eq!(change_action(0.4, false), (false, true));
-    assert_eq!(change_action(0.4, true), (true, false));
+    assert_eq!(change_action(1.0, true, true), (false, false));
+    assert_eq!(change_action(0.0, false, false), (true, false));
+    assert_eq!(change_action(0.0, false, true), (false, true));
+    assert_eq!(change_action(0.0, true, true), (true, false));
+    assert_eq!(change_action(0.4, false, false), (false, true));
+    assert_eq!(change_action(0.4, true, false), (true, false));
     // A cut keeps historyMin - 1 frames: 0 (the next frame, n = 1, is the new light alone), or 3.
     assert_eq!(cut_length(64.0, 1.0), 0.0);
     assert_eq!(cut_length(64.0, 4.0), 3.0);
@@ -162,19 +163,27 @@ fn atrous_weight_edge_terms() {
 /// One accumulation frame with the change test (accumulate.wgsl raa_gi_acc_resolve, matched
 /// pixel, kept history): state (n, value, m1, m2), this frame's value x and spatial variance.
 fn frame_with_test(
-    state: (f32, f32, f32, f32, bool),
+    state: (f32, f32, f32, f32, i8),
     x: f32,
     spatial_var: f32,
-) -> (f32, f32, f32, f32, bool) {
+) -> (f32, f32, f32, f32, i8) {
     let (mut n, value, mut m1, mut m2, marked) = state;
     let keep = change_keep(value, x, spatial_var, (m2 - m1 * m1).max(0.0), 2.5);
-    let (cut, mark) = change_action(keep, marked);
-    if cut && n >= 4.0 {
+    let direction = if x > value { 1 } else { -1 };
+    let (cut, mark) = if n >= 4.0 {
+        change_action(keep, marked == direction, direction > 0)
+    } else {
+        (false, false)
+    };
+    if mark && keep <= 0.0 {
+        return (n, value, m1, m2, direction);
+    }
+    if cut {
         n = cut_length(n, 1.0);
         (m1, m2) = cut_moments(x, spatial_var);
     }
     let (n, value, m1, m2) = accumulate((n, value, m1, m2), x, 64.0);
-    (n, value, m1, m2, mark && n >= 4.0)
+    (n, value, m1, m2, if mark { direction } else { 0 })
 }
 
 #[test]
@@ -182,18 +191,39 @@ fn a_light_that_goes_out_leaves_the_history_at_once() {
     // Converged at 10 with per-frame noise sigma 1 (m2 = 101), 64 frames. The light goes out:
     // this frame reads 0 with spatial sigma 1. z = 10 / (1 + 0.5001) = 6.67 > 2 x 2.5: nothing
     // kept, so the next history is this frame alone, exactly 0.
-    let state = frame_with_test((64.0, 10.0, 10.0, 101.0, false), 0.0, 1.0);
+    let state = frame_with_test((64.0, 10.0, 10.0, 101.0, 0), 0.0, 1.0);
     assert_eq!((state.0, state.1), (1.0, 0.0));
     // A partial change, 10 -> 5.5 (z = 4.5 / 1.5001 = 3.0, in the band): the first frame only
     // marks the pixel (history 10 - 4.5 / 64 = 9.9296875), the second, out again (z = 2.7),
     // cuts it: the history is the new light, 5.5, after two frames.
-    let first = frame_with_test((63.0, 10.0, 10.0, 101.0, false), 5.5, 1.0);
-    assert_eq!((first.0, first.4), (64.0, true));
+    let first = frame_with_test((63.0, 10.0, 10.0, 101.0, 0), 5.5, 1.0);
+    assert_eq!((first.0, first.4), (64.0, -1));
     assert!((first.1 - 9.929_687_5).abs() < 1e-5);
     let second = frame_with_test(first, 5.5, 1.0);
     assert_eq!((second.0, second.1), (1.0, 5.5));
     // One noisy frame in the band (5.5) between in-band frames (10): marked, then cleared, kept.
-    let noisy = frame_with_test((63.0, 10.0, 10.0, 101.0, false), 5.5, 1.0);
+    let noisy = frame_with_test((63.0, 10.0, 10.0, 101.0, 0), 5.5, 1.0);
     let back = frame_with_test(noisy, 10.0, 1.0);
-    assert_eq!((back.0, back.4), (64.0, false));
+    assert_eq!((back.0, back.4), (64.0, 0));
+}
+
+#[test]
+fn a_bright_probe_sample_needs_confirmation_before_replacing_history() {
+    let converged = (64.0, 10.0, 10.0, 101.0, 0);
+    let spike = frame_with_test(converged, 40.0, 1.0);
+    assert_eq!(spike, (64.0, 10.0, 10.0, 101.0, 1));
+
+    // A single hit on a bright emitter preserves the converged result.
+    let recovered = frame_with_test(spike, 10.0, 1.0);
+    assert_eq!((recovered.0, recovered.1, recovered.4), (64.0, 10.0, 0));
+
+    // A sustained change is visible on its second frame.
+    let sustained = frame_with_test(spike, 40.0, 1.0);
+    assert_eq!((sustained.0, sustained.1, sustained.4), (1.0, 40.0, 0));
+
+    // A preceding dark departure cannot confirm a bright one.
+    let dark = frame_with_test(converged, 5.5, 1.0);
+    assert_eq!(dark.4, -1);
+    let opposite = frame_with_test(dark, 40.0, 1.0);
+    assert_eq!((opposite.0, opposite.1, opposite.4), (64.0, dark.1, 1));
 }

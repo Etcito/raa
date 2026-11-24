@@ -90,17 +90,14 @@ pub fn cut_moments(mean: f32, spatial_var: f32) -> (f32, f32) {
     (mean, mean * mean + spatial_var.max(0.0))
 }
 
-/// The change test's action (`raa_gi_acc_change_action`): (cut, mark). Inside the band (keep 1)
-/// neither; a certain change (keep 0) cuts; between, a pixel marked last frame is cut and an
-/// unmarked one is marked.
-pub fn change_action(keep: f32, marked: bool) -> (bool, bool) {
+/// The change test's action (`raa_gi_acc_change_action`): (cut, mark). An out-of-band
+/// change cuts when confirmed in the same direction, or when it is a strong darkening.
+pub fn change_action(keep: f32, confirmed: bool, brightening: bool) -> (bool, bool) {
     if keep >= 1.0 {
-        (false, false)
-    } else if keep <= 0.0 {
-        (true, false)
-    } else {
-        (marked, !marked)
+        return (false, false);
     }
+    let cut = confirmed || (keep <= 0.0 && !brightening);
+    (cut, !cut)
 }
 
 /// The history length after a cut: at most history_min - 1 frames.

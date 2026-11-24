@@ -10,15 +10,14 @@
 // The change test never moves the history's colour: z = |current mean - history| / (sigma +
 // slack), sigma^2 the larger of the current frame's spatial variance and the history's per-frame
 // (temporal) variance, i.e. the noise one frame has. Up to z = clampGamma the history is kept
-// whole. From 2 clampGamma it is cut at once; between, the pixel is only marked (the sign of its
-// stored m2), and cut if the next frame is out again: noise rarely leaves the band two frames in
-// a row, a lighting change stays out. A cut keeps at most historyMin - 1 frames (the change is
-// taken whole) and restarts the moments from this frame's neighbourhood, so the next frames test
-// the rest of the change against one frame's noise again. Noise alone almost never cuts, so
-// a still view converges monotonically instead of being pulled around and reset by a clamp, and a
-// light that went out or moved leaves the image the next frame instead of fading over historyMax
-// frames. It writes the history (irradiance rgb, occlusion a), the moments record, the
-// a-trous input (irradiance rgb, variance of the mean a), the debug record and the statistics.
+// whole. From 2 clampGamma a darkening cuts at once. Other changes need two consecutive
+// departures in the same direction. A strong unconfirmed brightening holds the previous
+// irradiance and moments, since a single probe sampling a bright emitter can resemble a
+// lighting change. A confirmed cut keeps at most historyMin - 1 frames and restarts the moments
+// from this frame's neighbourhood. The first and second moment signs mark pending brightening
+// and darkening, respectively. The pass writes the history (irradiance rgb, occlusion a), the
+// moments record, the a-trous input (irradiance rgb, variance of the mean a), the debug record
+// and the statistics.
 //
 // RAA's own code. The moments, the variance of the mean and the variance-guided a-trous that
 // follows (atrous.wgsl) are those of Schied et al., "Spatiotemporal Variance-Guided Filtering",
@@ -158,17 +157,15 @@ fn raa_gi_acc_change_keep(history: f32, mean: f32, spatial_var: f32, temporal_va
     return clamp(2.0 - z / max(gamma, 1.0e-3), 0.0, 1.0);
 }
 
-// The change test's action (`accumulate_cpu::change_action`): x = cut the history, y = mark the
-// pixel. Inside (keep 1): neither. A certain change (keep 0): cut. Between: cut if the pixel was
-// already marked last frame, else mark it.
-fn raa_gi_acc_change_action(keep: f32, marked: bool) -> vec2<bool> {
+// The change test's action: x = cut the history, y = mark the pixel. A strong darkening
+// cuts immediately. Require a second frame in the same direction for a brightening or
+// a change in the transition band.
+fn raa_gi_acc_change_action(keep: f32, confirmed: bool, brightening: bool) -> vec2<bool> {
     if keep >= 1.0 {
         return vec2<bool>(false, false);
     }
-    if keep <= 0.0 {
-        return vec2<bool>(true, false);
-    }
-    return vec2<bool>(marked, !marked);
+    let cut = confirmed || (keep <= 0.0 && !brightening);
+    return vec2<bool>(cut, !cut);
 }
 
 // The variance the a-trous passes steer by: the variance of the accumulated mean, var / n, once
@@ -258,7 +255,7 @@ struct RaaGiAccHistory {
     m2: f32,
     n: f32,
     found: bool,
-    // The share of the kept taps' weight whose pixel was marked by the change test.
+    // The signed share of the kept taps marked by the change test (positive for brighter).
     marked: f32,
 }
 
@@ -296,10 +293,9 @@ fn raa_gi_acc_reproject(in: RaaGiAccInput) -> RaaGiAccHistory {
             continue;
         }
         out.color += textureLoad(raa_gi_previous, tap, 0) * w;
-        out.m1 += stored.m1 * w;
-        // A negative stored m2 marks a pixel the change test saw outside its band.
+        out.m1 += abs(stored.m1) * w;
         out.m2 += abs(stored.m2) * w;
-        out.marked += select(0.0, w, stored.m2 < 0.0);
+        out.marked += select(0.0, w, stored.m1 < 0.0) - select(0.0, w, stored.m2 < 0.0);
         out.n += stored.n * w;
         total += w;
     }
@@ -320,19 +316,21 @@ fn raa_gi_acc_resolve(in: RaaGiAccInput) {
     let n_max = raa_gi_screen_params.history_max;
     var history = raa_gi_acc_reproject(in);
     var state = RAA_GI_ACC_REJECTED;
-    var mark = false;
+    var mark = 0.0;
+    var hold_irradiance = false;
     if history.found {
         state = RAA_GI_ACC_KEPT;
-        if in.matched {
+        if in.matched && history.n >= RAA_GI_ACC_CHANGE_MIN {
             let lum_h = raa_gi_acc_luminance(history.color.rgb);
             let temporal_var = max(history.m2 - history.m1 * history.m1, 0.0);
             let keep = raa_gi_acc_change_keep(lum_h, in.spatial_mean, in.spatial_var,
                 temporal_var, raa_gi_screen_params.clamp_gamma);
-            // A history shorter than RAA_GI_ACC_CHANGE_MIN frames has no noise estimate yet (its
-            // moments hold too few frames) and follows the light within those frames anyway.
-            let action = raa_gi_acc_change_action(keep, history.marked >= 0.5);
-            mark = action.y && history.n >= RAA_GI_ACC_CHANGE_MIN;
-            if action.x && history.n >= RAA_GI_ACC_CHANGE_MIN {
+            let brightening = in.spatial_mean > lum_h;
+            let direction = select(-1.0, 1.0, brightening);
+            let action = raa_gi_acc_change_action(keep, history.marked * direction >= 0.5, brightening);
+            mark = select(0.0, direction, action.y);
+            hold_irradiance = action.y && keep <= 0.0;
+            if action.x {
                 history.n = min(history.n, max(f32(raa_gi_screen_params.history_min) - 1.0, 0.0));
                 // The moments restart from this frame's neighbourhood: kept, they would mix the
                 // light before and after the change into a large temporal variance that hides the
@@ -352,7 +350,7 @@ fn raa_gi_acc_resolve(in: RaaGiAccInput) {
     var color = history.color;
     var m1 = history.m1;
     var m2 = history.m2;
-    if in.matched {
+    if in.matched && !hold_irradiance {
         n = raa_gi_acc_next_length(history.n, n_max);
         let alpha = raa_gi_acc_alpha(n, n_max);
         color = vec4<f32>(mix(history.color.rgb, in.current.rgb, alpha), 0.0);
@@ -369,8 +367,10 @@ fn raa_gi_acc_resolve(in: RaaGiAccInput) {
     let temporal_var = max(m2 - m1 * m1, 0.0);
     let variance = min(raa_gi_acc_filter_variance(temporal_var, in.spatial_var, n), RAA_GI_ACC_HALF_MAX);
     textureStore(raa_gi_output, in.pixel, color);
+    let marked_m1 = select(m1, -max(m1, 1.0e-30), mark > 0.0);
+    let marked_m2 = select(m2, -max(m2, 1.0e-30), mark < 0.0);
     textureStore(raa_gi_meta_out, in.pixel,
-        raa_gi_acc_pack(RaaGiAccMeta(m1, select(m2, -max(m2, 1.0e-30), mark), n, in.depth, in.normal)));
+        raa_gi_acc_pack(RaaGiAccMeta(marked_m1, marked_m2, n, in.depth, in.normal)));
     textureStore(raa_gi_filter_out, in.pixel, vec4<f32>(color.rgb, variance));
     let raw = min(in.current, vec4<f32>(RAA_GI_ACC_HALF_MAX));
     textureStore(raa_gi_debug_out, in.pixel, vec4<u32>(
