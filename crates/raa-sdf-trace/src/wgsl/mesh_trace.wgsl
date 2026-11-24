@@ -196,40 +196,52 @@ fn sun_and_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: 
     return direct;
 }
 
+// Read the current radiance on the visible side of the exact mesh hit, as the
+// GI clipmap propagates one-sided outgoing radiance around each surface.
+fn cached_surface_radiance(p: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let params = raa_gi_volume_params;
+    let level = raa_gi_level_at(p, 0u);
+    if level >= params.level_count { return vec3<f32>(0.0); }
+    let world = p + normal * (0.6 * params.levels[level].w);
+    let sample_level = raa_gi_level_at(world, level);
+    if sample_level >= params.level_count { return vec3<f32>(0.0); }
+    let sample = raa_gi_sample(world, sample_level);
+    if sample.a > 3.0 * params.levels[sample_level].w { return vec3<f32>(0.0); }
+    return sample.rgb;
+}
+
 // Estimate incident diffuse at the actual mesh hit from the current world clipmap.
 // The cosine-weighted mean is irradiance / pi, so use the same diffuse weight
-// as the direct BRDF. The gather starts away from the receiver's own radiance band.
+// as the direct BRDF. Only distinct hits supply cached outgoing radiance.
 fn terminal_diffuse_gi(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material) -> vec3<f32> {
     let params = raa_gi_volume_params;
     let weight = diffuse(mat) * params.intensity;
-    if (params.flags & GI_VOLUME_VALID) == 0u || !any(weight > vec3<f32>(0.0)) {
+    if (params.flags & GI_VOLUME_VALID) == 0u || !any(weight > vec3<f32>(0.0))
+        || raa_gi_level_at(p, 0u) >= params.level_count {
         return vec3<f32>(0.0);
     }
-    let level = raa_gi_level_at(p, 0u);
-    if level >= params.level_count { return vec3<f32>(0.0); }
-    let voxel = params.levels[level].w;
-    let origin = p + ng * (1.5 * voxel);
+    let origin = p + ng * (2.0 * EPS);
     let surface_basis = basis(n);
     let sky_scale = bitcast<f32>(options[2].x);
     let sky_lod = f32(textureNumLevels(sky) - 1u);
-    const SAMPLES: u32 = 6u;
+    const SAMPLES: u32 = 12u;
     var incident = vec3<f32>(0.0);
     for (var i = 0u; i < SAMPLES; i++) {
         let u = (f32(i) + 0.5) / f32(SAMPLES);
         let phi = f32(i) * 2.39996323;
         let direction = surface_basis * vec3<f32>(sqrt(u) * cos(phi), sqrt(u) * sin(phi), sqrt(1.0 - u));
         if dot(ng, direction) <= 0.0 { continue; }
-        let hit = raa_gi_gather(origin, direction, 0.5 * voxel, 320.0, 40u, 0.85);
-        if hit.hit {
-            incident += hit.radiance;
-        } else if hit.escaped && sky_scale > 0.0 {
-            // A coarse volume can miss a thin occluder. A sky sample must escape
-            // the actual mesh from the unshifted receiver as well.
-            let ray = Ray(p + ng * (2.0 * EPS), direction);
-            if closest(ray, frame.clip.y, true).object == MISS {
+        let hit = closest(Ray(origin, direction), frame.clip.y, false);
+        if hit.object == MISS {
+            if sky_scale > 0.0 {
                 incident += textureSampleLevel(sky, raa_linear_clamp, direction, sky_lod).rgb * sky_scale;
             }
+            continue;
         }
+        let tri = triangles[hit.object];
+        let normal = normalize(cross(tri.b.position - tri.a.position, tri.c.position - tri.a.position));
+        let facing = select(-normal, normal, dot(normal, direction) < 0.0);
+        incident += cached_surface_radiance(origin + direction * hit.t, facing);
     }
     return weight * (incident / f32(SAMPLES));
 }
