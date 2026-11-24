@@ -1,5 +1,6 @@
 import { interactiveInterior } from './interactive-interior.js';
 import { digest } from './gallery-path-model.js';
+import { reflectionGraph, reflectionInputs, reflectionTeacher } from './gallery-reflection-teacher.js';
 
 const scene = interactiveInterior.default;
 const variant = scene.variants.find(row => row.id === 'performance');
@@ -34,7 +35,7 @@ function tape(heldout) {
   });
 }
 
-async function create(target, raa, canvas, size, heldout, reference) {
+async function create(target, raa, canvas, size, heldout, reference, graph) {
   [canvas.width, canvas.height] = size;
   const engine = await raa.createEngine(canvas, { msaa: 1, allowSoftware: false, powerPreference: 'high-performance' });
   try {
@@ -42,13 +43,17 @@ async function create(target, raa, canvas, size, heldout, reference) {
     if (!hardware || adapter?.isFallbackAdapter !== false) throw new Error('Sequence capture requires hardware WebGPU');
     const state = scene.build(engine, { raa }, { ...variant, skylightBlocked: heldout,
       vertexWallColors: heldout, effects: { ...variant.effects, gi: !reference, 'moving-objects': false,
-        'geometry-reflections': !reference, ssr: false, bloom: false, dof: false } });
+        'geometry-reflections': !reference && !graph, ssr: false, bloom: false, dof: false } });
     engine.setPassEnabled('taa', false);
     engine.setPassEnabled('ao.gtao', false);
     engine.setCameraJitter(!reference);
     engine.setAutoExposure({ enabled: false });
     engine.setToneMapping({ exposureEv: 0 });
     engine.setEnvironmentLighting({ diffuse: 0.65, specular: 0 });
+    if (graph) {
+      const selection = engine.setRenderGraphSelection(graph);
+      if (!selection.ok) throw new Error(`SSR training graph: ${JSON.stringify(selection.issues)}`);
+    }
     if (reference) engine.setMeshTracing({ reference: true, reflections: true, pathMode: 'off',
       lightingOutput: 'combined', pathBounces: 2, reflectionBounces: 2 });
     return { engine, facts: { hardware, adapter, browser: target.navigator.userAgent,
@@ -96,7 +101,7 @@ function realSignals(taps, frame, previous) {
   const [w, h] = sceneSize, n = w * h;
   const rawHdr = floats(taps.hdr, n * 4, true), rawDepth = floats(taps.depth, n, false);
   const normal = floats(taps.normal, n * 4, true), rawMotion = floats(taps.motion, n * 4, true);
-  const reflectionHit = floats(taps.reflectionHit, n * 4, true);
+  const reflectionHit = floats(taps.reflectionHit ?? taps.reflectionTrace, n * 4, true);
   const jitterPx = [taps.jitterNdc[0] * w / 2, -taps.jitterNdc[1] * h / 2];
   const hdr = new Float32Array(n * 3), depth = new Float32Array(n), motion = new Float32Array(n * 3);
   const masks = new Float32Array(n * 4), guide = new Float32Array(n * 12);
@@ -176,7 +181,7 @@ async function referenceHdr(teacher, timeMs, base, checkTime) {
   }
   if (!(logRmse <= tolerance)) throw new Error(`Independent HDR batches did not converge at ${timeMs} ms, log RMSE ${logRmse}`);
   const label = Float32Array.from(sums[0], (sum, i) => (sum + sums[1][i]) / (2 * batchCalls));
-  return { label, teacher: { sppPerBatch: spp * batchCalls, seeds, logRmse, linearRmse, tolerance } };
+  return { label, batches: sums.map(sum => Float32Array.from(sum, v => v / batchCalls)), teacher: { sppPerBatch: spp * batchCalls, seeds, logRmse, linearRmse, tolerance } };
 }
 
 async function save(files, prefix, name, size, array) {
@@ -188,24 +193,25 @@ async function save(files, prefix, name, size, array) {
   return { file, shape: [h, w, channels], dtype: 'f32le', byteLength: bytes.length, sha256: await digest(bytes) };
 }
 
-export async function captureGallerySequence({ target, canvas, raa }, { buildId, split = 'both', remainingMs = 280000 } = {}) {
+export async function captureGallerySequence({ target, canvas, raa }, { buildId, split = 'both', reflection = false, remainingMs = 280000 } = {}) {
   if (!/Windows.+Chrome\//.test(target.navigator.userAgent) || !buildId || !['train', 'test', 'both'].includes(split)) {
     throw new Error('Sequence capture requires a pinned Windows Chrome build and a valid split');
   }
   const deadline = target.performance.now() + remainingMs;
   const checkTime = () => { if (target.performance.now() >= deadline) throw new Error('Gallery sequence timed out'); };
   const files = [], sequences = [];
+  const graph = reflection ? await reflectionGraph() : null;
   let facts;
   for (const [index, partition] of ['train', 'test'].entries()) {
     if (split !== 'both' && split !== partition) continue;
     const heldout = partition === 'test', replay = tape(heldout);
     const id = heldout ? 'gallery-heldout' : 'gallery-overfit';
-    const student = await create(target, raa, canvas, sceneSize, heldout, false);
+    const student = await create(target, raa, canvas, sceneSize, heldout, false, graph);
     let teacher;
     try {
       teacher = await create(target, raa, target.document.createElement('canvas'), displaySize.map(n => n * 2), heldout, true);
       facts = student.facts;
-      const frames = [];
+      const frames = [], reflectionGuides = [];
       let previous;
       student.apply(replay[0]);
       // Let the default volume cache settle before the single contiguous recorded run.
@@ -227,7 +233,8 @@ export async function captureGallerySequence({ target, canvas, raa }, { buildId,
             || (i && timing.frameIndex !== frames.at(-1).frameId + 1)) throw new Error('Nonconsecutive real capture');
         await student.engine.submittedWorkDone();
         const workDoneMs = target.performance.now();
-        const signals = realSignals(await student.engine.captureTrainingTaps(timing.frameIndex), frame, previous);
+        const taps = await student.engine.captureTrainingTaps(timing.frameIndex);
+        const signals = realSignals(taps, frame, previous);
         const readbackDoneMs = target.performance.now();
         const gpuTimings = student.engine.passGpuTimings();
         const { jitterPx, counts } = signals;
@@ -236,12 +243,23 @@ export async function captureGallerySequence({ target, canvas, raa }, { buildId,
         for (const name of ['hdr', 'guide', 'depth', 'motion', 'masks', 'reflectionHit']) {
           planes[name] = await save(files, frameKey, name, sceneSize, signals[name]);
         }
+        if (reflection) {
+          const [w, h] = sceneSize;
+          const meta = floats(taps.reflectionMeta, w * h * 4, false);
+          const incident = floats(taps.reflectionIncident, w * h * 4, false);
+          const guides = reflectionInputs(incident, meta, signals.reflectionHit);
+          counts.reflectionAccepted = guides.accepted;
+          reflectionGuides.push(guides);
+          planes.reflection = await save(files, frameKey, 'reflection', sceneSize, guides.input);
+          planes.reflectionMeta = await save(files, frameKey, 'reflectionmeta', sceneSize, meta);
+          planes.reflectionIncident = await save(files, frameKey, 'reflectionincident', sceneSize, incident);
+        }
         frames.push({ id: frameKey, frameId: timing.frameIndex, simulationTick: i, viewId: 'primary', reset: i === 0,
           ...frame, jitterPx, counts, timing: { ...timing, workDoneMs, readbackDoneMs, gpuTimings }, planes });
       }
       if (!frames.some(frame => frame.counts.moved > 300 && frame.counts.historyValid > 100
           && frame.counts.disocclusion > 20)
-          || !frames.some(frame => frame.counts.reflectionOffscreen > 20)
+          || (!reflection && !frames.some(frame => frame.counts.reflectionOffscreen > 20))
           || !frames.some(frame => frame.event && frame.counts.reactive > 100)) {
         throw new Error(`${id} is missing an effective motion, disocclusion, offscreen reflection or lighting event`);
       }
@@ -250,6 +268,13 @@ export async function captureGallerySequence({ target, canvas, raa }, { buildId,
         const reference = await referenceHdr(teacher.engine, frame.timeMs, 8192 + index * 1048576 + i * 1024, checkTime);
         frame.planes.label = await save(files, frame.id, 'label', displaySize, reference.label);
         frame.teacher = reference.teacher;
+        if (reflection) {
+          const { target: incident, ...stats } = reflectionTeacher(reflectionGuides[i], reference.batches,
+            sceneSize, displaySize, frame.jitterPx, tolerance);
+          frame.planes.reflectionTarget = await save(files, frame.id, 'reflectiontarget', sceneSize, incident);
+          frame.inputSeeds = [];
+          frame.teacher.reflection = stats;
+        }
       }
       sequences.push({ id, split: partition, groupId: heldout ? 'sealed-skylight-cool-event' : 'open-skylight-warm-event',
         sceneSize, displaySize, replaySha256: await digest(new TextEncoder().encode(JSON.stringify(replay))), frames });
@@ -262,7 +287,13 @@ export async function captureGallerySequence({ target, canvas, raa }, { buildId,
     guideChannels, maskChannels, rowOrder: 'top-down', colorSpace: 'scene-linear', exposure: 1,
     target: 'current real frame HDR from independent full mesh path tracing at the exact pose and time',
     reference: { samplesPerDispatch: spp, pathBounces: 2, reflectionBounces: 2, jitter: [0, 0], seedBatches: 2 },
-    optionalHeads: { area: 'separate area pilot', reflection: 'hit guides only, no incident RGB supervision' },
+    optionalHeads: { area: 'separate area pilot', reflection: reflection ? {
+      channels: ['radianceR', 'radianceG', 'radianceB', 'valid', 'class', 'age'],
+      supplier: 'typed SSR incident and hitMeta from the same real submission',
+      target: 'accepted screen hits conditioned on independent path HDR and matching screen cone',
+      eligibility: 'class 1 with geometric validity and positive screen confidence',
+      misses: 'zero-filled and masked; BVH and volume fallback outside this capture',
+    } : 'hit guides only' },
     reactiveSource: 'authored current panel revision for visible surfaces and conservative mirror coverage on moving-actor frames',
     sequences }, files };
 }

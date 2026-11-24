@@ -764,6 +764,7 @@ pub async fn read_capture_texture(
     texture: &wgpu::Texture,
 ) -> Result<Vec<u8>, RaaError> {
     let (texel_bytes, aspect) = match texture.format() {
+        wgpu::TextureFormat::Rgba32Float => (16, wgpu::TextureAspect::All),
         wgpu::TextureFormat::Rgba16Float => (8, wgpu::TextureAspect::All),
         wgpu::TextureFormat::R32Float => (4, wgpu::TextureAspect::All),
         wgpu::TextureFormat::Depth32Float => (4, wgpu::TextureAspect::DepthOnly),

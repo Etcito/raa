@@ -54,6 +54,16 @@ impl Engine {
             if let Some(trace) = resources.get("ssr.confidence", "trace") {
                 textures.push(("reflectionHit", trace.view.texture().clone()));
             }
+            let reflection = [
+                ("reflectionTrace", "ssr.trace#ssrTrace", "trace"),
+                ("reflectionMeta", "ssr.trace#ssrTrace", "hitMeta"),
+                ("reflectionIncident", "ssr.incident#incident", "incident"),
+            ];
+            for (name, producer, port) in reflection {
+                if let Some(image) = resources.get(producer, port) {
+                    textures.push((name, image.view.texture().clone()));
+                }
+            }
             let size = targets.size();
             if textures
                 .iter()
