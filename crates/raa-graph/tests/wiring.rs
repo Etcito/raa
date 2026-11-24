@@ -238,6 +238,10 @@ impl FeaturePass for Mock {
         self.required
     }
 
+    fn output_overlay(&self) -> bool {
+        matches!(self.name, "overlay" | "trace.composite")
+    }
+
     fn record(&mut self, _ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         Ok(())
     }
@@ -404,4 +408,41 @@ fn dof_f_stop_reaches_the_installed_pass_and_a_named_instance() {
         "{:?}",
         named.params
     );
+}
+
+#[test]
+fn pre_spherical_gi_keeps_native_overlays_after_tonemap() {
+    let catalog = Catalog::build();
+    for &(_, stem, json) in raa_graph::registry::STARTERS {
+        if !stem.starts_with("pre-spherical-gi") {
+            continue;
+        }
+        let plan = raa_graph::plan_from_json(json).unwrap();
+        let mut config = PipelineConfig::new();
+        for node in &plan.nodes {
+            let spec = node_of(&catalog, &node.type_id);
+            let Some(name) = spec
+                .pass
+                .filter(|name| !spec.contributor || *name == "trace.composite")
+            else {
+                continue;
+            };
+            config
+                .add(Box::new(Mock {
+                    name,
+                    order: spec.default_order,
+                    required: spec.required_in_graph,
+                }))
+                .unwrap();
+        }
+        let instructions = pipeline_instructions(&plan, &catalog, &config.passes());
+        let order: Vec<_> = instructions.order.iter().map(String::as_str).collect();
+        config
+            .set_order(&order)
+            .unwrap_or_else(|error| panic!("{stem}: {error}"));
+
+        let at = |name| order.iter().position(|n| *n == name).unwrap();
+        assert!(at("tonemap") < at("overlay"));
+        assert!(at("overlay") < at("trace.composite"));
+    }
 }

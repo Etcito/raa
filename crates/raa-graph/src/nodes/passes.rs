@@ -940,18 +940,30 @@ fn geometry_lighting_types() -> Vec<NodeTypeSpec> {
             500,
             forward_class(),
         ),
-        // raa-sdf-trace/src/pass.rs:1065 (frame uniform) and :1088 (two textures).
-        contributor(
+        // The composite runs on the display after tone mapping (raa-sdf-trace::CompositePass).
+        side_effect(pass_type(
             "pass.trace.composite",
-            Geometry,
+            Category::Output,
             "Trace composite",
-            "trace.composite",
-            560,
+            "Composites the traced SDF scene on the display.",
+            raa_sdf_trace::pass::COMPOSITE_NAME,
+            raa_sdf_trace::pass::COMPOSITE_ORDER,
+            vec![input(
+                "trace",
+                "Traced SDF",
+                P::Image2d,
+                Some(F::Rgba16Float),
+                &["pass.trace.sdf.trace"],
+                true,
+                None,
+            )],
+            Vec::new(),
+            Vec::new(),
             vec![
                 budget(Vertex, 0, 0, 0, 0, 1),
                 budget(Fragment, 2, 0, 0, 0, 1),
             ],
-        ),
+        )),
         contributor(
             "pass.particles.opaque",
             Geometry,

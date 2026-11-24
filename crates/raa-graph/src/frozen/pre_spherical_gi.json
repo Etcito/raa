@@ -216,10 +216,6 @@
       "type": "pass.fur.shells"
     },
     {
-      "id": "traceComposite",
-      "type": "pass.trace.composite"
-    },
-    {
       "id": "particlesOpaque",
       "type": "pass.particles.opaque"
     },
@@ -351,6 +347,10 @@
       "type": "pass.overlay"
     },
     {
+      "id": "traceComposite",
+      "type": "pass.trace.composite"
+    },
+    {
       "id": "out",
       "type": "output.display"
     }
@@ -459,6 +459,10 @@
     {
       "from": "overlay.color",
       "to": "out.color"
+    },
+    {
+      "from": "traceSdf.trace",
+      "to": "traceComposite.trace"
     }
   ]
 }
