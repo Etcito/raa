@@ -2,6 +2,8 @@
 
 mod defined_non_null_js_value;
 mod ext_bindings;
+// RAA patch: destroy textures and buffers when their last handle is dropped.
+mod retire;
 #[allow(clippy::allow_attributes)]
 pub(crate) mod webgpu_sys;
 
@@ -34,6 +36,7 @@ use crate::{
 };
 
 use defined_non_null_js_value::DefinedNonNullJsValue;
+use retire::{EncoderToken, Owned, Resource, Retirement};
 
 // We need to mark various types as Send and Sync to satisfy the Rust type system.
 //
@@ -1046,6 +1049,7 @@ fn future_request_device(
                     inner: device,
                     ident: crate::cmp::Identifier::create(),
                     error_scope_count: Rc::new(Cell::new(0)),
+                    retirement: Rc::new(Retirement::default()),
                 }
                 .into(),
                 WebQueue {
@@ -1272,6 +1276,8 @@ pub struct WebDevice {
     ident: crate::cmp::Identifier,
     /// Current number of error scopes that have been pushed on the device.
     error_scope_count: Rc<Cell<u32>>,
+    /// RAA patch: open encoders and retired resources of this device.
+    retirement: Rc<Retirement>,
 }
 
 #[derive(Debug, Clone)]
@@ -1293,6 +1299,8 @@ pub struct WebBindGroup {
     pub(crate) inner: webgpu_sys::GpuBindGroup,
     /// Unique identifier for this BindGroup.
     ident: crate::cmp::Identifier,
+    /// RAA patch: the textures and buffers it references stay alive while it does.
+    _resources: Rc<[Rc<Owned>]>,
 }
 
 #[derive(Debug, Clone)]
@@ -1331,12 +1339,19 @@ pub struct WebBuffer {
     mapping: Rc<RefCell<WebBufferMapState>>,
     /// Unique identifier for this Buffer.
     ident: crate::cmp::Identifier,
+    /// RAA patch: destroys the buffer when the last clone (or bind group) is dropped.
+    owned: Rc<Owned>,
 }
 
 impl WebBuffer {
     /// Creates a new web buffer for the given Javascript object and description.
-    fn new(inner: webgpu_sys::GpuBuffer, desc: &crate::BufferDescriptor<'_>) -> Self {
+    fn new(
+        inner: webgpu_sys::GpuBuffer,
+        desc: &crate::BufferDescriptor<'_>,
+        retirement: &Rc<Retirement>,
+    ) -> Self {
         Self {
+            owned: retirement.own(Resource::Buffer(inner.clone())),
             inner,
             mapping: Rc::new(RefCell::new(WebBufferMapState {
                 mapped_buffer: None,
@@ -1393,6 +1408,9 @@ pub struct WebTexture {
     drop_guard: Option<Rc<DropGuard>>,
     /// Unique identifier for this Texture.
     ident: crate::cmp::Identifier,
+    /// RAA patch: `Some` for textures from `device.createTexture`, destroyed when the last
+    /// clone (texture, view or bind group) is dropped.
+    owned: Option<Rc<Owned>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1452,6 +1470,9 @@ pub struct WebCommandEncoder {
     pub(crate) inner: webgpu_sys::GpuCommandEncoder,
     /// Unique identifier for this CommandEncoder.
     ident: crate::cmp::Identifier,
+    /// RAA patch: delays the destruction of resources retired while it is open; moved to
+    /// the command buffer by `finish`.
+    token: Option<Rc<EncoderToken>>,
 }
 
 #[derive(Debug)]
@@ -1473,6 +1494,8 @@ pub struct WebCommandBuffer {
     pub(crate) inner: webgpu_sys::GpuCommandBuffer,
     /// Unique identifier for this CommandBuffer.
     ident: crate::cmp::Identifier,
+    /// RAA patch: the encoder's token, released when the buffer is submitted or dropped.
+    _token: Option<Rc<EncoderToken>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1877,6 +1900,7 @@ impl WebDevice {
             inner: texture,
             drop_guard: Some(Rc::new(DropGuard::new(drop_callback))),
             ident: crate::cmp::Identifier::create(),
+            owned: None,
         }
         .into()
     }
@@ -2194,6 +2218,7 @@ impl dispatch::DeviceInterface for WebDevice {
         &self,
         desc: &crate::BindGroupDescriptor<'_>,
     ) -> dispatch::DispatchBindGroup {
+        let mut resources = Vec::new();
         let mapped_entries = desc
             .entries
             .iter()
@@ -2204,6 +2229,7 @@ impl dispatch::DeviceInterface for WebDevice {
                     size,
                 }) => {
                     let buffer = buffer.inner.as_webgpu();
+                    resources.push(Rc::clone(&buffer.owned));
                     let mapped_buffer_binding = webgpu_sys::GpuBufferBinding::new(&buffer.inner);
                     mapped_buffer_binding.set_offset_f64(offset as f64);
                     if let Some(s) = size {
@@ -2226,6 +2252,9 @@ impl dispatch::DeviceInterface for WebDevice {
                     panic!("Web backend does not support arrays of samplers")
                 }
                 crate::BindingResource::TextureView(texture_view) => {
+                    if let Some(owned) = &texture_view.texture.inner.as_webgpu().owned {
+                        resources.push(Rc::clone(owned));
+                    }
                     let texture_view = &texture_view.inner.as_webgpu().inner;
                     webgpu_sys::GpuBindGroupEntry::new_with_gpu_texture_view(
                         binding.binding,
@@ -2257,6 +2286,7 @@ impl dispatch::DeviceInterface for WebDevice {
         WebBindGroup {
             inner: bind_group,
             ident: crate::cmp::Identifier::create(),
+            _resources: resources.into(),
         }
         .into()
     }
@@ -2458,7 +2488,12 @@ impl dispatch::DeviceInterface for WebDevice {
         if let Some(label) = desc.label {
             mapped_desc.set_label(label);
         }
-        WebBuffer::new(self.inner.create_buffer(&mapped_desc).unwrap(), desc).into()
+        WebBuffer::new(
+            self.inner.create_buffer(&mapped_desc).unwrap(),
+            desc,
+            &self.retirement,
+        )
+        .into()
     }
 
     fn create_texture(&self, desc: &crate::TextureDescriptor<'_>) -> dispatch::DispatchTexture {
@@ -2486,6 +2521,7 @@ impl dispatch::DeviceInterface for WebDevice {
 
         let texture = self.inner.create_texture(&mapped_desc).unwrap();
         WebTexture {
+            owned: Some(self.retirement.own(Resource::Texture(texture.clone()))),
             inner: texture,
             drop_guard: None,
             ident: crate::cmp::Identifier::create(),
@@ -2576,6 +2612,7 @@ impl dispatch::DeviceInterface for WebDevice {
         WebCommandEncoder {
             inner: command_encoder,
             ident: crate::cmp::Identifier::create(),
+            token: Some(self.retirement.open_encoder()),
         }
         .into()
     }
@@ -2847,6 +2884,9 @@ impl dispatch::QueueInterface for WebQueue {
             .collect::<Vec<webgpu_sys::GpuCommandBuffer>>();
 
         self.inner.submit(&array);
+        // RAA patch: the command buffers (and their encoder tokens) are released only now,
+        // after the submit, so resources they recorded are destroyed after it.
+        drop(temp_command_buffers);
 
         0
     }
@@ -3354,6 +3394,7 @@ impl dispatch::CommandEncoderInterface for WebCommandEncoder {
         WebCommandBuffer {
             inner: buffer,
             ident: crate::cmp::Identifier::create(),
+            _token: self.token.take(),
         }
         .into()
     }
@@ -4360,6 +4401,7 @@ impl dispatch::SurfaceInterface for WebSurface {
             inner: surface_texture,
             drop_guard: None,
             ident: crate::cmp::Identifier::create(),
+            owned: None,
         };
 
         (
