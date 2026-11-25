@@ -511,15 +511,37 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
     return raa_spherical_diffuse_corners(p, normal, cell);
 }
 
-// Grid coordinates of world offset d from the anchor, projected on the cube face of the
-// receiver: x y = angular cell coordinates (cells of that face, extended past its edges),
-// z = the projection's depth (> 0 in front of the face).
-fn raa_spherical_face_cells(face: u32, d: vec3<f32>, n: f32) -> vec3<f32> {
+// Angular cell metric at the receiver: one-cell steps of the direction along the face's u
+// and v cell axes (tangent to the unit sphere at p's direction). Offsets in cells are solved
+// in this tangent frame rather than by projecting probes on p's cube face: the gnomonic
+// stretch past the face edge made the weights jump where p crosses a face seam; the
+// tangent metric is the same on both sides of a seam.
+struct RaaSphericalTangent {
+    dir: vec3<f32>,
+    tu: vec3<f32>,
+    tv: vec3<f32>,
+    // Inverse Gram matrix (g11, g12, g22) of tu, tv.
+    inverse: vec3<f32>,
+}
+
+fn raa_spherical_tangent(face: u32, dir: vec3<f32>, angular: vec2<f32>, n: f32) -> RaaSphericalTangent {
     let axis = raa_spherical_face_direction(face, vec2<f32>(0.0));
-    let major = dot(d, axis);
-    let u = dot(d, raa_spherical_face_direction(face, vec2<f32>(1.0, 0.0)) - axis);
-    let v = dot(d, raa_spherical_face_direction(face, vec2<f32>(0.0, 1.0)) - axis);
-    return vec3<f32>((vec2<f32>(u, v) / max(major, 1e-6) + 1.0) * (0.5 * n), major);
+    let au = raa_spherical_face_direction(face, vec2<f32>(1.0, 0.0)) - axis;
+    let av = raa_spherical_face_direction(face, vec2<f32>(0.0, 1.0)) - axis;
+    let uv = angular * (2.0 / n) - 1.0;
+    let step = (2.0 / n) / length(axis + uv.x * au + uv.y * av);
+    let tu = (au - dir * dot(dir, au)) * step;
+    let tv = (av - dir * dot(dir, av)) * step;
+    let g = vec3<f32>(dot(tu, tu), dot(tu, tv), dot(tv, tv));
+    let det = max(g.x * g.z - g.y * g.y, 1e-20);
+    return RaaSphericalTangent(dir, tu, tv, vec3<f32>(g.z, -g.y, g.x) / det);
+}
+
+// Angular offset in cells of unit direction q from the receiver's direction.
+fn raa_spherical_tangent_cells(t: RaaSphericalTangent, q: vec3<f32>) -> vec2<f32> {
+    let delta = q - t.dir;
+    let b = vec2<f32>(dot(delta, t.tu), dot(delta, t.tv));
+    return vec2<f32>(t.inverse.x * b.x + t.inverse.y * b.y, t.inverse.y * b.x + t.inverse.z * b.y);
 }
 
 // Continuous radial cell coordinate of radius r in shell s (extended below / above it).
@@ -596,6 +618,8 @@ fn raa_spherical_diffuse_front(p: vec3<f32>, normal: vec3<f32>,
     let first = vec3<i32>(floor(at - 0.5)) - 1;
     let base = vec2<i32>(min(first.xy, vec2<i32>(i32(grid.x) - 2)));
     let reach = 1.0 / (kernel * kernel);
+    let tangent = raa_spherical_tangent(cell.face, normalize(p - anchor + vec3<f32>(1e-7, 0.0, 0.0)),
+        cell.angular, cells);
     var acc = RaaSphericalFront();
     // The centre probe (a sphere of radius clipStart): Euclidean kernel over 1.6 x the
     // radius of shell 0's centre.
@@ -618,16 +642,27 @@ fn raa_spherical_diffuse_front(p: vec3<f32>, normal: vec3<f32>,
             // Past a cube corner three faces meet: no unique cell (and no duplicate).
             let outside = (ij < vec2<i32>(0)) | (ij >= vec2<i32>(i32(grid.x)));
             if outside.x && outside.y { continue; }
+            let key = raa_spherical_key(shell, cell.face, ij, grid.x);
+            // Past a face edge, consecutive cells along the edge can map to one cell of the
+            // next face (its along-edge axis is compressed): count each probe once.
+            if outside.x && m >= span && key == raa_spherical_key(shell, cell.face, ij - vec2<i32>(0, 1), grid.x) {
+                continue;
+            }
+            if outside.y && m % span > 0 && key == raa_spherical_key(shell, cell.face, ij - vec2<i32>(1, 0), grid.x) {
+                continue;
+            }
             let nominal_d = vec3<f32>(vec2<f32>(ij) + 0.5, f32(shell) + 0.5) - at;
             let nominal = 1.0 - dot(nominal_d, nominal_d) * reach;
             if nominal > 0.0 { acc.nominal += nominal * nominal; }
-            let entry = raa_spherical_find(raa_spherical_key(shell, cell.face, ij, grid.x), mask);
+            let entry = raa_spherical_find(key, mask);
             if !raa_spherical_published(entry) { continue; }
             let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
             let offset = probe.xyz - anchor;
-            let projected = raa_spherical_face_cells(cell.face, offset, cells);
-            if projected.z <= 1e-6 { continue; }
-            let d = vec3<f32>(projected.xy, raa_spherical_shell_cells(shell, length(offset))) - at;
+            let distance = length(offset);
+            let q = offset / max(distance, 1e-6);
+            if dot(q, tangent.dir) <= 0.5 { continue; }
+            let d = vec3<f32>(raa_spherical_tangent_cells(tangent, q),
+                raa_spherical_shell_cells(shell, distance) - at.z);
             let x2 = dot(d, d) * reach;
             if x2 >= 1.0 { continue; }
             raa_spherical_front_add(&acc, entry, (1.0 - x2) * (1.0 - x2), p, normal, far);
