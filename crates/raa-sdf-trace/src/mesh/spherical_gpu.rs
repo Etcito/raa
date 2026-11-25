@@ -1399,7 +1399,11 @@ impl CostModel {
         let Some((a, b)) = self.cost() else {
             return fixed.min(pending);
         };
-        self.credit = (self.credit + target_ms).min(4.0 * target_ms);
+        // The ceiling always fits one minimal batch: with a fixed cost above four
+        // targets (a slow first measurement) the credit could otherwise never pay for
+        // a batch, no capture would run and the model would never be re-measured.
+        let minimal = a + b * f64::from(MIN_CLOCK_FACES);
+        self.credit = (self.credit + target_ms).min((4.0 * target_ms).max(minimal));
         if pending == 0 {
             return 0;
         }
@@ -1736,6 +1740,18 @@ mod tests {
         assert!(raa_shader::SPHERICAL_GI_WGSL.contains(&format!(
             "RAA_SPHERICAL_RESOLVE_SCALE: u32 = {RESOLVE_SCALE}u;"
         )));
+    }
+
+    #[test]
+    fn capture_clock_never_starves_when_the_fixed_cost_exceeds_the_credit_cap() {
+        // A slow first sample (6 ms for one batch of 96 faces) against a 0.75 ms target.
+        let mut model = CostModel::default();
+        model.observe(96, 6.2);
+        model.observe(48, 6.0);
+        let (a, _) = model.cost().expect("cost");
+        assert!(a > 4.0 * 0.75);
+        let issued: u32 = (0..32).map(|_| model.faces(0.75, 96, 7000)).sum();
+        assert!(issued >= MIN_CLOCK_FACES, "issued {issued}");
     }
 
     #[test]
