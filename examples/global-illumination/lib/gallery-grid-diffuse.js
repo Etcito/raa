@@ -85,10 +85,11 @@ function coverage(raw) {
     oneNeighbor: counts[1], fallback };
 }
 
-export async function captureGalleryGridDiffuse({ target, canvas, raa }, {
-  buildId, scene: sceneId, mode = 'published-legacy', stride = 64, checkpointSha256, checkpointBase64,
+export async function captureGridDiffuseReplay({ target, engine, fixture }, {
+  buildId, mode = 'published-legacy', stride = 64, checkpointSha256, checkpointBase64,
   captureRows = true, size = defaultSize, remainingMs = 280000,
 } = {}) {
+  const sceneId = fixture.scene.id;
   if (!/Windows.+Chrome\//.test(target.navigator.userAgent) || !buildId || !studentModes.has(mode)
       || !Number.isInteger(stride) || stride < 1 || stride > 4096
       || !Array.isArray(size) || size.length !== 2
@@ -96,18 +97,15 @@ export async function captureGalleryGridDiffuse({ target, canvas, raa }, {
       || typeof captureRows !== 'boolean') {
     throw new Error('Grid diffuse capture requires a pinned Windows Chrome build and valid experiment settings');
   }
-  if ((sceneId !== 'cornell' || mode === 'learned') && !/^[0-9a-f]{64}$/.test(checkpointSha256 ?? '')) {
+  if ((fixture.scene.split !== 'train' || mode === 'learned') && !/^[0-9a-f]{64}$/.test(checkpointSha256 ?? '')) {
     throw new Error('Reserve held-out evaluation until the frozen checkpoint hash is recorded');
   }
 
   const deadline = target.performance.now() + remainingMs;
-  setCanvasSize(canvas, ...size);
-  const engine = await raa.createEngine(canvas, { msaa: 1, allowSoftware: false, powerPreference: 'high-performance' });
   const files = [];
   try {
     const { hardware, adapter } = engine.stats();
     if (!hardware || adapter?.isFallbackAdapter !== false) throw new Error('Expected native WebGPU');
-    const fixture = await createGridDiffuseFixture(engine, sceneId);
     if (mode === 'learned') {
       const weights = Uint8Array.from(target.atob(checkpointBase64 ?? ''), byte => byte.charCodeAt(0));
       if (weights.byteLength !== 81 * 4 || await digest(weights) !== checkpointSha256) {
@@ -198,6 +196,17 @@ export async function captureGalleryGridDiffuse({ target, canvas, raa }, {
       ...(mode === 'learned' && { learnedWeightsSha256: checkpointSha256 }), stride, sceneSize: size, captureRows: measuredMode,
       warmedFrames: warmedFrames + 1, grid: engine.sphericalGi(), timing: summarizeTimings(timingSamples), frames,
     }, files };
+  } finally {
+    if (mode !== 'published-legacy' && captureRows) engine.setMeshGridDiffuseCapture(0, 0);
+  }
+}
+
+export async function captureGalleryGridDiffuse({ target, canvas, raa }, args = {}) {
+  setCanvasSize(canvas, ...(args.size ?? defaultSize));
+  const engine = await raa.createEngine(canvas, { msaa: 1, allowSoftware: false, powerPreference: 'high-performance' });
+  try {
+    const fixture = await createGridDiffuseFixture(engine, args.scene);
+    return await captureGridDiffuseReplay({ target, engine, fixture }, args);
   } finally {
     engine.dispose();
   }
