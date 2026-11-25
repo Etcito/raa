@@ -96,11 +96,14 @@ pub(crate) fn prepare(
         if volume.active() {
             ddgi = view == 0;
             let camera = st.scene.camera;
+            let sun = st.scene.light;
             volume.set_view(
                 view,
                 raa_sdf_trace::mesh::DdgiView {
                     eye: camera.eye.to_array(),
                     view_proj: camera.view_proj().cols,
+                    sun_direction: sun.direction.to_array(),
+                    sun_radiance: sun.color.map(|c| c * sun.intensity),
                 },
             );
         }

@@ -9,8 +9,20 @@
 //! blends octahedral irradiance (8x8) and distance moments (16x16). A screen resolve then
 //! interpolates the volume once per prepass pixel. Forward and VG shading read the same storage
 //! buffer through the spherical GI binding while `RAA_DDGI_GI_FEATURE` is set.
+//!
+//! Lighting changes (see `mesh_ddgi.wgsl`): a probe stores its irradiance as linear groups (unit
+//! sun, sky SH transfer + residual, other lights), composed with the frame's sun colour, sky SH
+//! and sky scale. So a change of sun colour or intensity, of the sky (colour, intensity, the sky
+//! that follows the sun) costs one `relight` pass over the probes and no ray; a change of sun
+//! DIRECTION invalidates the sun group only (shadows moved), frustum first; an edit of a local
+//! light invalidates the other group of the probes whose light mask holds that light (plus the
+//! probes its new bound reaches). `DdgiInvalidation` selects that tracking, the naive
+//! "everything on any change" or none (periodic refresh only) for comparison.
 
+mod lights;
 mod schedule;
+
+use std::hash::{Hash, Hasher};
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -20,8 +32,9 @@ use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx};
 use wgpu::{Buffer, BufferUsages as Usage};
 
-use self::schedule::Schedule;
+use self::lights::{LightMask, MaskReadback};
 pub use self::schedule::{DdgiView, Visibility as DdgiVisibility};
+use self::schedule::{GROUP_ALL, GROUP_OTHER, GROUP_SUN, Schedule};
 use super::MeshTraceHandle;
 use super::pass::{buffer, buffer_entry, image_entry};
 
@@ -30,10 +43,36 @@ pub const DDGI_GI_NAME: &str = "gi.ddgi";
 pub const DDGI_FRAME_FEATURE: u32 = raa_shader::RAA_DDGI_GI_FEATURE;
 const ORDER: u32 = 57;
 const MAGIC: u32 = 0x4947_4444;
-const HEADER_ROWS: u64 = 16;
-const META_ROWS: u64 = 2;
+/// Rows 0-15 are written by the CPU; rows 16-24 hold the sky SH written by `ddgi_sky_project`.
+const HEADER_ROWS: u64 = 32;
+const CPU_HEADER_ROWS: u64 = 16;
+const SKY_ROW: u64 = 16;
+/// Record, offset and the 256-bit light mask.
+const META_ROWS: u64 = 4;
 const IRRADIANCE_ROWS: u64 = 50;
 const DEPTH_ROWS: u64 = 81;
+/// 64 irradiance texels x 5 rows (36 f16: unit sun, sky residual, other, 9 rgb transfer).
+const GROUP_ROWS: u64 = 320;
+/// Ray scratch of an update: 4 rows per ray and job (the bounced sky transfer of the hit).
+const SCRATCH_ROWS: u64 = 262_144;
+const SCRATCH_ROWS_PER_RAY: u64 = 4;
+/// Frames the sky projection and the relight run after a change (the environment's own filter
+/// lands a frame or more after its source changed).
+const RELIGHT_FRAMES: u32 = 4;
+/// Sun rotation (degrees) that invalidates the sun group, and the age it leaves: the larger the
+/// step, the younger (the faster the blend).
+const SUN_STEP_DEGREES: f32 = 0.5;
+/// Relative change of the sky SH that refreshes the sky residual (with the sun group).
+const SKY_STEP: f32 = 0.05;
+const SKY_AGE: u8 = 12;
+/// Age left to an invalidated group: its next updates blend as a running mean from there.
+const RELIGHT_AGE: u8 = 2;
+/// Age left to the other group of a probe whose light mask grew after a light edit.
+const LATE_AGE: u8 = 8;
+/// Frames after a light edit during which a grown light mask invalidates its probe.
+const LATE_FRAMES: u32 = 240;
+/// Half angle of the cone around the sun left out of the sky (its disc is the sun light).
+const SUN_CONE_DEGREES: f32 = 2.5;
 const MAX_PROBES: u32 = 32_768;
 const MAX_AXIS: u32 = 128;
 const PARAMS_BYTES: u64 = 96;
@@ -41,6 +80,20 @@ const OPTIONS_BYTES: u64 = 64;
 const FLAG_RELOCATE: u32 = 1;
 const FLAG_CLASSIFY: u32 = 2;
 const FLAG_BOUNCE: u32 = 4;
+const FLAG_SKY_TRANSFER: u32 = 8;
+
+/// What a lighting change makes the probes trace again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DdgiInvalidation {
+    /// Nothing: only the periodic refresh (the behaviour before lighting groups).
+    None = 0,
+    /// Every group of every probe on any change (a full recapture).
+    All = 1,
+    /// The sun group on a sun rotation, the other group of the probes a changed light reaches.
+    #[default]
+    Tracked = 2,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
@@ -77,6 +130,12 @@ pub struct DdgiSettings {
     pub classification: bool,
     /// Shade ray hits with the previous volume (infinite bounces over time).
     pub bounce: bool,
+    /// Sky light as an SH transfer composed with the frame's sky (off: every escaped ray's sky
+    /// radiance is stored as captured and only a recapture follows a sky change).
+    pub sky_transfer: bool,
+    pub invalidation: DdgiInvalidation,
+    /// Smallest unshadowed contribution (linear luma) that enters a probe's light mask.
+    pub light_threshold: f32,
     pub debug: DdgiDebug,
 }
 
@@ -98,6 +157,9 @@ impl Default for DdgiSettings {
             relocation: true,
             classification: true,
             bounce: true,
+            sky_transfer: true,
+            invalidation: DdgiInvalidation::Tracked,
+            light_threshold: 1e-3,
             debug: DdgiDebug::Off,
         }
     }
@@ -122,7 +184,8 @@ impl DdgiSettings {
             && (0.05..=20.0).contains(&self.burst_ms)
             && (0.0..=16.0).contains(&self.intensity)
             && (0.0..=1.0).contains(&self.normal_bias)
-            && (0.0..=1.0).contains(&self.view_bias);
+            && (0.0..=1.0).contains(&self.view_bias)
+            && (0.0..=1.0).contains(&self.light_threshold);
         if !ok {
             return Err(RaaError::FrameGraph {
                 code: "gi.ddgi.invalid_settings",
@@ -161,6 +224,17 @@ pub struct DdgiStats {
     pub gpu_bytes: u64,
     /// World bounds of the traced geometry the volume is kept inside.
     pub scene_bounds: Option<([f32; 3], [f32; 3])>,
+    /// Group refreshes traced since the volume started: geometry (sky transfer), sun, other.
+    pub refreshed: [u64; 3],
+    /// Probe groups invalidated by lighting changes since the volume started (same order).
+    pub invalidated: [u64; 3],
+    /// Frames that ran the relight pass (no ray) since the volume started.
+    pub relights: u64,
+    /// Local-light edits seen, and the probes the last one invalidated.
+    pub light_edits: u64,
+    pub last_light_probes: u32,
+    /// Whether the probes' light masks were read back at least once.
+    pub light_masks: bool,
 }
 
 pub type DdgiHandle = Rc<RefCell<DdgiState>>;
@@ -216,6 +290,7 @@ impl DdgiFeature {
             update_ms: None,
             batch_ms: 0.0,
             idle_frames: 0,
+            lighting: LightingTrack::default(),
         }))?;
         pipeline.set_enabled(DDGI_GI_NAME, false)?;
         Ok(state)
@@ -250,6 +325,13 @@ fn volume_base(
 struct Staged {
     bounds: Option<([f32; 3], [f32; 3])>,
     jobs: Vec<u32>,
+    /// Group refreshes of the jobs, invalidations of the frame, light edits.
+    refreshed: [u32; 3],
+    invalidated: [u32; 3],
+    light_edits: u32,
+    edit_probes: Option<u32>,
+    relight: bool,
+    read_masks: bool,
     recycled: u32,
     burst: bool,
     visibility: DdgiVisibility,
@@ -388,9 +470,206 @@ struct DdgiPass {
     /// Smoothed GPU time of one update batch (ms), 0 before the first readback.
     batch_ms: f64,
     idle_frames: u32,
+    lighting: LightingTrack,
+}
+
+/// What the lighting looked like when the groups were last invalidated or relit.
+#[derive(Default)]
+struct LightingTrack {
+    /// Hash of everything the composed tiles depend on besides the groups.
+    relight: Option<u64>,
+    relight_frames: u32,
+    /// Sun direction and sky SH at the last invalidation of the sun group.
+    sun: Option<[f32; 3]>,
+    sky: Option<[[f32; 4]; 9]>,
+    /// The packed light records of the previous frame.
+    lights: Vec<u8>,
+    masks: Option<Vec<LightMask>>,
+    readback: Option<MaskReadback>,
+    frames_since_edit: u32,
+    frame: u32,
+}
+
+fn angle_degrees(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dot: f32 = (0..3).map(|i| a[i] * b[i]).sum();
+    let (la, lb) = (
+        a.iter().map(|x| x * x).sum::<f32>().sqrt(),
+        b.iter().map(|x| x * x).sum::<f32>().sqrt(),
+    );
+    if la <= 0.0 || lb <= 0.0 {
+        return 0.0;
+    }
+    (dot / (la * lb)).clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+/// Age left to the sun group after the sun turned by `degrees`.
+fn sun_age(degrees: f32) -> u8 {
+    (6.0 / degrees.max(1e-3))
+        .round()
+        .clamp(f32::from(RELIGHT_AGE), 12.0) as u8
+}
+
+/// Change of the SHAPE of a sky SH: the largest coefficient difference after each sky is divided
+/// by its band-0 magnitude, so a sky that only gets brighter or darker (the physical sky follows
+/// the sun intensity) is no change. A sky that turns black or lights up is a full change.
+fn sky_change(a: &[[f32; 4]; 9], b: &[[f32; 4]; 9]) -> f32 {
+    let norm = |sh: &[[f32; 4]; 9]| sh[0][..3].iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    let (na, nb) = (norm(a), norm(b));
+    if na <= 1e-7 || nb <= 1e-7 {
+        return if na <= 1e-7 && nb <= 1e-7 { 0.0 } else { 1.0 };
+    }
+    let mut worst = 0.0f32;
+    for k in 0..9 {
+        for c in 0..3 {
+            worst = worst.max((a[k][c] / na - b[k][c] / nb).abs());
+        }
+    }
+    worst
 }
 
 impl DdgiPass {
+    /// Applies the frame's lighting changes to the schedule; returns the invalidated probe groups
+    /// (geometry, sun, other), the light edits and the probes the last edit invalidated.
+    fn track_lighting(
+        &mut self,
+        settings: DdgiSettings,
+        camera: &DdgiView,
+        sky_diffuse: f32,
+        lighting: &LightingResources,
+    ) -> ([u32; 3], u32, Option<u32>) {
+        let track = &mut self.lighting;
+        track.frame = track.frame.wrapping_add(1);
+        track.frames_since_edit = track.frames_since_edit.saturating_add(1);
+        let sky = lighting.environment_diffuse_sh().copied();
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        camera.sun_direction.map(f32::to_bits).hash(&mut hash);
+        camera.sun_radiance.map(f32::to_bits).hash(&mut hash);
+        sky_diffuse.to_bits().hash(&mut hash);
+        settings.sky_transfer.hash(&mut hash);
+        if let Some(sky) = &sky {
+            for coefficient in sky {
+                coefficient.map(f32::to_bits).hash(&mut hash);
+            }
+        }
+        let hash = hash.finish();
+        let relit = track.relight.replace(hash) != Some(hash);
+        if relit {
+            track.relight_frames = RELIGHT_FRAMES;
+        }
+
+        let turned = track
+            .sun
+            .map_or(0.0, |sun| angle_degrees(sun, camera.sun_direction));
+        let sun_event = turned >= SUN_STEP_DEGREES;
+        if sun_event || track.sun.is_none() {
+            track.sun = Some(camera.sun_direction);
+        }
+        let sky_event = match (&track.sky, &sky) {
+            (Some(a), Some(b)) => sky_change(a, b) >= SKY_STEP,
+            (None, None) => false,
+            _ => true,
+        };
+        if sky_event || sun_event {
+            track.sky = sky;
+        }
+
+        let now = lighting.local_lights_bytes();
+        let first = track.lights.is_empty();
+        let changes = if first {
+            Vec::new()
+        } else {
+            lights::diff(&track.lights, now, settings.light_threshold)
+        };
+        if first || !changes.is_empty() {
+            track.lights.clear();
+            track.lights.extend_from_slice(now);
+        }
+        // A grown light mask shortly after an edit: the edited light reaches that probe too.
+        let mut late = Vec::new();
+        if let Some(masks) = track.readback.as_mut().and_then(MaskReadback::poll) {
+            if let Some(old) = track.masks.as_ref().filter(|old| old.len() == masks.len())
+                && track.frames_since_edit < LATE_FRAMES
+            {
+                late.extend((0..masks.len() as u32).filter(|&slot| {
+                    (0..8).any(|w| masks[slot as usize][w] & !old[slot as usize][w] != 0)
+                }));
+            }
+            track.masks = Some(masks);
+        }
+
+        let mut invalidated = [0u32; 3];
+        let mut edit_probes = None;
+        let edits = changes.len() as u32;
+        match settings.invalidation {
+            DdgiInvalidation::None => {}
+            DdgiInvalidation::All => {
+                if sun_event || sky_event || relit || edits > 0 {
+                    let n = self.schedule.invalidate_all(GROUP_ALL, RELIGHT_AGE);
+                    invalidated = [n; 3];
+                    if edits > 0 {
+                        edit_probes = Some(n);
+                    }
+                }
+            }
+            DdgiInvalidation::Tracked => {
+                if sun_event {
+                    invalidated[1] = self.schedule.invalidate_all(GROUP_SUN, sun_age(turned));
+                } else if sky_event {
+                    invalidated[1] = self.schedule.invalidate_all(GROUP_SUN, SKY_AGE);
+                }
+                if edits > 0 {
+                    // A probe sees lit surfaces beyond the light's own bound: two cells of margin,
+                    // the rest comes from the masks (and from grown masks afterwards).
+                    let margin = 2.0 * settings.spacing;
+                    let masks = track.masks.as_ref();
+                    let mut slots = Vec::new();
+                    self.schedule.for_each_probe(settings.spacing, |slot, p| {
+                        let mut moved = false;
+                        let mut hit = false;
+                        for change in &changes {
+                            let known = masks.and_then(|masks| masks.get(slot as usize));
+                            let by_mask =
+                                known.is_some_and(|mask| lights::mask_has(mask, change.index));
+                            let by_bound = (change.moved || change.brighter || known.is_none())
+                                && change.new.reaches(p, margin)
+                                || known.is_none() && change.old.reaches(p, margin);
+                            if by_mask || by_bound {
+                                hit = true;
+                                moved |= change.moved;
+                            }
+                        }
+                        if hit {
+                            slots.push((slot, moved));
+                        }
+                    });
+                    let mut n = 0;
+                    for (slot, moved) in slots {
+                        n += u32::from(self.schedule.invalidate_slot(
+                            slot,
+                            GROUP_OTHER,
+                            RELIGHT_AGE,
+                            moved,
+                        ));
+                    }
+                    invalidated[2] += n;
+                    edit_probes = Some(n);
+                }
+                for slot in late {
+                    invalidated[2] += u32::from(self.schedule.invalidate_slot(
+                        slot,
+                        GROUP_OTHER,
+                        LATE_AGE,
+                        false,
+                    ));
+                }
+            }
+        }
+        if edits > 0 {
+            self.lighting.frames_since_edit = 0;
+        }
+        (invalidated, edits, edit_probes)
+    }
+
     fn unpublish(&mut self, lighting: &mut LightingResources) {
         if std::mem::take(&mut self.published) {
             lighting.set_spherical_gi(None);
@@ -455,6 +734,7 @@ impl FeaturePass for DdgiPass {
             self.staged = None;
             self.schedule = Schedule::default();
             self.timer = None;
+            self.lighting = LightingTrack::default();
             self.state.borrow_mut().stats = None;
         }
     }
@@ -484,7 +764,9 @@ impl FeaturePass for DdgiPass {
             ctx.size.0.div_ceil(RESOLVE_SCALE),
             ctx.size.1.div_ceil(RESOLVE_SCALE),
         );
-        let rows = layout(probes).rows + u64::from(resolve_size.0) * u64::from(resolve_size.1);
+        let rows = layout(probes).rows
+            + u64::from(resolve_size.0) * u64::from(resolve_size.1)
+            + SCRATCH_ROWS;
         let fits = 16 * rows <= u64::from(ctx.gpu.limits().max_storage_buffer_binding_size);
         let screen = fits.then_some(resolve_size);
         if self.gpu.as_ref().is_none_or(|gpu| {
@@ -493,6 +775,11 @@ impl FeaturePass for DdgiPass {
             // A resize restarts the volume: the screen rows share the probe buffer.
             self.gpu = Some(DdgiGpu::new(ctx.gpu, settings.counts, revision, screen));
             self.schedule.reset(settings.counts);
+            self.lighting = LightingTrack {
+                readback: Some(MaskReadback::new(ctx.gpu, probes)),
+                ..LightingTrack::default()
+            };
+            self.state.borrow_mut().stats = None;
         }
         if self.timer.is_none() {
             self.timer = UpdateTimer::new(ctx.gpu);
@@ -511,11 +798,23 @@ impl FeaturePass for DdgiPass {
         }
         let mesh = self.mesh.borrow();
         let bounds = mesh.geometry.world_bounds().map(|b| (b.min, b.max));
+        let sky_diffuse = mesh.sky_diffuse;
+        let triangles = mesh.geometry.count();
+        let traceable = triangles > 0 && mesh.frame.is_some() && mesh.texture_atlas.is_some();
+        drop(mesh);
         let base = volume_base(camera.eye, settings.counts, settings.spacing, bounds);
         let recycled = self.schedule.scroll(base);
+        let (invalidated, light_edits, edit_probes) =
+            self.track_lighting(settings, &camera, sky_diffuse, ctx.lighting);
         let floor = MIN_BATCH.min(probes);
-        let probes_for =
-            |ms: f32| ((f64::from(ms) / self.ms_per_probe) as u32).clamp(floor, probes);
+        // The ray scratch bounds a dispatch.
+        let job_cap =
+            (SCRATCH_ROWS / (SCRATCH_ROWS_PER_RAY * u64::from(settings.rays_per_probe))) as u32;
+        let probes_for = |ms: f32| {
+            ((f64::from(ms) / self.ms_per_probe) as u32)
+                .clamp(floor, probes)
+                .min(job_cap)
+        };
         let cap = ((probes as f32 * settings.update_fraction).ceil() as u32).clamp(1, probes);
         let burst = probes_for(settings.burst_ms);
         let batch = burst.min(cap.max(floor));
@@ -535,7 +834,7 @@ impl FeaturePass for DdgiPass {
         };
         let converge_age = converge_age(settings.hysteresis);
         let mut jobs = Vec::with_capacity(burst as usize);
-        let (visibility, bursting) = self.schedule.plan(
+        let (visibility, bursting, refreshed) = self.schedule.plan(
             Some(&camera),
             settings.spacing,
             converge_age,
@@ -546,11 +845,6 @@ impl FeaturePass for DdgiPass {
         if !jobs.is_empty() {
             self.idle_frames = 0;
         }
-
-        let triangles = mesh.geometry.count();
-        let traceable = triangles > 0 && mesh.frame.is_some() && mesh.texture_atlas.is_some();
-        let sky_diffuse = mesh.sky_diffuse;
-        drop(mesh);
 
         let rotation = self.random_rotation();
         let gpu = self.gpu.as_mut().expect("DDGI pool");
@@ -578,6 +872,9 @@ impl FeaturePass for DdgiPass {
         if settings.bounce {
             update_flags |= FLAG_BOUNCE;
         }
+        if settings.sky_transfer {
+            update_flags |= FLAG_SKY_TRANSFER;
+        }
         let env = ctx.lighting.environment_diffuse_sh().is_some();
         let mut params = Vec::with_capacity(PARAMS_BYTES as usize);
         for column in rotation {
@@ -587,7 +884,7 @@ impl FeaturePass for DdgiPass {
             &mut params,
             [
                 settings.rays_per_probe,
-                jobs.len() as u32,
+                (jobs.len() / 2) as u32,
                 ctx.frame as u32,
                 update_flags,
             ],
@@ -601,11 +898,19 @@ impl FeaturePass for DdgiPass {
                 0.1 * settings.spacing,
             ],
         );
-        push_f32(&mut params, [sky_diffuse, 0.25, 0.0, 0.0]);
+        push_f32(
+            &mut params,
+            [
+                sky_diffuse,
+                0.25,
+                SUN_CONE_DEGREES.to_radians().cos(),
+                settings.light_threshold,
+            ],
+        );
         let mut options = Vec::with_capacity(OPTIONS_BYTES as usize);
         push_u32(
             &mut options,
-            [triangles, jobs.len() as u32, u32::from(env), 0],
+            [triangles, (jobs.len() / 2) as u32, u32::from(env), 0],
         );
         push_u32(&mut options, [0; 4]);
         push_u32(
@@ -616,6 +921,14 @@ impl FeaturePass for DdgiPass {
         push_u32(&mut options, [1, 0, 0, 0]);
         let queue = ctx.gpu.queue();
         gpu.ensure_jobs(ctx.gpu, jobs.len());
+        let relight = self.lighting.relight_frames > 0;
+        self.lighting.relight_frames = self.lighting.relight_frames.saturating_sub(1);
+        let read_masks = self.lighting.frame % 4 == 0
+            && self
+                .lighting
+                .readback
+                .as_ref()
+                .is_some_and(MaskReadback::idle);
         queue.write_buffer(&gpu.params, 0, &params);
         queue.write_buffer(&gpu.options, 0, &options);
         let job_bytes: Vec<u8> = jobs.iter().flat_map(|slot| slot.to_le_bytes()).collect();
@@ -623,6 +936,12 @@ impl FeaturePass for DdgiPass {
         self.staged = Some(Staged {
             bounds,
             jobs,
+            refreshed,
+            invalidated,
+            light_edits,
+            edit_probes,
+            relight,
+            read_masks,
             recycled,
             burst: bursting,
             visibility,
@@ -666,7 +985,46 @@ impl FeaturePass for DdgiPass {
                 buffer_entry(29, &gpu.jobs),
             ],
         });
-        let jobs = staged.jobs.len() as u32;
+        if staged.relight {
+            // The sky SH of this frame, then every composed tile from the stored groups.
+            let sky = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gi.ddgi.sky"),
+                layout: &gpu.sky.get_bind_group_layout(0),
+                entries: &[
+                    buffer_entry(0, &frame),
+                    buffer_entry(1, &gpu.options),
+                    image_entry(14, ctx.lighting.env_specular_view()),
+                    wgpu::BindGroupEntry {
+                        binding: 15,
+                        resource: wgpu::BindingResource::Sampler(ctx.lighting.linear_clamp()),
+                    },
+                    buffer_entry(27, &gpu.probes),
+                    buffer_entry(28, &gpu.params),
+                ],
+            });
+            let relight = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gi.ddgi.relight"),
+                layout: &gpu.relight.get_bind_group_layout(0),
+                entries: &[
+                    buffer_entry(0, &frame),
+                    buffer_entry(27, &gpu.probes),
+                    buffer_entry(28, &gpu.params),
+                ],
+            });
+            let mut pass = ctx
+                .encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("gi.ddgi.relight"),
+                    ..Default::default()
+                });
+            pass.set_pipeline(&gpu.sky);
+            pass.set_bind_group(0, &sky, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&gpu.relight);
+            pass.set_bind_group(0, &relight, &[]);
+            pass.dispatch_workgroups(gpu.counts.iter().product(), 1, 1);
+        }
+        let jobs = (staged.jobs.len() / 2) as u32;
         if jobs > 0 {
             let timer = self.timer.as_mut();
             let writes = timer.as_ref().and_then(|timer| timer.writes());
@@ -709,6 +1067,12 @@ impl FeaturePass for DdgiPass {
             pass.set_bind_group(0, &group, &[]);
             pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
         }
+        if staged.read_masks
+            && let Some(readback) = self.lighting.readback.as_mut()
+        {
+            let rows = layout(gpu.counts.iter().product());
+            readback.copy(ctx.encoder, &gpu.probes, 16 * rows.meta);
+        }
         Ok(())
     }
 
@@ -720,9 +1084,18 @@ impl FeaturePass for DdgiPass {
         let probes = state.settings.probe_count();
         let previous = state.stats.unwrap_or_default();
         let gpu_bytes = self.gpu.as_ref().map_or(0, DdgiGpu::bytes);
+        let add = |total: [u64; 3], frame: [u32; 3]| {
+            std::array::from_fn(|i| total[i] + u64::from(frame[i]))
+        };
         state.stats = Some(DdgiStats {
+            refreshed: add(previous.refreshed, staged.refreshed),
+            invalidated: add(previous.invalidated, staged.invalidated),
+            relights: previous.relights + u64::from(staged.relight),
+            light_edits: previous.light_edits + u64::from(staged.light_edits),
+            last_light_probes: staged.edit_probes.unwrap_or(previous.last_light_probes),
+            light_masks: self.lighting.masks.is_some(),
             probes,
-            scheduled: staged.jobs.len() as u32,
+            scheduled: (staged.jobs.len() / 2) as u32,
             burst: staged.burst,
             visibility: staged.visibility,
             converge_age: staged.converge_age,
@@ -763,6 +1136,7 @@ pub(crate) struct DdgiLayout {
     pub meta: u64,
     pub irradiance: u64,
     pub depth: u64,
+    pub groups: u64,
     pub rows: u64,
 }
 
@@ -771,11 +1145,13 @@ pub(crate) fn layout(probes: u32) -> DdgiLayout {
     let meta = HEADER_ROWS;
     let irradiance = meta + META_ROWS * probes;
     let depth = irradiance + IRRADIANCE_ROWS * probes;
+    let groups = depth + DEPTH_ROWS * probes;
     DdgiLayout {
         meta,
         irradiance,
         depth,
-        rows: depth + DEPTH_ROWS * probes,
+        groups,
+        rows: groups + GROUP_ROWS * probes,
     }
 }
 
@@ -785,6 +1161,8 @@ struct DdgiGpu {
     screen: Option<(u32, u32)>,
     update: wgpu::ComputePipeline,
     resolve: wgpu::ComputePipeline,
+    relight: wgpu::ComputePipeline,
+    sky: wgpu::ComputePipeline,
     probes: Buffer,
     params: Buffer,
     options: Buffer,
@@ -799,35 +1177,35 @@ impl DdgiGpu {
             label: Some(DDGI_GI_NAME),
             source: wgpu::ShaderSource::Wgsl(ddgi_module().into()),
         });
-        let update = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("gi.ddgi.update"),
-            layout: None,
-            module: &shader,
-            entry_point: Some("ddgi_update"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let resolve = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("gi.ddgi.resolve"),
-            layout: None,
-            module: &shader,
-            entry_point: Some("ddgi_resolve"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = |label, entry| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: None,
+                module: &shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let update = pipeline("gi.ddgi.update", "ddgi_update");
+        let resolve = pipeline("gi.ddgi.resolve", "ddgi_resolve");
+        let relight = pipeline("gi.ddgi.relight", "ddgi_relight");
+        let sky = pipeline("gi.ddgi.sky", "ddgi_sky_project");
         let pixels = screen.map_or(0, |(w, h)| u64::from(w) * u64::from(h));
-        let rows = layout(counts.iter().product()).rows + pixels;
+        let rows = layout(counts.iter().product()).rows + pixels + SCRATCH_ROWS;
         Self {
             counts,
             revision,
             screen,
             update,
             resolve,
+            relight,
+            sky,
             probes: buffer(
                 device,
                 "gi.ddgi.probes",
                 16 * rows,
-                Usage::STORAGE | Usage::COPY_DST,
+                Usage::STORAGE | Usage::COPY_DST | Usage::COPY_SRC,
             ),
             params: buffer(
                 device,
@@ -852,6 +1230,7 @@ impl DdgiGpu {
     }
 
     fn ensure_jobs(&mut self, gpu: &GpuContext, count: usize) {
+        // `count` words: two per job.
         let bytes = (4 * count as u64).max(16);
         if self.jobs.size() < bytes {
             self.jobs = buffer(
@@ -877,7 +1256,7 @@ impl DdgiGpu {
         let probes = settings.probe_count();
         let rows = layout(probes);
         let spacing = settings.spacing;
-        let mut header = Vec::with_capacity(16 * HEADER_ROWS as usize);
+        let mut header = Vec::with_capacity(16 * CPU_HEADER_ROWS as usize);
         push_u32(&mut header, [0; 4]);
         push_u32(&mut header, [0; 4]);
         push_u32(&mut header, [0; 4]);
@@ -906,6 +1285,7 @@ impl DdgiGpu {
                 0,
             ],
         );
+        let pixels = self.screen.map_or(0, |(w, h)| u64::from(w) * u64::from(h));
         // Distance moments saturate at one and a half probe diagonals.
         push_f32(&mut header, [1.5 * 3f32.sqrt() * spacing, 0.0, 0.0, 0.0]);
         // Screen resolve rows: first row, width, height, pixels per texel side (0 = off).
@@ -923,7 +1303,17 @@ impl DdgiGpu {
                 },
             ],
         );
-        header.resize(16 * HEADER_ROWS as usize, 0);
+        // Row 10: texel groups, sky SH rows, ray scratch (after the screen resolve rows).
+        push_u32(
+            &mut header,
+            [
+                rows.groups as u32,
+                SKY_ROW as u32,
+                (rows.rows + pixels) as u32,
+                0,
+            ],
+        );
+        header.resize(16 * CPU_HEADER_ROWS as usize, 0);
         if header != self.header {
             gpu.queue().write_buffer(&self.probes, 0, &header);
             self.header = header;
@@ -952,10 +1342,14 @@ mod tests {
     #[test]
     fn layout_keeps_tiles_row_aligned() {
         let rows = layout(16 * 8 * 16);
-        assert_eq!(rows.meta, 16);
-        assert_eq!(rows.irradiance, 16 + 2 * 2048);
+        assert_eq!(rows.meta, 32);
+        assert_eq!(rows.irradiance, 32 + 4 * 2048);
         assert_eq!(rows.depth, rows.irradiance + 50 * 2048);
-        assert_eq!(rows.rows, rows.depth + 81 * 2048);
+        assert_eq!(rows.groups, rows.depth + 81 * 2048);
+        assert_eq!(rows.rows, rows.groups + 320 * 2048);
+        // The default volume with its 960x540 resolve and the ray scratch: 51 MB.
+        let total = layout(24 * 12 * 16).rows + 960 * 540 + SCRATCH_ROWS;
+        assert!(16 * total < 64 << 20, "{total}");
     }
 
     #[test]
@@ -987,6 +1381,27 @@ mod tests {
     }
 
     #[test]
+    fn lighting_steps_map_to_ages() {
+        assert!(angle_degrees([0.0, -1.0, 0.0], [0.0, -1.0, 0.0]) < 1e-3);
+        let turned = angle_degrees([0.0, -1.0, 0.0], [1.0, -1.0, 0.0]);
+        assert!((turned - 45.0).abs() < 1e-3);
+        // A large rotation restarts the running mean, a small one keeps most of the history.
+        assert_eq!(sun_age(45.0), RELIGHT_AGE);
+        assert_eq!(sun_age(1.0), 6);
+        assert_eq!(sun_age(SUN_STEP_DEGREES), 12);
+        let mut a = [[0.0f32; 4]; 9];
+        a[0] = [1.0, 2.0, 4.0, 0.0];
+        let mut b = a;
+        assert_eq!(sky_change(&a, &b), 0.0);
+        b[3][1] = 0.4;
+        assert!((sky_change(&a, &b) - 0.1).abs() < 1e-6);
+        // Brighter with the same shape (a sun intensity edit under the physical sky): no change.
+        let brighter = b.map(|c| c.map(|x| 3.0 * x));
+        assert!(sky_change(&b, &brighter) < 1e-6);
+        assert_eq!(sky_change(&a, &[[0.0; 4]; 9]), 1.0);
+    }
+
+    #[test]
     fn random_rotations_are_orthonormal() {
         let mut pass_rng = DdgiPass {
             state: DdgiHandle::default(),
@@ -1001,6 +1416,7 @@ mod tests {
             update_ms: None,
             batch_ms: 0.0,
             idle_frames: 0,
+            lighting: LightingTrack::default(),
         };
         for _ in 0..16 {
             let m = pass_rng.random_rotation();
