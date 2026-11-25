@@ -124,7 +124,8 @@ fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32>
     let local = biased / v.spacing - vec3<f32>(v.base);
     let last = vec3<f32>(v.counts) - 1.0;
     let inside = min(local, last - local);
-    let edge = saturate(min(min(inside.x, inside.y), inside.z));
+    // Fade to the ambient term over the outer half cell of the volume.
+    let edge = saturate(2.0 * min(min(inside.x, inside.y), inside.z));
     if edge <= 0.0 { return vec4<f32>(0.0); }
     let cell = clamp(vec3<i32>(floor(local)), vec3<i32>(0), vec3<i32>(v.counts) - 2);
     let alpha = clamp(local - vec3<f32>(cell), vec3<f32>(0.0), vec3<f32>(1.0));
@@ -174,9 +175,13 @@ fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32>
 
 // The screen-resolved value at a forward pixel (row 9: first row, width, height, scale): a
 // joint-bilateral blend of the four nearest resolve texels, keeping those resolved for a surface
-// at this camera distance (within 2%); the full eight-probe lookup when none was.
+// at this camera distance (within 2%); the full eight-probe lookup when none was (the
+// `raa_ddgi_fallback` flag records which).
+var<private> raa_ddgi_fallback: bool;
+
 fn raa_ddgi_screen_or_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, frag: vec2<f32>,
                              eye: vec3<f32>) -> vec4<f32> {
+    raa_ddgi_fallback = false;
     let screen = raa_ddgi_word(9u);
     if screen.w != 0u {
         let distance = length(p - eye);
@@ -200,6 +205,7 @@ fn raa_ddgi_screen_or_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, fr
         }
         if total > 0.0 { return sum / total; }
     }
+    raa_ddgi_fallback = true;
     return raa_ddgi_sample(p, n, view_dir);
 }
 
@@ -212,6 +218,10 @@ fn raa_ddgi_evaluate(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, frag: vec2
     if debug == 1u { return RaaSphericalResult(sample, vec4<f32>(sample.rgb, 1.0)); }
     if debug == 2u {
         return RaaSphericalResult(sample, vec4<f32>(1.0 - sample.w, sample.w, 0.1, 1.0));
+    }
+    if debug == 3u {
+        let fallback = f32(raa_ddgi_fallback);
+        return RaaSphericalResult(sample, vec4<f32>(fallback, 1.0 - fallback, 0.1, 1.0));
     }
     return RaaSphericalResult(sample, vec4<f32>(0.0));
 }

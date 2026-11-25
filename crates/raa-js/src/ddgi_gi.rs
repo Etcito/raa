@@ -1,7 +1,7 @@
 //! Installation and statistics of the DDGI probe volume (`pass.gi.ddgi`). The render graph
 //! configures it; there is no standalone setter.
 
-use js_sys::{Array, Object, Reflect};
+use js_sys::{Array, Object, Reflect, Uint8Array};
 use raa_core::RaaError;
 use raa_sdf_trace::mesh::{DdgiFeature, DdgiHandle, MeshTraceHandle};
 use wasm_bindgen::prelude::*;
@@ -73,6 +73,7 @@ impl Engine {
                     stats.update_ms.map_or(JsValue::NULL, JsValue::from),
                 );
                 put(&result, "screenResolve", stats.screen_resolve.into());
+                put(&result, "interval", stats.interval.into());
                 if let Some((min, max)) = stats.scene_bounds {
                     let bounds = Array::new();
                     for x in min.into_iter().chain(max) {
@@ -83,5 +84,51 @@ impl Engine {
             }
             Ok(result.into())
         })
+    }
+
+    /// Reads one published image of the latest submitted frame (`producer` is the pipeline
+    /// entry, e.g. `mesh.reference#reference` or `forward`; `port` its output) without rendering.
+    /// Used for accumulated GI references and comparisons: `{ size, format, data }`.
+    #[wasm_bindgen(js_name = captureGraphImage)]
+    pub async fn capture_graph_image(
+        &mut self,
+        producer: String,
+        port: String,
+    ) -> Result<JsValue, JsValue> {
+        let texture = self.with_state(|gpu, st| {
+            if !gpu.summary().is_hardware() {
+                return Err(RaaError::Unsupported(
+                    "graph image capture requires hardware WebGPU".into(),
+                ));
+            }
+            let pipeline = st.pipeline.try_borrow().map_err(|_| {
+                RaaError::Resource("graph image capture: the pipeline is busy".into())
+            })?;
+            let submission = pipeline.scene_submission();
+            if submission.record_failed
+                || submission.submitted_mask != 1
+                || submission.pending_mask != 0
+            {
+                return Err(RaaError::Resource(
+                    "graph image capture requires one submitted primary view".into(),
+                ));
+            }
+            let image = pipeline.resources().get(&producer, &port).ok_or_else(|| {
+                RaaError::Resource(format!("no published image {producer}.{port}"))
+            })?;
+            Ok(image.view.texture().clone())
+        })?;
+        let runtime = self.capture_runtime()?;
+        let bytes = raa_web::read_capture_texture(runtime.gpu(), &texture)
+            .await
+            .map_err(|error| raa_web::error_to_js(&error))?;
+        let result = Object::new();
+        let size = Array::new();
+        size.push(&texture.width().into());
+        size.push(&texture.height().into());
+        put(&result, "size", size.into());
+        put(&result, "format", format!("{:?}", texture.format()).into());
+        put(&result, "data", Uint8Array::from(bytes.as_slice()).into());
+        Ok(result.into())
     }
 }

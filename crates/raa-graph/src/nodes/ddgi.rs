@@ -15,7 +15,7 @@ use crate::validate::ValidateCtx;
 
 pub(crate) const DDGI_TYPE: &str = "pass.gi.ddgi";
 const SOURCE: &str = "crates/raa-sdf-trace/src/mesh/ddgi.rs";
-const DEBUG_OPTIONS: &[&str] = &["off", "irradiance", "coverage"];
+const DEBUG_OPTIONS: &[&str] = &["off", "irradiance", "coverage", "resolve"];
 
 pub fn family() -> Box<dyn NodeFamily> {
     Box::new(Ddgi)
@@ -294,6 +294,7 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> DdgiSetti
                 s.debug = match name.as_str() {
                     "irradiance" => DdgiDebug::Irradiance,
                     "coverage" => DdgiDebug::Coverage,
+                    "resolve" => DdgiDebug::Resolve,
                     _ => DdgiDebug::Off,
                 }
             }

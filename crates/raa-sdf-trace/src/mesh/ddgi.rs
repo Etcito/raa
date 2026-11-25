@@ -51,6 +51,8 @@ pub enum DdgiDebug {
     Irradiance = 1,
     /// Red where no usable probe covers the surface, green where it is fully covered.
     Coverage = 2,
+    /// Green where forward used the screen resolve, red where it fell back to the full lookup.
+    Resolve = 3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -84,8 +86,8 @@ impl Default for DdgiSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            // Covers an Intel Sponza sized interior (36 x 18 x 18 m) without scrolling.
-            counts: [24, 12, 12],
+            // 36 x 18 x 24 m: an Intel Sponza sized interior with little scrolling.
+            counts: [24, 12, 16],
             spacing: 1.5,
             rays_per_probe: 64,
             hysteresis: 0.97,
@@ -151,6 +153,8 @@ pub struct DdgiStats {
     pub ms_per_probe: f64,
     /// Last measured GPU time of the update dispatch (ms), when timestamps are available.
     pub update_ms: Option<f64>,
+    /// Steady state: frames between update batches (1 while bursting).
+    pub interval: u32,
     pub screen_resolve: bool,
     pub update_frames: u64,
     pub recycled: u64,
@@ -211,6 +215,8 @@ impl DdgiFeature {
             timer: None,
             ms_per_probe: INITIAL_MS_PER_PROBE,
             update_ms: None,
+            batch_ms: 0.0,
+            idle_frames: 0,
         }))?;
         pipeline.set_enabled(DDGI_GI_NAME, false)?;
         Ok(state)
@@ -249,15 +255,18 @@ struct Staged {
     burst: bool,
     visibility: DdgiVisibility,
     converge_age: u32,
+    interval: u32,
     /// Screen resolve size, when it runs this frame.
     screen: Option<(u32, u32)>,
 }
 
 /// Starting cost model before the first timestamp readback (RTX 3090, Sponza, 64 rays).
 const INITIAL_MS_PER_PROBE: f64 = 0.0033;
-/// Smallest update batch: below it the dispatch no longer fills the GPU and costs about the
-/// same time, so a per-probe cost measured on it would shrink the next budget in a spiral.
-const MIN_BATCH: u32 = 128;
+/// Smallest update batch. Probe rays are latency bound (a few dependent BVH traversals per
+/// thread): a dispatch costs about the same wall time until it fills the GPU, so the update runs
+/// as GPU-filling batches and a steady-state budget below a batch's cost is met by updating only
+/// every k-th frame. Per-probe costs are learned from batches of at least this size.
+const MIN_BATCH: u32 = 256;
 /// The screen resolve runs at 1/RESOLVE_SCALE of the frame on each axis.
 const RESOLVE_SCALE: u32 = 2;
 
@@ -377,6 +386,9 @@ struct DdgiPass {
     timer: Option<UpdateTimer>,
     ms_per_probe: f64,
     update_ms: Option<f64>,
+    /// Smoothed GPU time of one update batch (ms), 0 before the first readback.
+    batch_ms: f64,
+    idle_frames: u32,
 }
 
 impl DdgiPass {
@@ -488,6 +500,11 @@ impl FeaturePass for DdgiPass {
         }
         if let Some((jobs, ms)) = self.timer.as_mut().and_then(UpdateTimer::poll) {
             self.update_ms = Some(ms);
+            self.batch_ms = if self.batch_ms > 0.0 {
+                self.batch_ms + 0.25 * (ms - self.batch_ms)
+            } else {
+                ms
+            };
             if jobs >= MIN_BATCH && ms > 0.0 {
                 let sample = (ms / f64::from(jobs)).clamp(1e-5, 0.1);
                 self.ms_per_probe += 0.25 * (sample - self.ms_per_probe);
@@ -501,8 +518,22 @@ impl FeaturePass for DdgiPass {
         let probes_for =
             |ms: f32| ((f64::from(ms) / self.ms_per_probe) as u32).clamp(floor, probes);
         let cap = ((probes as f32 * settings.update_fraction).ceil() as u32).clamp(1, probes);
-        let budget = probes_for(settings.budget_ms).min(cap.max(floor));
-        let burst = probes_for(settings.burst_ms).max(budget);
+        let burst = probes_for(settings.burst_ms);
+        let batch = burst.min(cap.max(floor));
+        // Steady state: one batch every `interval` frames keeps the average within budgetMs.
+        let interval = if self.batch_ms > 0.0 {
+            (self.batch_ms / f64::from(settings.budget_ms))
+                .ceil()
+                .clamp(1.0, 16.0) as u32
+        } else {
+            1
+        };
+        self.idle_frames += 1;
+        let budget = if self.idle_frames >= interval {
+            batch
+        } else {
+            0
+        };
         let converge_age = converge_age(settings.hysteresis);
         let mut jobs = Vec::with_capacity(burst as usize);
         let (visibility, bursting) = self.schedule.plan(
@@ -513,6 +544,9 @@ impl FeaturePass for DdgiPass {
             burst,
             &mut jobs,
         );
+        if !jobs.is_empty() {
+            self.idle_frames = 0;
+        }
 
         let triangles = mesh.geometry.count();
         let traceable = triangles > 0 && mesh.frame.is_some() && mesh.texture_atlas.is_some();
@@ -594,6 +628,7 @@ impl FeaturePass for DdgiPass {
             burst: bursting,
             visibility,
             converge_age: u32::from(converge_age),
+            interval: if bursting { 1 } else { interval },
             screen: resolve,
         });
         Ok(())
@@ -694,6 +729,7 @@ impl FeaturePass for DdgiPass {
             converge_age: staged.converge_age,
             ms_per_probe: self.ms_per_probe,
             update_ms: self.update_ms,
+            interval: staged.interval,
             screen_resolve: staged.screen.is_some(),
             scene_bounds: staged.bounds,
             update_frames: previous.update_frames + 1,
@@ -964,6 +1000,8 @@ mod tests {
             timer: None,
             ms_per_probe: INITIAL_MS_PER_PROBE,
             update_ms: None,
+            batch_ms: 0.0,
+            idle_frames: 0,
         };
         for _ in 0..16 {
             let m = pass_rng.random_rotation();
