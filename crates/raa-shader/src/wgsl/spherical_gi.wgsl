@@ -585,10 +585,11 @@ fn raa_spherical_diffuse_front(p: vec3<f32>, normal: vec3<f32>,
     let anchor = bitcast<vec4<f32>>(raa_spherical_data[0]).xyz;
     let cells = f32(grid.x);
     let at = vec3<f32>(cell.angular, raa_spherical_shell_cells(cell.shell, cell.radius));
-    // EVAL (parallaxRange 9001): 4x4x4 block, kernel 1.6 cells.
-    let wide = bitcast<f32>(raa_spherical_data[3].y) > 9000.5;
+    // EVAL (parallaxRange 9001): 4x4x4 block, kernel 1.6 cells; 9002: kernel 1.35.
+    let eval_mode = bitcast<f32>(raa_spherical_data[3].y);
+    let wide = eval_mode > 9000.5;
     let span = select(3, 4, wide);
-    let kernel = select(RAA_SPHERICAL_FRONT_KERNEL, 1.6, wide);
+    let kernel = select(RAA_SPHERICAL_FRONT_KERNEL, select(1.6, 1.35, eval_mode > 9001.5), wide);
     let first = vec3<i32>(floor(at - select(0.0, 0.5, wide))) - 1;
     let base = vec2<i32>(min(first.xy, vec2<i32>(i32(grid.x) - 2)));
     let reach = 1.0 / (kernel * kernel);
