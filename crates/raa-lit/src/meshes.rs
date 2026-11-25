@@ -194,8 +194,27 @@ pub(crate) struct GpuLitMesh {
     /// Per-recreation buffer key, fresh on every upload and update.
     key: u64,
     info: LitMeshInfo,
-    pub(crate) edge_bytes: Vec<u8>,
+    pending_edges: Option<PendingEdges>,
     pub(crate) edges: Option<wgpu::Buffer>,
+}
+
+/// Wireframe data is expanded only when the editor pass first needs it.
+#[derive(Debug)]
+enum PendingEdges {
+    Triangles {
+        positions: Vec<[f32; 3]>,
+        indices: Vec<u32>,
+    },
+    Explicit(Vec<u8>),
+}
+
+impl PendingEdges {
+    fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Self::Triangles { positions, indices } => triangle_edge_bytes(&positions, &indices),
+            Self::Explicit(bytes) => bytes,
+        }
+    }
 }
 
 impl GpuLitMesh {
@@ -333,19 +352,23 @@ impl MeshStore {
 
     pub(crate) fn set_edges(&mut self, id: LitMeshId, bytes: Vec<u8>) {
         if let Some(Some(m)) = self.meshes.get_mut(id.0 as usize) {
-            m.edge_bytes = bytes;
+            m.pending_edges = Some(PendingEdges::Explicit(bytes));
             m.edges = None;
         }
     }
 
     pub(crate) fn prepare_edges(&mut self, gpu: &GpuContext) {
         for mesh in self.meshes.iter_mut().flatten() {
-            if mesh.edges.is_none() && !mesh.edge_bytes.is_empty() {
+            let Some(pending) = mesh.pending_edges.take() else {
+                continue;
+            };
+            let bytes = pending.into_bytes();
+            if !bytes.is_empty() {
                 mesh.edges = Some(buffer_with(
                     gpu,
                     "raa.editor.edges",
                     wgpu::BufferUsages::VERTEX,
-                    &mesh.edge_bytes,
+                    &bytes,
                 ));
             }
         }
@@ -424,7 +447,10 @@ fn build(gpu: &GpuContext, m: &AttributedMesh) -> Result<(GpuLitMesh, Vec<SubMes
         index,
         key: 0,
         info,
-        edge_bytes: triangle_edge_bytes(m),
+        pending_edges: Some(PendingEdges::Triangles {
+            positions: m.base.positions.clone(),
+            indices: m.base.indices.clone(),
+        }),
         edges: None,
     };
     Ok((gpu_mesh, subs))
@@ -606,20 +632,22 @@ pub(crate) fn edge_bytes(m: &AttributedMesh, edges: &[u32]) -> Vec<u8> {
     bytes
 }
 
-fn triangle_edge_bytes(m: &AttributedMesh) -> Vec<u8> {
+fn triangle_edge_bytes(positions: &[[f32; 3]], indices: &[u32]) -> Vec<u8> {
     let mut edges = std::collections::BTreeSet::new();
-    for t in m.base.indices.chunks_exact(3) {
+    for t in indices.chunks_exact(3) {
         for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
             edges.insert((a.min(b), a.max(b)));
         }
     }
-    edge_bytes(
-        m,
-        &edges
-            .into_iter()
-            .flat_map(|(a, b)| [a, b])
-            .collect::<Vec<_>>(),
-    )
+    let mut bytes = Vec::with_capacity(edges.len() * 24);
+    for (a, b) in edges {
+        for i in [a, b] {
+            for x in positions[i as usize] {
+                bytes.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+    }
+    bytes
 }
 
 #[cfg(test)]
@@ -635,7 +663,14 @@ mod edge_tests {
             [0.0, 1.0, 0.0],
         ];
         m.base.indices = vec![0, 1, 2, 0, 2, 3];
-        assert_eq!(triangle_edge_bytes(&m).len(), 5 * 24);
+        let pending = PendingEdges::Triangles {
+            positions: m.base.positions.clone(),
+            indices: m.base.indices.clone(),
+        };
+        assert_eq!(
+            pending.into_bytes(),
+            edge_bytes(&m, &[0, 1, 0, 2, 0, 3, 1, 2, 2, 3])
+        );
         assert_eq!(edge_bytes(&m, &[0, 1, 1, 2, 2, 3, 3, 0]).len(), 4 * 24);
         assert!(edge_bytes(&m, &[]).is_empty());
     }
