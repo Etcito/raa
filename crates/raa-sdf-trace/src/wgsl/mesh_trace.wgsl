@@ -1,10 +1,9 @@
 // Mesh intersections share the conservative BVH node layout and slab test with SDF tracing.
 struct TraceNode { lo: vec3<f32>, left: u32, hi: vec3<f32>, count: u32 }
 struct Vertex {
-    position: vec3<f32>, material: u32, normal: vec3<f32>, padding: u32,
-    color: vec3<f32>, color_padding: u32,
+    position: vec3<f32>, normal: vec3<f32>, color: vec3<f32>,
 }
-struct Triangle { a: Vertex, b: Vertex, c: Vertex }
+struct Triangle { a: Vertex, b: Vertex, c: Vertex, material: u32 }
 struct Material { base_roughness: vec4<f32>, emission_metallic: vec4<f32>, flags: vec4<u32> }
 struct Ray { origin: vec3<f32>, direction: vec3<f32> }
 struct Hit { t: f32, object: u32, bary: vec2<f32> }
@@ -25,7 +24,7 @@ struct Light {
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<uniform> options: array<vec4<u32>, 4>;
 @group(0) @binding(2) var<storage, read> nodes: array<TraceNode>;
-@group(0) @binding(3) var<storage, read> triangles: array<Triangle>;
+@group(0) @binding(3) var<storage, read> mesh_geometry: array<u32>;
 @group(0) @binding(4) var<storage, read> materials: array<Material>;
 @group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(6) var depth: texture_depth_2d;
@@ -96,6 +95,33 @@ struct HybridRoughGrid {
     source: u32, // volume = 1, spherical = 2
 }
 
+// The indexed payload starts with the vertex stride, then four words per BVH-ordered
+// triangle (three vertex indices and a material index), then exact-float attributes.
+fn triangle_refs(index: u32) -> vec4<u32> {
+    let at = 1u + index * 4u;
+    return vec4<u32>(mesh_geometry[at], mesh_geometry[at + 1u], mesh_geometry[at + 2u], mesh_geometry[at + 3u]);
+}
+
+fn vertex_at(index: u32) -> u32 {
+    return 1u + options[0].x * 4u + index * mesh_geometry[0];
+}
+
+fn geometry_vec3(at: u32) -> vec3<f32> {
+    return bitcast<vec3<f32>>(vec3<u32>(mesh_geometry[at], mesh_geometry[at + 1u], mesh_geometry[at + 2u]));
+}
+
+fn mesh_vertex(index: u32) -> Vertex {
+    let at = vertex_at(index);
+    var color = vec3<f32>(1.0);
+    if mesh_geometry[0] == 9u { color = geometry_vec3(at + 6u); }
+    return Vertex(geometry_vec3(at), geometry_vec3(at + 3u), color);
+}
+
+fn mesh_triangle(index: u32) -> Triangle {
+    let refs = triangle_refs(index);
+    return Triangle(mesh_vertex(refs.x), mesh_vertex(refs.y), mesh_vertex(refs.z), refs.w);
+}
+
 fn closest(ray: Ray, limit: f32, any_hit: bool) -> Hit {
     var result = Hit(limit, MISS, vec2<f32>(0.0));
     if options[0].x == 0u { return result; }
@@ -115,13 +141,14 @@ fn closest(ray: Ray, limit: f32, any_hit: bool) -> Hit {
             continue;
         }
         for (var i = node.left; i < node.left + node.count; i++) {
-            let tri = triangles[i];
-            let edge1 = tri.b.position - tri.a.position;
-            let edge2 = tri.c.position - tri.a.position;
+            let refs = triangle_refs(i);
+            let a = geometry_vec3(vertex_at(refs.x));
+            let edge1 = geometry_vec3(vertex_at(refs.y)) - a;
+            let edge2 = geometry_vec3(vertex_at(refs.z)) - a;
             let p = cross(ray.direction, edge2);
             let det = dot(edge1, p);
             if abs(det) < 1e-8 { continue; }
-            let offset = ray.origin - tri.a.position;
+            let offset = ray.origin - a;
             let u = dot(offset, p) / det;
             if u < 0.0 || u > 1.0 { continue; }
             let q = cross(offset, edge1);
@@ -161,7 +188,7 @@ fn basis(n: vec3<f32>) -> mat3x3<f32> {
 }
 
 fn hit_material(tri: Triangle, bary: vec2<f32>) -> Material {
-    var mat = materials[tri.a.material];
+    var mat = materials[tri.material];
     let color = tri.a.color * (1.0 - bary.x - bary.y) + tri.b.color * bary.x + tri.c.color * bary.y;
     mat.base_roughness = vec4<f32>(mat.base_roughness.rgb * color, mat.base_roughness.w);
     return mat;
@@ -400,7 +427,7 @@ fn terminal_diffuse_gi(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material,
             }
             continue;
         }
-        let tri = triangles[hit.object];
+        let tri = mesh_triangle(hit.object);
         let normal = normalize(cross(tri.b.position - tri.a.position, tri.c.position - tri.a.position));
         let facing = select(-normal, normal, dot(normal, direction) < 0.0);
         incident += cached_surface_radiance(origin + direction * hit.t, facing);
@@ -554,7 +581,7 @@ fn trace_path_from_hit(initial: Ray, first_hit: Hit, mirrors: u32, path: bool, b
             return sum + throughput * textureSampleLevel(sky, raa_linear_clamp, ray.direction, 0).rgb;
         }
         if !path && step == 0u { atomicAdd(&counters[GEOMETRY_HIT], 1u); }
-        let tri = triangles[hit.object];
+        let tri = mesh_triangle(hit.object);
         let mat = hit_material(tri, hit.bary);
         let p = ray.origin + ray.direction * hit.t;
         let ng0 = normalize(cross(tri.b.position - tri.a.position, tri.c.position - tri.a.position));
@@ -597,14 +624,14 @@ fn trace_path_from_hit(initial: Ray, first_hit: Hit, mirrors: u32, path: bool, b
         reflected = false;
         if include_light { sum += throughput * direct; }
         if isolate_diffuse && diffuse_output == 1u { break; }
-        let query = GridDiffuseQuery(p, ng, n, hit.object, tri.a.material, pixel);
+        let query = GridDiffuseQuery(p, ng, n, hit.object, tri.material, pixel);
         if !path {
             let spherical = mesh_spherical_diffuse(query, mat);
             sum += throughput * spherical.rgb * spherical.w;
             // Spherical interpolation has its own support filter. Only the
             // uncovered volume contribution uses the terminal image filter.
             if spherical.w < 1.0 {
-                *terminal = terminal_diffuse_gi(p, ng, n, mat, tri.a.material, step + 1u);
+                *terminal = terminal_diffuse_gi(p, ng, n, mat, tri.material, step + 1u);
                 (*terminal).weight *= throughput * (1.0 - spherical.w);
                 sum += (*terminal).incident * (*terminal).weight;
             }

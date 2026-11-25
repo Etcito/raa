@@ -648,7 +648,7 @@ pub(crate) fn prepare_view(
             &mut st.tags,
             &mut st.slots,
         )?;
-        crate::mesh_trace::prepare(st, index)
+        crate::mesh_trace::prepare(gpu, st, index)
     })();
     st.scene.camera = original;
     result

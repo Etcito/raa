@@ -39,7 +39,7 @@ fn facing_x(x: f32) -> [[f32; 3]; 3] {
 }
 
 fn update_geometry(scene: &mut MeshTraceScene, inputs: &[MeshInput<'_>]) {
-    scene.geometry.update(inputs).unwrap();
+    scene.geometry.update(inputs, 128 << 20).unwrap();
 }
 
 fn key(shell: u16, face: CubeFace) -> CellKey {

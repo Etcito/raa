@@ -3,12 +3,15 @@
 use raa_core::RaaError;
 use raa_math::{Mat4, Vec3};
 
-use crate::bvh::{Bvh, Node, build_bounds};
+use crate::bvh::{Bvh, LEAF, NODE_WORDS, Node, build_bounds};
 
-const VERTEX_WORDS: usize = 12;
-pub(super) const TRIANGLE_BYTES: u64 = (TRIANGLE_WORDS * 4) as u64;
-const TRIANGLE_WORDS: usize = 3 * VERTEX_WORDS;
-const MAX_TRIANGLES: usize = 250_000;
+const POSITION_NORMAL_WORDS: usize = 6;
+const VERTEX_WORDS: usize = 9;
+const TRIANGLE_WORDS: usize = 4;
+/// The first storage word gives the vertex stride, followed by indexed triangles and vertices.
+pub(super) const GEOMETRY_HEADER_BYTES: u64 = 4;
+type TraceVertex = [f32; VERTEX_WORDS];
+type TraceTriangle = [u32; TRIANGLE_WORDS];
 type TriangleBounds = ([f32; 3], [f32; 3]);
 
 #[derive(Clone, Copy)]
@@ -72,23 +75,33 @@ struct Part {
     key: u64,
     material: u32,
     count: usize,
+    vertices: usize,
+    colored: bool,
     world: Mat4,
 }
 
-impl From<&MeshInput<'_>> for Part {
-    fn from(value: &MeshInput<'_>) -> Self {
+impl Part {
+    fn new(value: &MeshInput<'_>, normal_matrix: Option<Mat4>) -> Self {
+        let count = value.indices.len() / 3;
         Self {
             id: value.mesh,
             key: value.key,
             material: value.material,
-            count: value.indices.len() / 3,
+            count,
+            // Singular transforms use a separate geometric normal at each face.
+            vertices: if normal_matrix.is_some() {
+                value.positions.len()
+            } else {
+                count * 3
+            },
+            colored: value.colors.is_some(),
             world: value.world,
         }
     }
 }
 
 fn same_geometry(a: &Part, b: &Part) -> bool {
-    (a.id, a.key, a.count) == (b.id, b.key, b.count)
+    (a.id, a.key, a.count, a.vertices) == (b.id, b.key, b.count, b.vertices)
 }
 
 #[derive(Default)]
@@ -97,10 +110,11 @@ pub(super) struct Geometry {
     bounds: Vec<TriangleBounds>,
     part_bounds: Vec<Option<Bounds>>,
     pub(super) dirty_bounds: Vec<Bounds>,
-    triangles: Vec<[u32; TRIANGLE_WORDS]>,
+    triangles: Vec<TraceTriangle>,
+    vertices: Vec<TraceVertex>,
     bvh: Bvh,
     pub revision: u64,
-    pub triangle_bytes: Vec<u8>,
+    pub mesh_bytes: Vec<u8>,
     pub node_bytes: Vec<u8>,
 }
 
@@ -109,67 +123,88 @@ impl Geometry {
         self.triangles.len() as u32
     }
 
-    pub fn update(&mut self, inputs: &[MeshInput<'_>]) -> Result<(), RaaError> {
-        let count: usize = inputs.iter().map(|input| input.indices.len() / 3).sum();
-        if count > MAX_TRIANGLES {
-            return Err(RaaError::FrameGraph {
-                code: "trace.mesh_capacity",
-                message: format!(
-                    "Mesh tracing needs {count} triangles in this view. The current ray geometry limit is {MAX_TRIANGLES}. Select a render profile without mesh tracing to render this scene at full geometry."
-                ),
-            });
-        }
-        let rebuild = self.parts.len() != inputs.len()
-            || inputs
-                .iter()
-                .zip(&self.parts)
-                .any(|(input, part)| !same_geometry(&input.into(), part));
-        if !rebuild
-            && inputs
-                .iter()
-                .zip(&self.parts)
-                .all(|(input, part)| &Part::from(input) == part)
-        {
+    pub fn update(&mut self, inputs: &[MeshInput<'_>], storage_limit: u64) -> Result<(), RaaError> {
+        let normals: Vec<_> = inputs
+            .iter()
+            .map(|input| input.world.inverse().map(|matrix| matrix.transpose()))
+            .collect();
+        let parts: Vec<_> = inputs
+            .iter()
+            .zip(&normals)
+            .map(|(input, &normal)| Part::new(input, normal))
+            .collect();
+        if self.parts == parts {
             return Ok(());
         }
 
-        // Find an unchanged suffix when insertions or removals shift part indices.
-        // This keeps common scene edits local even when the existing BVH must rebuild.
+        let count: usize = parts.iter().map(|part| part.count).sum();
+        let vertices: usize = parts.iter().map(|part| part.vertices).sum();
+        let vertex_words = if parts.iter().any(|part| part.colored) {
+            VERTEX_WORDS
+        } else {
+            POSITION_NORMAL_WORDS
+        };
+        let mesh_size = GEOMETRY_HEADER_BYTES
+            + 4 * (count as u64 * TRIANGLE_WORDS as u64 + vertices as u64 * vertex_words as u64);
+        // Round leaf count up to a complete binary tree for a preflight upper bound.
+        let max_nodes = 2 * (count as u64).div_ceil(LEAF as u64).next_power_of_two() - 1;
+        let bvh_size = max_nodes * (NODE_WORDS * 4) as u64;
+        if mesh_size.max(bvh_size) > storage_limit {
+            return Err(RaaError::FrameGraph {
+                code: "trace.mesh_capacity",
+                message: format!(
+                    "Mesh tracing needs {count} triangles in this view. Indexed geometry requires {mesh_size} bytes and the BVH requires up to {bvh_size} bytes. The device storage binding limit is {storage_limit} bytes. Select a render profile without mesh tracing to render this scene at full geometry."
+                ),
+            });
+        }
+        let aligned = self.parts.len() == parts.len();
+        let rebuild = !aligned
+            || self
+                .parts
+                .iter()
+                .zip(&parts)
+                .any(|(old, next)| !same_geometry(old, next));
+
+        // An unchanged suffix can survive insertions or removals without marking its bounds dirty.
         let prefix = self
             .parts
             .iter()
-            .zip(inputs)
-            .take_while(|(old, input)| **old == Part::from(*input))
+            .zip(&parts)
+            .take_while(|(old, next)| old == next)
             .count();
         let suffix = self.parts[prefix..]
             .iter()
             .rev()
-            .zip(inputs[prefix..].iter().rev())
-            .take_while(|(old, input)| **old == Part::from(*input))
+            .zip(parts[prefix..].iter().rev())
+            .take_while(|(old, next)| old == next)
             .count();
-        let aligned = self.parts.len() == inputs.len();
         let old_end = self.parts.len() - suffix;
-        let new_end = inputs.len() - suffix;
+        let new_end = parts.len() - suffix;
 
         self.dirty_bounds.clear();
         for i in prefix..old_end {
-            if !aligned || self.parts[i] != Part::from(&inputs[i]) {
+            if !aligned || self.parts[i] != parts[i] {
                 record_dirty(&mut self.dirty_bounds, self.part_bounds[i]);
             }
         }
         self.triangles.resize(count, [0; TRIANGLE_WORDS]);
+        self.vertices.resize(vertices, [0.; VERTEX_WORDS]);
         self.bounds.resize(count, ([0.; 3], [0.; 3]));
-        self.part_bounds.resize(inputs.len(), None);
-        let mut start = 0;
-        for (i, input) in inputs.iter().enumerate() {
-            let part = Part::from(input);
+        self.part_bounds.resize(parts.len(), None);
+        let mut triangle_start = 0;
+        let mut vertex_start = 0;
+        for (i, ((input, &part), normal_matrix)) in
+            inputs.iter().zip(&parts).zip(normals).enumerate()
+        {
             if rebuild || self.parts[i] != part {
-                self.part_bounds[i] = self.write_part(input, start);
+                self.part_bounds[i] =
+                    self.write_part(input, normal_matrix, triangle_start, vertex_start);
                 if (prefix..new_end).contains(&i) && (!aligned || self.parts[i] != part) {
                     record_dirty(&mut self.dirty_bounds, self.part_bounds[i]);
                 }
             }
-            start += part.count;
+            triangle_start += part.count;
+            vertex_start += part.vertices;
         }
         if rebuild {
             self.bvh = if count == 0 {
@@ -177,26 +212,32 @@ impl Geometry {
             } else {
                 build_bounds(&self.bounds)
             };
-            self.parts.clear();
-            self.parts.extend(inputs.iter().map(Part::from));
         } else {
-            for (part, input) in self.parts.iter_mut().zip(inputs) {
-                *part = Part::from(input);
-            }
             for i in (0..self.bvh.nodes.len()).rev() {
                 self.refit(i);
             }
         }
+        self.parts = parts;
 
-        self.triangle_bytes.clear();
-        self.node_bytes.clear();
+        self.mesh_bytes.clear();
+        self.mesh_bytes.reserve_exact(mesh_size as usize);
+        self.mesh_bytes
+            .extend_from_slice(&(vertex_words as u32).to_le_bytes());
         for &index in &self.bvh.order {
-            self.triangle_bytes.extend(
-                self.triangles[index as usize]
-                    .iter()
-                    .flat_map(|word| word.to_le_bytes()),
-            );
+            for word in self.triangles[index as usize] {
+                self.mesh_bytes.extend_from_slice(&word.to_le_bytes());
+            }
         }
+        for vertex in &self.vertices {
+            for &word in &vertex[..vertex_words] {
+                self.mesh_bytes.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        debug_assert_eq!(self.mesh_bytes.len() as u64, mesh_size);
+
+        self.node_bytes.clear();
+        self.node_bytes
+            .reserve_exact(self.bvh.nodes.len() * NODE_WORDS * 4);
         for &Node {
             min,
             max,
@@ -218,46 +259,56 @@ impl Geometry {
         Ok(())
     }
 
-    fn write_part(&mut self, input: &MeshInput<'_>, start: usize) -> Option<Bounds> {
-        let mut part: Option<Bounds> = None;
-        let normal_matrix = input.world.inverse().map(|matrix| matrix.transpose());
-        for (i, indices) in input.indices.chunks_exact(3).enumerate() {
-            let indices = [indices[0], indices[1], indices[2]].map(|index| index as usize);
-            let positions = indices.map(|j| {
-                input
-                    .world
-                    .transform_point(Vec3::from_array(input.positions[j]))
-            });
-            let geometric = (positions[1] - positions[0])
-                .cross(positions[2] - positions[0])
-                .normalize_or_zero();
-            let mut words = [0u32; TRIANGLE_WORDS];
-            let mut lo = [f32::INFINITY; 3];
-            let mut hi = [f32::NEG_INFINITY; 3];
-            for (corner, index) in indices.into_iter().enumerate() {
-                let p = positions[corner].to_array();
+    fn write_part(
+        &mut self,
+        input: &MeshInput<'_>,
+        normal_matrix: Option<Mat4>,
+        triangle_start: usize,
+        vertex_start: usize,
+    ) -> Option<Bounds> {
+        let position = |i| {
+            input
+                .world
+                .transform_point(Vec3::from_array(input.positions[i]))
+        };
+        let color = |i: usize| input.colors.map_or([1.; 4], |colors| colors[i]);
+        if let Some(normal_matrix) = normal_matrix {
+            for i in 0..input.positions.len() {
                 let normal = normal_matrix
-                    .map_or(geometric, |matrix| {
-                        matrix
-                            .transform_vector(Vec3::from_array(input.normals[index]))
-                            .normalize_or_zero()
-                    })
-                    .to_array();
-                let color = input.colors.map_or([1.0; 4], |colors| colors[index]);
-                let offset = corner * VERTEX_WORDS;
-                words[offset..offset + 3].copy_from_slice(&p.map(f32::to_bits));
-                words[offset + 4..offset + 7].copy_from_slice(&normal.map(f32::to_bits));
-                words[offset + 8..offset + 11]
-                    .copy_from_slice(&[color[0], color[1], color[2]].map(f32::to_bits));
-                for axis in 0..3 {
-                    lo[axis] = lo[axis].min(p[axis]);
-                    hi[axis] = hi[axis].max(p[axis]);
-                }
+                    .transform_vector(Vec3::from_array(input.normals[i]))
+                    .normalize_or_zero();
+                self.vertices[vertex_start + i] = trace_vertex(position(i), normal, color(i));
             }
-            words[3] = input.material;
-            self.triangles[start + i] = words;
-            self.bounds[start + i] = (lo, hi);
-            let bounds = Bounds { min: lo, max: hi };
+        }
+
+        let mut part: Option<Bounds> = None;
+        for (i, indices) in input.indices.chunks_exact(3).enumerate() {
+            let [a, b, c] = [indices[0], indices[1], indices[2]].map(|index| index as usize);
+            let vertex_ids = if normal_matrix.is_some() {
+                [a, b, c].map(|index| vertex_start + index)
+            } else {
+                let points = [position(a), position(b), position(c)];
+                let normal = (points[1] - points[0])
+                    .cross(points[2] - points[0])
+                    .normalize_or_zero();
+                let vertex_ids = [0, 1, 2].map(|corner| vertex_start + i * 3 + corner);
+                for ((id, point), index) in vertex_ids.into_iter().zip(points).zip([a, b, c]) {
+                    self.vertices[id] = trace_vertex(point, normal, color(index));
+                }
+                vertex_ids
+            };
+
+            let points = vertex_ids.map(|index| vertex_position(&self.vertices[index]));
+            let min = std::array::from_fn(|axis| {
+                points[0][axis].min(points[1][axis]).min(points[2][axis])
+            });
+            let max = std::array::from_fn(|axis| {
+                points[0][axis].max(points[1][axis]).max(points[2][axis])
+            });
+            let [a, b, c] = vertex_ids.map(|index| index as u32);
+            self.triangles[triangle_start + i] = [a, b, c, input.material];
+            self.bounds[triangle_start + i] = (min, max);
+            let bounds = Bounds { min, max };
             match &mut part {
                 Some(part) => part.include(bounds),
                 slot => *slot = Some(bounds),
@@ -312,10 +363,8 @@ impl Geometry {
             if !(Bounds { min: lo, max: hi }).overlaps(min, max) {
                 continue;
             }
-            let words = &self.triangles[index];
-            let points = std::array::from_fn(|i| {
-                std::array::from_fn(|axis| f32::from_bits(words[i * VERTEX_WORDS + axis]))
-            });
+            let [a, b, c, _] = self.triangles[index];
+            let points = [a, b, c].map(|id| vertex_position(&self.vertices[id as usize]));
             if let Some(hit) = visit(points) {
                 return Some(hit);
             }
@@ -349,6 +398,24 @@ impl Geometry {
     }
 }
 
+pub(super) fn storage_limit(limits: wgpu::Limits) -> u64 {
+    limits
+        .max_buffer_size
+        .min(u64::from(limits.max_storage_buffer_binding_size))
+        & !3
+}
+
+fn trace_vertex(position: Vec3, normal: Vec3, color: [f32; 4]) -> TraceVertex {
+    let [x, y, z] = position.to_array();
+    let [nx, ny, nz] = normal.to_array();
+    let [r, g, b, _] = color;
+    [x, y, z, nx, ny, nz, r, g, b]
+}
+
+fn vertex_position(vertex: &TraceVertex) -> [f32; 3] {
+    [vertex[0], vertex[1], vertex[2]]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,22 +433,27 @@ mod tests {
             world: Mat4::IDENTITY,
         };
         let mut geometry = Geometry::default();
-        geometry.update(std::slice::from_ref(&original)).unwrap();
+        geometry
+            .update(std::slice::from_ref(&original), 128)
+            .unwrap();
         let revision = geometry.revision;
-        let too_many = vec![0; (MAX_TRIANGLES + 1) * 3];
+        let too_many = vec![0; 30];
         let error = geometry
-            .update(&[MeshInput {
-                indices: &too_many,
-                ..original
-            }])
+            .update(
+                &[MeshInput {
+                    indices: &too_many,
+                    ..original
+                }],
+                128,
+            )
             .unwrap_err();
         assert_eq!(error.code(), "trace.mesh_capacity");
-        assert!(error.to_string().contains(&(MAX_TRIANGLES + 1).to_string()));
-        assert!(error.to_string().contains(&MAX_TRIANGLES.to_string()));
+        assert!(error.to_string().contains("10 triangles"));
+        assert!(error.to_string().contains("128 bytes"));
         assert_eq!(geometry.revision, revision);
         assert_eq!(geometry.count(), 1);
 
-        geometry.update(&[]).unwrap();
+        geometry.update(&[], 128).unwrap();
         assert_eq!(geometry.count(), 0);
         assert_ne!(geometry.revision, revision);
     }
@@ -404,22 +476,31 @@ mod tests {
             world: Mat4::IDENTITY,
         };
         let mut geometry = Geometry::default();
-        geometry.update(std::slice::from_ref(&input)).unwrap();
+        geometry.update(std::slice::from_ref(&input), 128).unwrap();
         let lanes = |geometry: &Geometry, corner: usize| {
-            let start = corner * VERTEX_WORDS + 8;
-            std::array::from_fn::<_, 3, _>(|i| f32::from_bits(geometry.triangles[0][start + i]))
+            let vertex = geometry.triangles[0][corner] as usize;
+            let start = 4 + TRIANGLE_WORDS * 4 + (vertex * VERTEX_WORDS + 6) * 4;
+            std::array::from_fn::<_, 3, _>(|i| {
+                let word = start + i * 4;
+                f32::from_le_bytes(geometry.mesh_bytes[word..word + 4].try_into().unwrap())
+            })
         };
         for (corner, index) in input.indices.iter().enumerate() {
             let [r, g, b, _] = colors[*index as usize];
             assert_eq!(lanes(&geometry, corner), [r, g, b]);
         }
-        assert_eq!(geometry.triangle_bytes.len() as u64, TRIANGLE_BYTES);
+        assert_eq!(geometry.mesh_bytes.len(), 128);
 
         input.colors = None;
         input.key += 1;
-        geometry.update(&[input]).unwrap();
-        for corner in 0..3 {
-            assert_eq!(lanes(&geometry, corner), [1.0; 3]);
-        }
+        geometry.update(&[input], 128).unwrap();
+        assert_eq!(geometry.mesh_bytes.len(), 92);
+        assert_eq!(geometry.mesh_bytes[0], POSITION_NORMAL_WORDS as u8);
+        assert!(
+            geometry
+                .vertices
+                .iter()
+                .all(|vertex| vertex[6..] == [1.; 3])
+        );
     }
 }

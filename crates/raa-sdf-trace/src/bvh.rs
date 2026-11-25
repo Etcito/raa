@@ -107,8 +107,19 @@ fn split(
     }
     let axis = depth % 3;
     let key = |i: u32| bounds[i as usize].0[axis] + bounds[i as usize].1[axis];
-    bvh.order[start..end].sort_by(|a, b| key(*a).total_cmp(&key(*b)).then(a.cmp(b)));
+    let compare = |a: &u32, b: &u32| key(*a).total_cmp(&key(*b)).then(a.cmp(b));
     let mid = start + (end - start) / 2;
+    let order = &mut bvh.order[start..end];
+    order.select_nth_unstable_by(mid - start, compare);
+    // Split membership matches a full sort, including centroid ties. Sort terminal
+    // ranges to keep hit IDs and tie ordering stable in the GPU's BVH-ordered buffer.
+    let (left, right) = order.split_at_mut(mid - start);
+    for leaf in [left, right]
+        .into_iter()
+        .filter(|child| child.len() <= LEAF)
+    {
+        leaf.sort_unstable_by(compare);
+    }
     let children = bvh.nodes.len();
     bvh.nodes.extend([Node::default(), Node::default()]);
     bvh.nodes[index] = Node {
@@ -119,4 +130,34 @@ fn split(
     };
     split(bvh, bounds, start, mid, children, depth + 1);
     split(bvh, bounds, mid, end, children + 1, depth + 1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn median_selection_preserves_the_fully_sorted_leaf_order() {
+        fn sorted_order(order: &mut [u32], bounds: &[([f32; 3], [f32; 3])], depth: usize) {
+            if order.len() <= LEAF {
+                return;
+            }
+            let axis = depth % 3;
+            let key = |i: u32| bounds[i as usize].0[axis] + bounds[i as usize].1[axis];
+            order.sort_by(|a, b| key(*a).total_cmp(&key(*b)).then(a.cmp(b)));
+            let (left, right) = order.split_at_mut(order.len() / 2);
+            sorted_order(left, bounds, depth + 1);
+            sorted_order(right, bounds, depth + 1);
+        }
+
+        let bounds: Vec<_> = (0..257)
+            .map(|i| {
+                let min = [(i % 17) as f32, (i * 71 % 17) as f32, (i * 71 % 53) as f32];
+                (min, min.map(|x| x + 1.0))
+            })
+            .collect();
+        let mut reference: Vec<_> = (0..bounds.len() as u32).collect();
+        sorted_order(&mut reference, &bounds, 0);
+        assert_eq!(build_bounds(&bounds).order, reference);
+    }
 }

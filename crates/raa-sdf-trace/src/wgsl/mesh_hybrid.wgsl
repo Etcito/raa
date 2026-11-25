@@ -56,7 +56,7 @@ fn hybrid_specular(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
     let p1 = ray.origin + ray.direction * hit.t;
     var grid: HybridRoughGrid;
     if use_grid {
-        let tri = triangles[hit.object];
+        let tri = mesh_triangle(hit.object);
         let mat1 = hit_material(tri, hit.bary);
         let face = normalize(cross(tri.b.position - tri.a.position, tri.c.position - tri.a.position));
         let ng1 = select(-face, face, dot(face, ray.direction) < 0.0);
@@ -217,7 +217,7 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(radiance, sample_pixel, vec4<f32>(textureSampleLevel(sky, raa_linear_clamp, ray.direction, 0).rgb, 1.0));
         return;
     }
-    let tri = triangles[hit.object];
+    let tri = mesh_triangle(hit.object);
     let mat = hit_material(tri, hit.bary);
     if (mat.flags.x & 3u) != 0u {
         var depth = 0u;

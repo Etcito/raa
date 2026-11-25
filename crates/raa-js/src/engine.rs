@@ -318,7 +318,7 @@ impl WebApp for EngineApp {
         let c = s
             .lit
             .prepare(gpu, &mut s.scene, &mut s.list, &mut s.tags, &mut s.slots)?;
-        crate::mesh_trace::prepare(s, 0)?;
+        crate::mesh_trace::prepare(gpu, s, 0)?;
         Ok(FrameCounters {
             instances: c.instances,
             draw_calls: c.draw_calls,

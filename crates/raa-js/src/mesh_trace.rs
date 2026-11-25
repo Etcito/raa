@@ -45,7 +45,7 @@ fn shared_handle(
     Ok(handle)
 }
 
-pub(crate) fn prepare(st: &EngineState, view: usize) -> Result<(), RaaError> {
+pub(crate) fn prepare(gpu: &raa_core::GpuContext, st: &EngineState, view: usize) -> Result<(), RaaError> {
     let Some(handle) = st.features.get::<MeshTraceHandle>() else {
         return Ok(());
     };
@@ -165,7 +165,7 @@ pub(crate) fn prepare(st: &EngineState, view: usize) -> Result<(), RaaError> {
         .map_or(1.0, raa_ibl::IblHandle::diffuse);
     handle
         .borrow_mut()
-        .update(&inputs, &materials, lit.frame_buffer(), sky_diffuse)
+        .update(gpu, &inputs, &materials, lit.frame_buffer(), sky_diffuse)
 }
 
 fn integer(desc: &JsValue, key: &str, previous: u32, max: u32) -> Result<u32, RaaError> {

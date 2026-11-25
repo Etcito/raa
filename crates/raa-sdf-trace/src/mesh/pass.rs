@@ -5,7 +5,7 @@ use std::{cell::RefCell, rc::Rc, sync::mpsc::sync_channel};
 use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx};
 
-use super::geometry::TRIANGLE_BYTES;
+use super::geometry::{GEOMETRY_HEADER_BYTES, storage_limit};
 use super::{
     COUNTER_COUNT, GRID_DIFFUSE_CAPTURE_WORDS, GRID_DIFFUSE_MAX_CAPTURE_ROWS, GridDiffuseCapture,
     GridDiffuseMode, MeshIndirectGrid, MeshTraceScene, MeshTraceSettings, MeshTraceStats,
@@ -743,7 +743,9 @@ impl DataBuffer {
             return;
         }
         if bytes.len() as u64 > self.buffer.size() {
-            let size = bytes.len().next_power_of_two() as u64;
+            let size = (bytes.len() as u64)
+                .next_power_of_two()
+                .min(storage_limit(gpu.limits()));
             self.buffer = buffer(
                 gpu.device(),
                 self.label,
@@ -760,7 +762,7 @@ impl DataBuffer {
 
 pub(super) struct GeometryBuffers {
     nodes: DataBuffer,
-    triangles: DataBuffer,
+    mesh: DataBuffer,
     materials: DataBuffer,
 }
 
@@ -768,7 +770,7 @@ impl GeometryBuffers {
     pub(super) fn new(device: &wgpu::Device) -> Self {
         Self {
             nodes: DataBuffer::new(device, "trace.mesh.nodes", 32),
-            triangles: DataBuffer::new(device, "trace.mesh.triangles", TRIANGLE_BYTES),
+            mesh: DataBuffer::new(device, "trace.mesh.indexed_geometry", GEOMETRY_HEADER_BYTES),
             materials: DataBuffer::new(device, "trace.mesh.materials", 48),
         }
     }
@@ -782,13 +784,13 @@ impl GeometryBuffers {
     ) -> [wgpu::Buffer; 3] {
         self.nodes
             .upload(gpu, geometry.revision, &geometry.node_bytes);
-        self.triangles
-            .upload(gpu, geometry.revision, &geometry.triangle_bytes);
+        self.mesh
+            .upload(gpu, geometry.revision, &geometry.mesh_bytes);
         self.materials
             .upload(gpu, material_revision, material_bytes);
         [
             self.nodes.buffer.clone(),
-            self.triangles.buffer.clone(),
+            self.mesh.buffer.clone(),
             self.materials.buffer.clone(),
         ]
     }

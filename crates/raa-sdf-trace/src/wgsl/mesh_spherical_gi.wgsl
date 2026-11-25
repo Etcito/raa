@@ -72,7 +72,7 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
     if hit.object == MISS {
         sky_rgb = spherical_sky(direction);
     } else {
-        let tri = triangles[hit.object];
+        let tri = mesh_triangle(hit.object);
         let material = hit_material(tri, hit.bary);
         let p = origin + direction * hit.t;
         let geom = normalize(cross(tri.b.position - tri.a.position, tri.c.position - tri.a.position));

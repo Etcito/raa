@@ -446,12 +446,23 @@ impl MeshTraceScene {
 
     pub fn update(
         &mut self,
+        gpu: &raa_core::GpuContext,
         inputs: &[MeshInput<'_>],
         materials: &[MeshTraceMaterial],
         frame: Buffer,
         sky_diffuse: f32,
     ) -> Result<(), RaaError> {
-        self.geometry.update(inputs)?;
+        let storage_limit = geometry::storage_limit(gpu.limits());
+        let material_size = materials.len() as u64 * 48;
+        if material_size > storage_limit {
+            return Err(RaaError::FrameGraph {
+                code: "trace.mesh_capacity",
+                message: format!(
+                    "Mesh trace materials require {material_size} bytes. The device storage binding limit is {storage_limit} bytes."
+                ),
+            });
+        }
+        self.geometry.update(inputs, storage_limit)?;
         self.frame = Some(frame);
         self.sky_diffuse = sky_diffuse;
         if materials != self.materials {
