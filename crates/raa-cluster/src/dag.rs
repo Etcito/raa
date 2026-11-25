@@ -260,13 +260,9 @@ impl GroupReduction {
         {
             return true;
         }
-        self.surface = Some(SurfaceError::new(
-            &self.original,
-            &self.reduced,
-            welded,
-            &self.new_positions,
-        ));
-        false
+        self.surface =
+            SurfaceError::new(&self.original, &self.reduced, welded, &self.new_positions);
+        self.surface.is_none()
     }
 
     fn step_reduction(&mut self, welded: &WeldedMesh, shared: &[bool]) -> bool {

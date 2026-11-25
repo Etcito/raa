@@ -214,7 +214,7 @@ fn keyed_faces(
 ) -> Vec<(Key, Face)> {
     triangles
         .iter()
-        .map(|triangle| {
+        .filter_map(|triangle| {
             let mut key = triangle.map(|corner| corner.position);
             key.sort_unstable();
             let points = triangle.map(|corner| {
@@ -226,7 +226,8 @@ fn keyed_faces(
                 };
                 DVec3::from_vec3(p)
             });
-            (key, Face::new(points))
+            let face = Face::new(points);
+            (face.normal2 > 0.0).then_some((key, face))
         })
         .collect()
 }
@@ -246,10 +247,14 @@ impl SurfaceError {
         reduced: &[Triangle],
         welded: &WeldedMesh,
         new_positions: &[Vec3],
-    ) -> Self {
+    ) -> Option<Self> {
         let snapped: Vec<_> = new_positions.iter().map(|&p| welded.snap(p)).collect();
         let original = keyed_faces(original, welded, &[]);
         let reduced = keyed_faces(reduced, welded, &snapped);
+        // A group whose triangles all collapse on the packed grid has no renderable surface.
+        if original.is_empty() || reduced.is_empty() {
+            return None;
+        }
         let changed = |source: &[(Key, Face)], target: &[(Key, Face)]| {
             let target_keys: BTreeSet<_> = target.iter().map(|(key, _)| *key).collect();
             source
@@ -259,7 +264,7 @@ impl SurfaceError {
         };
         let forward = changed(&original, &reduced);
         let backward = changed(&reduced, &original);
-        Self {
+        Some(Self {
             forward: (
                 forward,
                 Surface::new(reduced.into_iter().map(|(_, face)| face).collect()),
@@ -270,7 +275,7 @@ impl SurfaceError {
             ),
             cursor: 0,
             max2: 0.0,
-        }
+        })
     }
 
     pub(crate) fn step(&mut self) -> bool {
@@ -312,5 +317,28 @@ mod tests {
         corners.nearest(0, centroid(source), &mut center);
         assert!(center.0 > 0.0);
         assert!(corners.bound2(source, 0.0, SUBDIVISIONS) >= center.0);
+    }
+    #[test]
+    fn a_collapsed_replacement_cannot_certify_coverage() {
+        use crate::simplify::Corner;
+        let mesh = WeldedMesh {
+            positions: vec![Vec3::ZERO, Vec3::X, Vec3::Z],
+            attributes: Vec::new(),
+            triangles: Vec::new(),
+            origin: Vec3::ZERO,
+            step: 1.0,
+            uv_origin: [0.0; 2],
+            uv_step: [1.0; 2],
+        };
+        let triangle = |positions: [u32; 3]| {
+            positions.map(|position| Corner {
+                position,
+                attribute: 0,
+            })
+        };
+        let original = [triangle([0, 1, 2])];
+        let reduced = [triangle([0, 1, NEW_POSITION])];
+        let almost_on_edge = [Vec3::new(1.0, 0.0, 0.1)];
+        assert!(SurfaceError::new(&original, &reduced, &mesh, &almost_on_edge).is_none());
     }
 }
