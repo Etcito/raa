@@ -669,8 +669,8 @@ fn raa_spherical_front_add(acc: ptr<function, RaaSphericalFront>, entry: u32, ke
 // probes left inside geometry with a near clip count once the capture keeps them). It
 // evaluates ~2x the probes of the corner lookup (gi.spherical ~1.6-1.8 vs ~0.8 ms). Normalisation is
 // capped at 1 / (0.05 x the front mass) so a receiver whose front probes are all occluded
-// darkens smoothly; where no published probe is in front at all (not captured yet, or
-// none within the kernel) the corner lookup takes over continuously.
+// darkens smoothly; only where no published probe is in front at all (not captured yet, or
+// none within the kernel) does the legacy ambient take over, continuously.
 fn raa_spherical_diffuse_front(p: vec3<f32>, normal: vec3<f32>,
                               cell: RaaSphericalCoordinate) -> vec4<f32> {
     let grid = cell.desc;
@@ -739,16 +739,18 @@ fn raa_spherical_diffuse_front(p: vec3<f32>, normal: vec3<f32>,
     let intensity = bitcast<f32>(raa_spherical_data[0].w);
     let last = bitcast<vec3<f32>>(raa_spherical_data[4u + grid.y - 1u].xyz);
     let edge = 1.0 - smoothstep(last.y, last.z, cell.radius);
-    var value = vec4<f32>(0.0);
+    // The side rule holds everywhere: the blend toward the legacy flat ambient follows only the
+    // mass of published probes IN FRONT (fallback = no published probe in front at all), and
+    // there is no corner fallback. Before (sphS), the blend followed the coverage ratio of all
+    // published cells, which invalid probes (inside walls or pillars) lowered: on the V3 back
+    // wall 60% of the kernel was invalid, blend 0.63, so 37% of the flat ambient (alone 87/255
+    // on that wall, DDGI 25) lit it although its front probes said dark (sphS2 trace).
+    let fallback = 1.0 - smoothstep(0.0, 0.1, acc.front);
+    var value = vec4<f32>(0.0, 0.0, 0.0, (1.0 - fallback) * edge);
     if acc.total > 0.0 {
-        value = vec4<f32>(intensity * acc.sum / max(acc.total, 0.05 * acc.front),
-            smoothstep(0.0, 0.25, acc.coverage / max(acc.nominal, 1e-6)) * edge);
+        value = vec4<f32>(intensity * acc.sum / max(acc.total, 0.05 * acc.front), value.w);
     }
-    let fallback = 1.0 - smoothstep(0.02, 0.15, acc.front);
-    var corners = vec4<f32>(0.0);
-    if fallback > 0.0 {
-        corners = raa_spherical_diffuse_corners(p, normal, cell);
-    }
+    let corners = vec4<f32>(0.0);
     if raa_spherical_tracing {
         raa_spherical_trace(0u, vec4<u32>(0x7ace0001u, raa_spherical_trace_count,
             bitcast<u32>(fallback), bitcast<u32>(acc.front)));
@@ -760,9 +762,6 @@ fn raa_spherical_diffuse_front(p: vec3<f32>, normal: vec3<f32>,
         raa_spherical_trace(6u, bitcast<vec4<u32>>(vec4<f32>(at, kernel)));
         raa_spherical_trace(7u, raa_spherical_data[0]);
         if raa_spherical_trace_best_w > 0.0 { raa_spherical_trace_patches(raa_spherical_trace_best, p, normal); }
-    }
-    if fallback > 0.0 {
-        value = mix(value, corners, fallback);
     }
     return value;
 }
