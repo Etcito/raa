@@ -449,45 +449,78 @@ fn raa_spherical_top(p: vec3<f32>, n: vec3<f32>, cell: RaaSphericalCoordinate) -
     return top;
 }
 
-// Physical irradiance / pi stays available while forward displays a debug overlay.
-// Only the two strongest probes are evaluated with parallax. Each keeps its weight
-// minus the third strongest weight, so a probe enters or leaves the evaluated set at
-// zero weight and the selection never shows a seam. The support weights already
-// include visibility, so occluded probes do not leak.
+// Physical irradiance / pi of the grid at p: every published corner probe of the
+// trilinear cell (eight, or four inside one shell) contributes its parallax irradiance
+// weighted by trilinear x facing x Chebyshev visibility x fade/validity, normalised by
+// the total weight (DDGI-style), so the result is continuous across cell and shell
+// boundaries; a probe enters and leaves at zero trilinear weight. With poor coverage the
+// centre probe and the shell's 3x3 ring join with a distance weight. It runs in the
+// half-resolution screen resolve, never in forward.
 fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
                            cell: RaaSphericalCoordinate) -> vec4<f32> {
     if cell.desc.x == 0u { return vec4<f32>(0.0); }
-    let top = raa_spherical_top(p, normal, cell);
     let mask = cell.desc.z;
-    let a = top.w0 - top.w2;
-    let b = top.w1 - top.w2;
-    if a <= 1e-7 { return vec4<f32>(0.0); }
-    // Far receivers use the six-face irradiance (no parallax), blended in over
-    // [range, 1.5 range] from the anchor; only that band pays for both.
+    // Far receivers may use the six-face irradiance (no parallax), see parallaxRange.
     let range = bitcast<f32>(raa_spherical_data[3].y);
     let far = select(0.0, smoothstep(range, 1.5 * range, cell.radius), range > 0.0);
+    let interpolation = raa_spherical_interpolation(cell);
     var sum = vec3<f32>(0.0);
-    if far < 1.0 {
-        var near = a * raa_spherical_probe_irradiance(top.e0, mask, p, normal);
-        if b > 1e-7 {
-            near += b * raa_spherical_probe_irradiance(top.e1, mask, p, normal);
-        }
-        sum += (1.0 - far) * near;
+    var total = 0.0;
+    var coverage = 0.0;
+    var count = 0u;
+    for (var i = 0u; i < select(8u, 4u, interpolation.shell0 == interpolation.shell1); i++) {
+        let corner = raa_spherical_corner(i);
+        let entry = raa_spherical_find(raa_spherical_corner_key(cell, interpolation, corner), mask);
+        if !raa_spherical_published(entry) { continue; }
+        let f = select(1.0 - interpolation.fraction, interpolation.fraction, corner);
+        let trilinear = max(f.x * f.y * f.z, 0.001);
+        let gates = raa_spherical_support_gates(entry, p, normal);
+        coverage += trilinear * gates.z;
+        let w = trilinear * gates.x * gates.y * gates.z;
+        if w <= 1e-6 { continue; }
+        count += 1u;
+        sum += w * raa_spherical_probe_value(entry, mask, p, normal, far);
+        total += w;
     }
-    if far > 0.0 {
-        var cube = a * raa_spherical_probe_cube(top.e0, mask, normal);
-        if b > 1e-7 {
-            cube += b * raa_spherical_probe_cube(top.e1, mask, normal);
+    if coverage < 0.5 && count < 2u {
+        let center = vec2<i32>(floor(cell.angular));
+        for (var k = 0u; k < 10u; k++) {
+            // k == 0 visits the centre probe, then the 3x3 columns of this shell.
+            let m = i32(max(k, 1u) - 1u);
+            let ij = center + vec2<i32>(m % 3 - 1, m / 3 - 1);
+            let key = select(raa_spherical_key(cell.shell, cell.face, ij, cell.desc.x),
+                raa_spherical_key(RAA_SPHERICAL_CENTER, 0u, vec2<i32>(0), cell.desc.x), k == 0u);
+            let entry = raa_spherical_find(key, mask);
+            if !raa_spherical_published(entry) { continue; }
+            let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
+            let offset = probe.xyz - p;
+            let spacing2 = probe.w * probe.w;
+            let distance_weight = 0.25 * spacing2 / (dot(offset, offset) + spacing2);
+            let gates = raa_spherical_support_gates(entry, p, normal);
+            coverage += distance_weight * gates.z;
+            let w = distance_weight * gates.x * gates.y * gates.z;
+            if w <= 1e-6 { continue; }
+            sum += w * raa_spherical_probe_value(entry, mask, p, normal, far);
+            total += w;
         }
-        sum += far * cube;
     }
+    if total <= 1e-7 { return vec4<f32>(0.0); }
     // Coverage ignores visibility so an occluded receiver still uses the probes
     // rather than the legacy ambient; it fades out over the outer half of the last shell.
     let last = bitcast<vec3<f32>>(raa_spherical_data[4u + cell.desc.y - 1u].xyz);
     let edge = 1.0 - smoothstep(last.y, last.z, cell.radius);
-    let blend = smoothstep(0.0, 0.25, top.coverage) * edge;
+    let blend = smoothstep(0.0, 0.25, coverage) * edge;
     let intensity = bitcast<f32>(raa_spherical_data[0].w);
-    return vec4<f32>(intensity * sum / (a + max(b, 0.0)), blend);
+    return vec4<f32>(intensity * sum / total, blend);
+}
+
+// One probe: parallax patches near, six-face irradiance beyond parallaxRange.
+fn raa_spherical_probe_value(entry: u32, mask: u32, p: vec3<f32>, normal: vec3<f32>,
+                             far: f32) -> vec3<f32> {
+    var value = vec3<f32>(0.0);
+    if far < 1.0 { value += (1.0 - far) * raa_spherical_probe_irradiance(entry, mask, p, normal); }
+    if far > 0.0 { value += far * raa_spherical_probe_cube(entry, mask, normal); }
+    return value;
 }
 
 struct RaaSphericalInterpolation {
