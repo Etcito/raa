@@ -19,6 +19,8 @@
 //! texture added with `mips: false`, sampled at level 0 only; the shader uses `abs(w)`.
 //! Id 0 and removed ids stay all zero.
 
+use std::borrow::Cow;
+
 use raa_core::{GpuContext, RaaError};
 
 /// Width and height of the atlas texture in texels.
@@ -109,7 +111,7 @@ pub enum TexelData<'a> {
     Float(&'a [f32]),
 }
 
-impl TexelData<'_> {
+impl<'a> TexelData<'a> {
     fn len(&self) -> usize {
         match self {
             TexelData::Rgba8(d) => d.len(),
@@ -117,10 +119,10 @@ impl TexelData<'_> {
         }
     }
 
-    fn to_rgba8(self) -> Vec<u8> {
+    fn into_rgba8(self) -> Cow<'a, [u8]> {
         match self {
-            TexelData::Rgba8(d) => d.to_vec(),
-            TexelData::Float(d) => d.iter().map(|&x| quantize(x)).collect(),
+            TexelData::Rgba8(d) => Cow::Borrowed(d),
+            TexelData::Float(d) => Cow::Owned(d.iter().map(|&x| quantize(x)).collect()),
         }
     }
 }
@@ -429,7 +431,7 @@ impl TextureAtlas {
             self.allocated = true;
         }
         let queue = gpu.queue();
-        let mut level = data.to_rgba8();
+        let mut level = data.into_rgba8();
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -481,7 +483,7 @@ impl TextureAtlas {
                         depth_or_array_layers: 1,
                     },
                 );
-                (level, pw, ph) = (next, lw, lh);
+                (level, pw, ph) = (Cow::Owned(next), lw, lh);
             }
         }
         let offset = u64::from(id) * TEXTURE_RECT_SIZE as u64;
