@@ -140,13 +140,23 @@ pub(crate) mod web {
         model: Option<AreaGraphModel>,
         scene_size: (u32, u32),
     ) -> Result<SetResult, RaaError> {
-        use crate::api::m32_render_graph::web::{graph_model, remember_graph_model, graph_state, validate_generated_graph};
+        use crate::api::m32_render_graph::web::{
+            graph_model, graph_state, remember_graph_model, validate_generated_graph,
+        };
         let graph = graph_state(st)?;
         let selection = match select_frozen(name, &graph.catalog) {
             Ok(selection) => selection,
-            Err(issues) => return Ok(SetResult { ok: false, issues, rebuilt: 0 }),
+            Err(issues) => {
+                return Ok(SetResult {
+                    ok: false,
+                    issues,
+                    rebuilt: 0,
+                });
+            }
         };
-        if let Err(result) = validate_generated_graph(st, &selection.doc) { return Ok(result); }
+        if let Err(result) = validate_generated_graph(st, &selection.doc) {
+            return Ok(result);
+        }
         let (selected, real) = match graph_model(st, &selection.doc, scene_size) {
             Ok(Some((selected, real))) => (Some(selected), Some(real)),
             Ok(None) => (None, None),
@@ -155,7 +165,9 @@ pub(crate) mod web {
         let result = with_handles(st, gpu, |executor, _, handles, _| {
             executor.set_plan_with_models(selection.plan, Some(selection.doc), handles, model, real)
         })?;
-        if result.ok { remember_graph_model(st, selected)?; }
+        if result.ok {
+            remember_graph_model(st, selected)?;
+        }
         Ok(result)
     }
 
