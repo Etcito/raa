@@ -153,3 +153,62 @@ fn write_instance_record_matches_the_s1_layout() {
     assert_eq!(f32_at(&out, 48), 1.0);
     assert!(out[124..128].iter().all(|&b| b == 0));
 }
+
+#[test]
+fn sync_keeps_records_exact_when_it_skips_unchanged_slots() {
+    let (mut list, tags, slots) = synced_list(40);
+    let mut store = InstanceStore::new(40);
+    let mut extras = HashMap::new();
+    store.sync(&list, &tags, &slots, &extras, &|_| 0);
+    store.clear_dirty();
+
+    // A rotated and scaled model: the skipped-or-rewritten record must equal a fresh encoding,
+    // normal matrix included.
+    let world = Mat4::from_trs(
+        Vec3::new(1.0, 2.0, 3.0),
+        Quat::from_axis_angle(Vec3::Y, 0.7),
+        Vec3::new(2.0, 1.0, 3.0),
+    );
+    list.items[7].world = world;
+    list.items[8].material = MaterialId(5);
+    store.sync(&list, &tags, &slots, &extras, &|tag| {
+        if tag == 9 { 4 } else { 0 }
+    });
+    for (slot, material, palette) in [(7u32, 1u32, 0u32), (8, 5, 0), (9, 1, 4)] {
+        let mut expected = [0u8; INSTANCE_GPU_SIZE];
+        let item = &list.items[slot as usize];
+        write_instance_record(&mut expected, &item.world, material, slot, palette);
+        assert_eq!(store.record(slot).unwrap(), &expected[..], "slot {slot}");
+    }
+    assert_eq!(ranges(&store, StoreKind::Instances), vec![0..PAGE]);
+    store.clear_dirty();
+
+    // An extra written outside sync is replaced by the next sync's extra for that tag.
+    let squashed = InstanceExtra {
+        tint: [0.5, 1.0, 1.0, 1.0],
+        ..InstanceExtra::default()
+    };
+    assert!(store.write_extra(3, &squashed));
+    store.clear_dirty();
+    store.sync(&list, &tags, &slots, &extras, &|tag| {
+        if tag == 9 { 4 } else { 0 }
+    });
+    assert_eq!(ranges(&store, StoreKind::Extras), vec![0..PAGE]);
+    let mut default_bytes = Vec::new();
+    InstanceExtra::default().write_gpu(&mut default_bytes);
+    assert_eq!(&store.extra_bytes()[3 * 128..4 * 128], &default_bytes[..]);
+    store.clear_dirty();
+
+    // A changed extra of a tag dirties its page; an unchanged second sync dirties nothing.
+    extras.insert(12, squashed);
+    store.sync(&list, &tags, &slots, &extras, &|tag| {
+        if tag == 9 { 4 } else { 0 }
+    });
+    assert_eq!(ranges(&store, StoreKind::Extras), vec![0..PAGE]);
+    store.clear_dirty();
+    store.sync(&list, &tags, &slots, &extras, &|tag| {
+        if tag == 9 { 4 } else { 0 }
+    });
+    assert!(ranges(&store, StoreKind::Instances).is_empty());
+    assert!(ranges(&store, StoreKind::Extras).is_empty());
+}

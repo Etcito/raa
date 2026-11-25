@@ -70,6 +70,9 @@ pub struct InstanceStore {
     previous: PreviousInstances,
     live_slots: Vec<bool>,
     live_scratch: Vec<bool>,
+    /// The extra last written to each slot by [`write_extra`](Self::write_extra): an equal
+    /// extra leaves the slot clean without encoding it again.
+    written_extras: Vec<Option<InstanceExtra>>,
 }
 
 impl InstanceStore {
@@ -88,6 +91,7 @@ impl InstanceStore {
             previous: PreviousInstances::new(capacity),
             live_slots: vec![false; pages * PAGE_RECORDS],
             live_scratch: vec![false; pages * PAGE_RECORDS],
+            written_extras: vec![None; pages * PAGE_RECORDS],
         }
     }
 
@@ -122,6 +126,8 @@ impl InstanceStore {
             .resize(pages_for(capacity) * PAGE_RECORDS, false);
         self.live_scratch
             .resize(pages_for(capacity) * PAGE_RECORDS, false);
+        self.written_extras
+            .resize(pages_for(capacity) * PAGE_RECORDS, None);
         true
     }
 
@@ -144,6 +150,12 @@ impl InstanceStore {
         let Some(offset) = self.slot_offset(slot, INSTANCE_EXTRA_GPU_SIZE) else {
             return false;
         };
+        if let Some(written) = self.written_extras.get_mut(slot as usize) {
+            if *written == Some(*extra) {
+                return false;
+            }
+            *written = Some(*extra);
+        }
         self.scratch.clear();
         extra.write_gpu(&mut self.scratch);
         let end = offset + INSTANCE_EXTRA_GPU_SIZE;
@@ -153,6 +165,31 @@ impl InstanceStore {
         self.extras[offset..end].copy_from_slice(&self.scratch);
         self.dirty_extras[slot as usize / PAGE_RECORDS] = true;
         true
+    }
+
+    /// Whether live `slot` (written by the previous [`sync`](Self::sync)) already holds the
+    /// record of (`world`, `material`, `tag`, `palette_base`): the stored model matrix and
+    /// trailing words equal, so its normal matrix (a function of the model) does too.
+    fn live_record_matches(
+        &self,
+        slot: u32,
+        world: &Mat4,
+        material: u32,
+        tag: u32,
+        palette_base: u32,
+    ) -> bool {
+        if !self.live_slots.get(slot as usize).copied().unwrap_or(false) {
+            return false;
+        }
+        let Some(stored) = self.record(slot) else {
+            return false;
+        };
+        let mut model = [0u8; 64];
+        world.write_le_bytes(&mut model);
+        stored[0..64] == model
+            && stored[112..116] == material.to_le_bytes()
+            && stored[116..120] == tag.to_le_bytes()
+            && stored[120..124] == palette_base.to_le_bytes()
     }
 
     /// The 128-byte instance record of `slot`, or `None` past the capacity.
@@ -199,14 +236,13 @@ impl InstanceStore {
                 continue;
             };
             let tag = tags.get(i).copied().unwrap_or(0);
-            write_instance_record(
-                &mut record,
-                &item.world,
-                item.material.0,
-                tag,
-                palette_base(tag),
-            );
-            self.write(slot, &record);
+            let palette = palette_base(tag);
+            // A slot this sync wrote last frame with the same model matrix, material, tag and
+            // palette base holds this exact record: skip the normal matrix and the encoding.
+            if !self.live_record_matches(slot, &item.world, item.material.0, tag, palette) {
+                write_instance_record(&mut record, &item.world, item.material.0, tag, palette);
+                self.write(slot, &record);
+            }
             if (slot as usize) < self.live_scratch.len() {
                 self.live_scratch[slot as usize] = true;
                 self.previous.stage(slot, &item.world, true);
