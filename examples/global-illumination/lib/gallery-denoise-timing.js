@@ -43,6 +43,7 @@ async function timeArm(context, graph, tape, head, size, arm) {
       }
     }
     const rows = [...samples.values()];
+    arm.facts = student.facts;
     if (rows.length < 8) throw new Error('Insufficient timestamp readbacks for ' + arm.name);
     const ms = rows.map(row => row.ms);
     const perPass = Object.fromEntries(timed.map(name => [name, percentile(rows.map(row => row.passes[name]), 0.5)]));
@@ -67,10 +68,14 @@ export async function measureGalleryDenoiseTiming(context, { buildId, size = [19
       { name: 'analytic', denoise: analytic }, ...[1, 2].map(budget => ({ name: 'extra-rays', budget }))],
   };
   const results = [];
+  let facts;
   for (const head of ['area', 'reflection']) {
     for (const arm of arms[head]) {
-      results.push({ head, ...await timeArm(context, graph, tape, head, size, arm) });
+      const row = await timeArm(context, graph, tape, head, size, arm);
+      facts ??= row.facts;
+      delete row.facts;
+      results.push({ head, ...row });
     }
   }
-  return { json: { source: { buildId }, size, trajectory, results }, files: [] };
+  return { json: { source: { buildId, facts }, size, trajectory, results }, files: [] };
 }
