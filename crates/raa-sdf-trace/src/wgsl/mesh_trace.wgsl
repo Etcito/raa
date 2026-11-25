@@ -131,12 +131,18 @@ fn closest(ray: Ray, limit: f32, any_hit: bool) -> Hit {
     loop {
         if count == 0u { break; }
         count--;
-        let node = nodes[stack[count]];
+        // The median builder cycles through X, Y and Z. Carry its split axis
+        // in the top two bits so the stack stays one word per node.
+        let entry = stack[count];
+        let axis = entry >> 30u;
+        let node = nodes[entry & 0x3fffffffu];
         let interval = trace_interval(node.lo, node.hi, ray.origin, ray.direction, result.t);
         if interval.x > interval.y { continue; }
         if node.count == 0u {
-            stack[count] = node.left;
-            stack[count + 1u] = node.left + 1u;
+            let next_axis = select(axis + 1u, 0u, axis == 2u) << 30u;
+            let near_left = ray.direction[axis] > 0.0;
+            stack[count] = next_axis | (node.left + u32(near_left));
+            stack[count + 1u] = next_axis | (node.left + u32(!near_left));
             count += 2u;
             continue;
         }
@@ -155,7 +161,10 @@ fn closest(ray: Ray, limit: f32, any_hit: bool) -> Hit {
             let v = dot(ray.direction, q) / det;
             if v < 0.0 || u + v > 1.0 { continue; }
             let t = dot(edge2, q) / det;
-            if t >= EPS && t < result.t {
+            // At identical depths the original right-first traversal preferred the
+            // later BVH leaf, then its first matching triangle.
+            let preferred_tie = t == result.t && result.object != MISS && node.left > result.object;
+            if t >= EPS && (t < result.t || preferred_tie) {
                 result = Hit(t, i, vec2<f32>(u, v));
                 if any_hit { return result; }
             }
