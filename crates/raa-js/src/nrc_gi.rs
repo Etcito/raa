@@ -36,6 +36,7 @@ impl Engine {
             put(&result, "active", state.active().into());
             let s = state.settings;
             put(&result, "hiddenLayers", s.hidden_layers.into());
+            put(&result, "frequencies", s.frequencies.into());
             put(&result, "trainSamples", s.train_samples.into());
             put(&result, "train", s.train.into());
             put(&result, "bounces", s.bounces.into());

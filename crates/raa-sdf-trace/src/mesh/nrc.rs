@@ -36,7 +36,7 @@ const MAX_BATCH: u32 = 16_384;
 const MIN_SAMPLES: u32 = 1024;
 const MAX_STEPS: u32 = 4;
 const CHUNK: u32 = 256;
-const FREQUENCIES: u32 = 12;
+const MAX_FREQUENCIES: u32 = 12;
 const CHECKPOINT_MAGIC: u32 = 0x3143_524e; // "NRC1"
 const CHECKPOINT_VERSION: u32 = 1;
 const CHECKPOINT_HEADER: usize = 32;
@@ -48,6 +48,8 @@ pub struct NrcSettings {
     pub enabled: bool,
     /// Hidden layers of 64 neurons (the paper uses 5).
     pub hidden_layers: u32,
+    /// Triangle-wave octaves of the position encoding per axis (the paper uses 12).
+    pub frequencies: u32,
     /// Training samples per frame, a power of two; above 16 384 several Adam steps run.
     pub train_samples: u32,
     pub learning_rate: f32,
@@ -68,6 +70,7 @@ impl Default for NrcSettings {
         Self {
             enabled: false,
             hidden_layers: 3,
+            frequencies: 12,
             train_samples: 16_384,
             learning_rate: 2e-3,
             ema: 0.99,
@@ -82,6 +85,7 @@ impl Default for NrcSettings {
 impl NrcSettings {
     pub fn validate(self) -> Result<Self, RaaError> {
         let ok = (1..=MAX_HIDDEN).contains(&self.hidden_layers)
+            && (1..=MAX_FREQUENCIES).contains(&self.frequencies)
             && self.train_samples.is_power_of_two()
             && (MIN_SAMPLES..=MAX_BATCH * MAX_STEPS).contains(&self.train_samples)
             && self.learning_rate.is_finite()
@@ -95,7 +99,7 @@ impl NrcSettings {
             return Err(RaaError::FrameGraph {
                 code: "gi.nrc.invalid_settings",
                 message: format!(
-                    "expected 1-{MAX_HIDDEN} hidden layers, a power-of-two sample count in \
+                    "expected 1-{MAX_HIDDEN} hidden layers, 1-{MAX_FREQUENCIES} frequencies, a power-of-two sample count in \
                      [{MIN_SAMPLES}, {}], a learning rate in [0, 0.1], an EMA in [0, 0.9999], \
                      a divisor of 1, 2, 4 or 8, 0 or 1 bounce and a temporal blend in (0, 1]",
                     MAX_BATCH * MAX_STEPS
@@ -150,6 +154,7 @@ pub struct NrcState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Checkpoint {
     pub hidden_layers: u32,
+    pub frequencies: u32,
     pub steps: u32,
     /// Trained weights, their moving average, first and second Adam moments.
     pub arrays: [Vec<f32>; 4],
@@ -157,7 +162,7 @@ pub struct Checkpoint {
 
 impl Checkpoint {
     /// Xavier-uniform initial weights from a fixed seed, zero moments.
-    pub fn initial(hidden: u32) -> Self {
+    pub fn initial(hidden: u32, frequencies: u32) -> Self {
         let count = (weight_rows(hidden) * 4) as usize;
         let mut state = 0x1234_5678_9abc_def1u64;
         let weights: Vec<f32> = (0..count)
@@ -177,6 +182,7 @@ impl Checkpoint {
             .collect();
         Self {
             hidden_layers: hidden,
+            frequencies,
             steps: 0,
             arrays: [weights.clone(), weights, vec![0.0; count], vec![0.0; count]],
         }
@@ -195,7 +201,10 @@ impl Checkpoint {
             return Err(error("Not a version 1 radiance cache checkpoint."));
         }
         let hidden = word(3);
-        if word(2) != WIDTH || !(1..=MAX_HIDDEN).contains(&hidden) || word(4) != FREQUENCIES {
+        if word(2) != WIDTH
+            || !(1..=MAX_HIDDEN).contains(&hidden)
+            || !(1..=MAX_FREQUENCIES).contains(&word(4))
+        {
             return Err(error(
                 "The checkpoint network shape is not supported by this engine.",
             ));
@@ -219,6 +228,7 @@ impl Checkpoint {
         }
         Ok(Self {
             hidden_layers: hidden,
+            frequencies: word(4),
             steps: word(5),
             arrays,
         })
@@ -231,7 +241,7 @@ impl Checkpoint {
             CHECKPOINT_VERSION,
             WIDTH,
             self.hidden_layers,
-            FREQUENCIES,
+            self.frequencies,
             self.steps,
             0,
             0,
@@ -276,12 +286,17 @@ impl NrcState {
     /// have the node's hidden layer count.
     pub fn load_checkpoint(&mut self, bytes: &[u8]) -> Result<(), RaaError> {
         let checkpoint = Checkpoint::decode(bytes)?;
-        if checkpoint.hidden_layers != self.settings.hidden_layers {
+        if checkpoint.hidden_layers != self.settings.hidden_layers
+            || checkpoint.frequencies != self.settings.frequencies
+        {
             return Err(RaaError::FrameGraph {
                 code: "gi.nrc.checkpoint",
                 message: format!(
-                    "The checkpoint has {} hidden layers and the node {}.",
-                    checkpoint.hidden_layers, self.settings.hidden_layers
+                    "The checkpoint has {} hidden layers and {} frequencies, the node {} and {}.",
+                    checkpoint.hidden_layers,
+                    checkpoint.frequencies,
+                    self.settings.hidden_layers,
+                    self.settings.frequencies
                 ),
             });
         }
@@ -414,18 +429,18 @@ impl FeaturePass for NrcPass {
         let rebuilt = self
             .gpu
             .as_ref()
-            .is_none_or(|gpu| gpu.hidden != settings.hidden_layers || gpu.batch != batch);
+            .is_none_or(|gpu| !gpu.shaped(&settings) || gpu.batch != batch);
         if rebuilt {
             // A new batch size keeps the learned weights; a new depth cannot.
-            let kept = self
-                .gpu
-                .take()
-                .filter(|gpu| gpu.hidden == settings.hidden_layers);
-            let mut gpu = NrcGpu::new(ctx.gpu, settings.hidden_layers, batch);
+            let kept = self.gpu.take().filter(|gpu| gpu.shaped(&settings));
+            let mut gpu = NrcGpu::new(ctx.gpu, settings.hidden_layers, settings.frequencies, batch);
             match kept {
                 Some(old) => gpu.adopt(&old),
                 None => {
-                    gpu.upload(ctx.gpu, &Checkpoint::initial(settings.hidden_layers));
+                    gpu.upload(
+                        ctx.gpu,
+                        &Checkpoint::initial(settings.hidden_layers, settings.frequencies),
+                    );
                     self.steps = 0;
                 }
             }
@@ -433,12 +448,12 @@ impl FeaturePass for NrcPass {
         }
         let gpu = self.gpu.as_mut().expect("radiance cache buffers");
         if let Some(checkpoint) = load {
-            if checkpoint.hidden_layers == gpu.hidden {
+            if checkpoint.hidden_layers == gpu.hidden && checkpoint.frequencies == gpu.frequencies {
                 gpu.upload(ctx.gpu, &checkpoint);
                 self.steps = u64::from(checkpoint.steps);
             }
         } else if reset {
-            gpu.upload(ctx.gpu, &Checkpoint::initial(gpu.hidden));
+            gpu.upload(ctx.gpu, &Checkpoint::initial(gpu.hidden, gpu.frequencies));
             self.steps = 0;
         }
 
@@ -718,6 +733,7 @@ impl FeaturePass for NrcPass {
             }
             let (send, receive) = sync_channel(1);
             let hidden = gpu.hidden;
+            let frequencies = gpu.frequencies;
             let mapped = readback.clone();
             ctx.encoder.map_buffer_on_submit(
                 &readback,
@@ -728,6 +744,7 @@ impl FeaturePass for NrcPass {
                         let data = mapped.slice(0..4 * bytes).get_mapped_range().ok()?;
                         let mut encoded = Checkpoint {
                             hidden_layers: hidden,
+                            frequencies,
                             steps,
                             arrays: Default::default(),
                         }
@@ -817,6 +834,7 @@ impl NrcImages {
 
 struct NrcGpu {
     hidden: u32,
+    frequencies: u32,
     batch: u32,
     paths: wgpu::ComputePipeline,
     render: wgpu::ComputePipeline,
@@ -840,7 +858,11 @@ struct NrcGpu {
 }
 
 impl NrcGpu {
-    fn new(gpu: &GpuContext, hidden: u32, batch: u32) -> Self {
+    fn shaped(&self, settings: &NrcSettings) -> bool {
+        self.hidden == settings.hidden_layers && self.frequencies == settings.frequencies
+    }
+
+    fn new(gpu: &GpuContext, hidden: u32, frequencies: u32, batch: u32) -> Self {
         let device = gpu.device();
         let pipeline = |label: &'static str, source: String, entry: &'static str| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -870,20 +892,33 @@ impl NrcGpu {
         let batch_bytes = u64::from(batch) * layers * 16 * 16;
         Self {
             hidden,
+            frequencies,
             batch,
-            paths: pipeline("gi.nrc.paths", nrc_mesh_module(hidden), "nrc_paths"),
-            render: pipeline("gi.nrc.render", nrc_mesh_module(hidden), "nrc_render"),
+            paths: pipeline(
+                "gi.nrc.paths",
+                nrc_mesh_module(hidden, frequencies),
+                "nrc_paths",
+            ),
+            render: pipeline(
+                "gi.nrc.render",
+                nrc_mesh_module(hidden, frequencies),
+                "nrc_render",
+            ),
             forward_backward: pipeline(
                 "gi.nrc.forward-backward",
-                nrc_train_module(hidden, batch),
+                nrc_train_module(hidden, frequencies, batch),
                 "nrc_forward_backward",
             ),
             gradient: pipeline(
                 "gi.nrc.gradient",
-                nrc_train_module(hidden, batch),
+                nrc_train_module(hidden, frequencies, batch),
                 "nrc_gradient",
             ),
-            adam: pipeline("gi.nrc.adam", nrc_adam_module(hidden, batch), "nrc_adam"),
+            adam: pipeline(
+                "gi.nrc.adam",
+                nrc_adam_module(hidden, frequencies, batch),
+                "nrc_adam",
+            ),
             resolve: pipeline("gi.nrc.resolve", NRC_RESOLVE_WGSL.into(), "nrc_resolve"),
             trained: storage("gi.nrc.trained", rows * 16),
             average: storage("gi.nrc.average", rows * 16),
@@ -948,10 +983,10 @@ const NRC_MLP_WGSL: &str = include_str!("../wgsl/nrc_mlp.wgsl");
 const NRC_RESOLVE_WGSL: &str = include_str!("../wgsl/nrc_resolve.wgsl");
 const INCLUDE_MLP: &str = "//!include nrc_mlp";
 
-fn constants(hidden: u32, batch: u32) -> String {
+fn constants(hidden: u32, frequencies: u32, batch: u32) -> String {
     format!(
         "const NRC_HIDDEN: u32 = {hidden}u;\nconst NRC_LAYERS: u32 = {}u;\n\
-         const NRC_FREQS: u32 = {FREQUENCIES}u;\nconst NRC_W4: u32 = {}u;\n\
+         const NRC_FREQS: u32 = {frequencies}u;\nconst NRC_W4: u32 = {}u;\n\
          const NRC_BATCH: u32 = {batch}u;\nconst NRC_CHUNK: u32 = {CHUNK}u;\n\
          const NRC_CHUNKS: u32 = {}u;\n",
         hidden + 1,
@@ -960,27 +995,27 @@ fn constants(hidden: u32, batch: u32) -> String {
     )
 }
 
-pub(crate) fn nrc_mesh_module(hidden: u32) -> String {
+pub(crate) fn nrc_mesh_module(hidden: u32, frequencies: u32) -> String {
     format!(
         "{}\n{}\n{}",
         crate::wgsl::mesh_trace_module(),
-        constants(hidden, MAX_BATCH),
+        constants(hidden, frequencies, MAX_BATCH),
         include_str!("../wgsl/mesh_nrc.wgsl").replace(INCLUDE_MLP, NRC_MLP_WGSL),
     )
 }
 
-pub(crate) fn nrc_train_module(hidden: u32, batch: u32) -> String {
+pub(crate) fn nrc_train_module(hidden: u32, frequencies: u32, batch: u32) -> String {
     format!(
         "{}\n{}",
-        constants(hidden, batch),
+        constants(hidden, frequencies, batch),
         include_str!("../wgsl/nrc_train.wgsl").replace(INCLUDE_MLP, NRC_MLP_WGSL),
     )
 }
 
-pub(crate) fn nrc_adam_module(hidden: u32, batch: u32) -> String {
+pub(crate) fn nrc_adam_module(hidden: u32, frequencies: u32, batch: u32) -> String {
     format!(
         "{}\n{}",
-        constants(hidden, batch),
+        constants(hidden, frequencies, batch),
         include_str!("../wgsl/nrc_adam.wgsl")
     )
 }
@@ -1003,16 +1038,16 @@ mod tests {
     #[test]
     fn nrc_modules_validate_for_every_depth() {
         for hidden in 1..=MAX_HIDDEN {
-            validate(&nrc_mesh_module(hidden));
-            validate(&nrc_train_module(hidden, 4096));
-            validate(&nrc_adam_module(hidden, MAX_BATCH));
+            validate(&nrc_mesh_module(hidden, 12));
+            validate(&nrc_train_module(hidden, 8, 4096));
+            validate(&nrc_adam_module(hidden, 12, MAX_BATCH));
         }
         validate(NRC_RESOLVE_WGSL);
     }
 
     #[test]
     fn checkpoint_round_trips_and_rejects_bad_input() {
-        let mut checkpoint = Checkpoint::initial(3);
+        let mut checkpoint = Checkpoint::initial(3, 12);
         checkpoint.steps = 77;
         checkpoint.arrays[2][5] = 0.25;
         let bytes = checkpoint.encode();
@@ -1029,8 +1064,8 @@ mod tests {
 
     #[test]
     fn initial_weights_are_bounded_and_deterministic() {
-        let a = Checkpoint::initial(5);
-        assert_eq!(a, Checkpoint::initial(5));
+        let a = Checkpoint::initial(5, 12);
+        assert_eq!(a, Checkpoint::initial(5, 12));
         assert_eq!(a.arrays[0].len(), (5 * 4096 + 192) as usize);
         let bound = (6.0f32 / 67.0).sqrt();
         assert!(a.arrays[0].iter().all(|w| w.abs() <= bound));

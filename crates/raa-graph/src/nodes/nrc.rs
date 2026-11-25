@@ -102,6 +102,15 @@ impl NodeFamily for Nrc {
                 Some(1.0),
                 Rebuild::Resources,
             ),
+            param(
+                "frequencies",
+                "Position frequencies",
+                ParamKind::Int,
+                ParamValue::Int(i64::from(d.frequencies)),
+                Some((1.0, 12.0)),
+                Some(1.0),
+                Rebuild::Resources,
+            ),
             samples,
             param(
                 "learningRate",
@@ -224,6 +233,7 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> NrcSettin
     for (key, value) in params {
         match (key.as_str(), value) {
             ("hiddenLayers", ParamValue::Int(n)) => s.hidden_layers = (*n).clamp(0, 64) as u32,
+            ("frequencies", ParamValue::Int(n)) => s.frequencies = (*n).clamp(0, 64) as u32,
             ("trainSamples", ParamValue::Enum(name)) => {
                 s.train_samples = name.parse().unwrap_or(0);
             }
