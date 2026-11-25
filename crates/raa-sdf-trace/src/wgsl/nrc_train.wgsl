@@ -19,7 +19,7 @@ struct NrcTrain {
 //!include nrc_mlp
 
 // One invocation per training sample: forward keeping every layer input, relative L2 loss
-// (normalized by the squared predicted luminance plus an epsilon at the scene's radiance scale),
+// (normalized by the squared predicted luminance plus an epsilon),
 // backward.
 @compute @workgroup_size(64)
 fn nrc_forward_backward(@builtin(global_invocation_id) id: vec3<u32>) {

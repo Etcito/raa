@@ -55,7 +55,9 @@ pub struct NrcSettings {
     pub learning_rate: f32,
     /// Weight of the previous average in the exponential moving average of the weights.
     pub ema: f32,
-    /// Epsilon of the relative loss, about the square of the darkest radiance that matters.
+    /// Epsilon of the relative loss (the paper's 0.01). The loss weights come from the
+    /// prediction, so a small epsilon under noisy one-sample targets biases the cache upward
+    /// (measured on Sponza: 1e-4 gave 2.7 times the indirect light of 0.01, 0.1 or 1).
     pub loss_epsilon: f32,
     /// Online training on or off (off renders a frozen cache, e.g. a loaded checkpoint).
     pub train: bool,
@@ -79,7 +81,7 @@ impl Default for NrcSettings {
             train_samples: 16_384,
             learning_rate: 2e-3,
             ema: 0.99,
-            loss_epsilon: 1e-4,
+            loss_epsilon: 0.01,
             train: true,
             interleave: true,
             divisor: 4,
