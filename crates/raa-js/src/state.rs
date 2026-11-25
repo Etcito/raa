@@ -140,16 +140,31 @@ impl MeshSource {
         self.submeshes
             .iter()
             .map(|&(first, count)| {
-                let (input, source) = OwnedClusterInput::from_index_range_with_sources(
+                Self::cluster_bake_with_tangents(
                     &self.mesh,
                     self.uvs.as_deref(),
+                    tangents,
                     first as usize,
                     count as usize,
-                )?;
-                let tangents: Vec<_> = source.into_iter().map(|index| tangents[index]).collect();
-                ClusterBake::with_tangents(input.as_input(), options, &tangents)
+                    options,
+                )
             })
             .collect()
+    }
+
+    /// The tangent-bearing submesh bake used by both live uploads and the offline JS entry.
+    pub(crate) fn cluster_bake_with_tangents(
+        mesh: &MeshData,
+        uvs: Option<&[[f32; 2]]>,
+        tangents: &[[f32; 4]],
+        first: usize,
+        count: usize,
+        options: &BuildOptions,
+    ) -> Result<ClusterBake, ClusterError> {
+        let (input, source) =
+            OwnedClusterInput::from_index_range_with_sources(mesh, uvs, first, count)?;
+        let tangents: Vec<_> = source.into_iter().map(|index| tangents[index]).collect();
+        ClusterBake::with_tangents(input.as_input(), options, &tangents)
     }
 }
 

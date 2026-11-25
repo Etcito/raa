@@ -737,9 +737,8 @@ mod web {
         ])
     }
 
-    /// The bake options and the arrays of a `ClusterBakeInput` (S31). Undefined `options` is an
-    /// empty patch; see [`read_options`].
-    fn read_input(value: &JsValue) -> Result<(OwnedClusterInput, BuildOptions), RaaError> {
+    /// The S31 input, optionally with the same tangent-bearing streams as addMesh.
+    fn read_bake(value: &JsValue) -> Result<SlicedBake, RaaError> {
         if !plain(value) {
             return Err(vg_invalid("input", "must be a ClusterBakeInput object"));
         }
@@ -748,8 +747,30 @@ mod web {
         let uvs = optional::<Float32Array>(value, "uvs", "a Float32Array")?.map(|v| v.to_vec());
         let indices = typed::<Uint32Array>(value, "indices", "", "a Uint32Array")?.to_vec();
         let options = build_options(&read_options(&prop(value, "options"))?)?;
+        if let Some(tangents) = optional::<Float32Array>(value, "tangents", "a Float32Array")? {
+            // Match addMesh's normalization and the runtime's first-use submesh compaction.
+            let mesh = raa_mesh::from_js_arrays(
+                &positions,
+                &normals,
+                uvs.as_deref(),
+                Some(&tangents.to_vec()),
+                None,
+                &indices,
+                &[],
+            )
+            .map_err(|error| vg_invalid("input", error.to_string()))?;
+            return crate::state::MeshSource::cluster_bake_with_tangents(
+                &mesh.base,
+                mesh.uvs.as_deref(),
+                mesh.tangents.as_deref().expect("tangents supplied"),
+                0,
+                indices.len(),
+                &options,
+            )
+            .map_err(|error| cluster_error(&error));
+        }
         let input = bake_input(&positions, &normals, uvs.as_deref(), &indices)?;
-        Ok((input, options))
+        SlicedBake::new(input.as_input(), &options).map_err(|error| cluster_error(&error))
     }
 
     /// The options patch of `ClusterBakeOptions` (S31): undefined is empty; an unknown key, a null
@@ -800,8 +821,9 @@ mod web {
     }
 
     fn bake_section(input: &JsValue) -> Result<JsValue, RaaError> {
-        let (owned, options) = read_input(input)?;
-        let mesh = raa_cluster::bake(owned.as_input(), &options).map_err(|e| cluster_error(&e))?;
+        let mut bake = read_bake(input)?;
+        while bake.step(WorkBudget { units: u32::MAX }) == BakeStatus::Working {}
+        let mesh = bake.finish().map_err(|error| cluster_error(&error))?;
         Ok(section_to_js(&mesh))
     }
 
@@ -895,9 +917,7 @@ mod web {
 
     impl ClusterBake {
         fn start(input: &JsValue) -> Result<ClusterBake, RaaError> {
-            let (owned, options) = read_input(input)?;
-            let bake =
-                SlicedBake::new(owned.as_input(), &options).map_err(|e| cluster_error(&e))?;
+            let bake = read_bake(input)?;
             Ok(ClusterBake {
                 progress: bake.progress(),
                 bake: Some(bake),

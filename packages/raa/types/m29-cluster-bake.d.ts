@@ -7,7 +7,7 @@ export interface ClusterSection {
   version: 1;
   /** Builder algorithm, 1. */
   algorithm: 1;
-  /** Eight u16 per vertex (16 B packed vertex): grid position, octahedral normal, uv, zero. */
+  /** Eight u16 per vertex (16 B packed vertex): grid position, octahedral normal, UV, optional tangent frame. */
   vertices: Uint16Array;
   /** One packed triangle per u32: three cluster-local vertex indices, 8 bits each. */
   triangles: Uint32Array;
@@ -62,6 +62,8 @@ export interface ClusterBakeInput {
   positions: Float32Array;
   normals: Float32Array;
   uvs?: Float32Array;
+  /** XYZW (handedness in W). With tangents, streams follow addMesh normalization and sub-mesh compaction. */
+  tangents?: Float32Array;
   indices: Uint32Array;
   options?: ClusterBakeOptions;
 }
