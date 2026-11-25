@@ -3,6 +3,7 @@
 //! The crate's own code: this module has no solstice source.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::bake::{BakeStage, ClusterBake, WorkBudget};
 use crate::cut::ClusterMesh;
@@ -39,6 +40,7 @@ enum Entry {
     Ready {
         sections: Vec<ClusterMesh>,
         source: ClusterSource,
+        revision: u64,
     },
     Baking {
         bakes: Vec<ClusterBake>,
@@ -50,10 +52,21 @@ enum Entry {
 }
 
 /// The registry. Keys are the caller's; a key holds at most one entry, in one of the states above.
-#[derive(Default)]
 pub struct ClusterStore {
     entries: BTreeMap<u32, Entry>,
+    identity: u64,
     generation: u64,
+}
+
+impl Default for ClusterStore {
+    fn default() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        Self {
+            entries: BTreeMap::new(),
+            identity: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            generation: 0,
+        }
+    }
 }
 
 impl ClusterStore {
@@ -70,6 +83,7 @@ impl ClusterStore {
             Entry::Ready {
                 sections,
                 source: ClusterSource::Attached,
+                revision: 0,
             },
         );
     }
@@ -140,8 +154,16 @@ impl ClusterStore {
 
     /// The sections of a Ready key, in the caller's order.
     pub fn sections(&self, key: u32) -> Option<&[ClusterMesh]> {
+        self.ready_sections(key).map(|(_, sections)| sections)
+    }
+
+    /// Its Ready revision and sections. The revision changes when this key's data is replaced,
+    /// even when the new sections have the same number and sizes of records.
+    pub fn ready_sections(&self, key: u32) -> Option<(u64, &[ClusterMesh])> {
         match self.entries.get(&key) {
-            Some(Entry::Ready { sections, .. }) => Some(sections.as_slice()),
+            Some(Entry::Ready {
+                sections, revision, ..
+            }) => Some((*revision, sections)),
             _ => None,
         }
     }
@@ -180,16 +202,24 @@ impl ClusterStore {
         }
     }
 
+    /// Distinguishes independent stores, even when their generations match.
+    pub fn identity(&self) -> u64 {
+        self.identity
+    }
+
     /// Increases by one whenever a Ready set appears, is replaced or is removed.
     pub fn generation(&self) -> u64 {
         self.generation
     }
 
-    fn put(&mut self, key: u32, entry: Entry) {
+    fn put(&mut self, key: u32, mut entry: Entry) {
         let was_ready = matches!(self.entries.get(&key), Some(Entry::Ready { .. }));
         let is_ready = matches!(entry, Entry::Ready { .. });
         if was_ready || is_ready {
             self.generation += 1;
+        }
+        if let Entry::Ready { revision, .. } = &mut entry {
+            *revision = self.generation;
         }
         self.entries.insert(key, entry);
     }
@@ -220,6 +250,7 @@ impl ClusterStore {
             None => Entry::Ready {
                 sections,
                 source: ClusterSource::Runtime,
+                revision: 0,
             },
         };
         self.put(key, entry);
@@ -292,6 +323,24 @@ mod tests {
         store.attach(4, Vec::new());
         assert_eq!(store.sections(4).map(<[ClusterMesh]>::len), Some(0));
         assert_eq!(store.generation(), 2);
+    }
+
+    #[test]
+    fn ready_revisions_change_on_every_replacement_and_stores_differ() {
+        let mut store = ClusterStore::new();
+        store.attach(1, vec![ClusterMesh::default()]);
+        store.attach(2, vec![ClusterMesh::default()]);
+        let (one, _) = store.ready_sections(1).expect("ready");
+        let (two, _) = store.ready_sections(2).expect("ready");
+        assert_ne!(one, two);
+        store.attach(1, vec![ClusterMesh::default()]);
+        let (again, sections) = store.ready_sections(1).expect("ready");
+        assert!(again > one, "a same-shaped replacement has a new revision");
+        assert_eq!(sections.len(), 1);
+        assert_eq!(store.ready_sections(2).map(|(r, _)| r), Some(two));
+        store.clear(1);
+        assert!(store.ready_sections(1).is_none());
+        assert_ne!(store.identity(), ClusterStore::new().identity());
     }
 
     #[test]
