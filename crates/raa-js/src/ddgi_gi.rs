@@ -55,6 +55,8 @@ impl Engine {
             put(&result, "budgetMs", s.budget_ms.into());
             put(&result, "burstMs", s.burst_ms.into());
             put(&result, "skyTransfer", s.sky_transfer.into());
+            put(&result, "surfaceSpacing", s.surface_spacing.into());
+            put(&result, "surfaceProbes", s.surface_probes.into());
             put(&result, "invalidation", (s.invalidation as u32).into());
             if let Some(stats) = state.stats() {
                 put(&result, "probes", stats.probes.into());
@@ -108,6 +110,46 @@ impl Engine {
                 put(&result, "lightEdits", (stats.light_edits as f64).into());
                 put(&result, "lastLightProbes", stats.last_light_probes.into());
                 put(&result, "lightMasks", stats.light_masks.into());
+                put(&result, "hidden", stats.visibility.hidden.into());
+                put(
+                    &result,
+                    "hiddenConverged",
+                    stats.visibility.hidden_converged.into(),
+                );
+                put(&result, "surfacePool", stats.surface_pool.into());
+                put(&result, "surfaceLive", stats.surface_live.into());
+                put(
+                    &result,
+                    "surfaceAssigned",
+                    (stats.surface_assigned as f64).into(),
+                );
+                put(
+                    &result,
+                    "surfaceEvicted",
+                    (stats.surface_evicted as f64).into(),
+                );
+                put(
+                    &result,
+                    "surfaceRequests",
+                    (stats.surface_requests as f64).into(),
+                );
+                // Frames between two updates of the same probe: [cascade 0 in the frustum,
+                // cascade 0 outside, coarser cascades, surface probes] x power-of-two buckets.
+                let periods = Array::new();
+                for class in stats.periods {
+                    let row = Array::new();
+                    for count in class {
+                        row.push(&(count as f64).into());
+                    }
+                    periods.push(&row);
+                }
+                put(&result, "periods", periods.into());
+                // Rows (16 bytes) of the probe buffer for ddgiGiDump: records, resolve, table.
+                let rows = Array::new();
+                for row in stats.rows {
+                    rows.push(&row.into());
+                }
+                put(&result, "rows", rows.into());
                 if let Some((min, max)) = stats.scene_bounds {
                     let bounds = Array::new();
                     for x in min.into_iter().chain(max) {
@@ -118,6 +160,42 @@ impl Engine {
             }
             Ok(result.into())
         })
+    }
+
+    /// Diagnostic readback of `rows` 16-byte rows of the DDGI probe buffer from `first_row`
+    /// (see `ddgiGiStats().rows`): probe records (4 rows per slot: coordinate and state, offset
+    /// and last back-face fraction / nearest front face, light mask), the screen resolve, the
+    /// surface-probe table.
+    #[wasm_bindgen(js_name = ddgiGiDump)]
+    pub async fn ddgi_gi_dump(&mut self, first_row: u32, rows: u32) -> Result<JsValue, JsValue> {
+        let readback = self.with_state(|gpu, st| {
+            let source = st
+                .features
+                .get::<DdgiHandle>()
+                .and_then(|handle| handle.borrow().probe_buffer())
+                .ok_or_else(|| RaaError::Resource("no active DDGI volume".into()))?;
+            let (offset, bytes) = (16 * u64::from(first_row), 16 * u64::from(rows));
+            if bytes == 0 || offset + bytes > source.size() {
+                return Err(RaaError::Resource("DDGI dump out of range".into()));
+            }
+            let device = gpu.device();
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gi.ddgi.dump"),
+                size: bytes,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("gi.ddgi.dump"),
+            });
+            encoder.copy_buffer_to_buffer(&source, offset, &readback, 0, bytes);
+            gpu.queue().submit([encoder.finish()]);
+            Ok(readback)
+        })?;
+        let bytes = raa_web::read_capture_buffer(&readback)
+            .await
+            .map_err(|error| raa_web::error_to_js(&error))?;
+        Ok(Uint8Array::from(bytes.as_slice()).into())
     }
 
     /// Reads one published image of the latest submitted frame (`producer` is the pipeline

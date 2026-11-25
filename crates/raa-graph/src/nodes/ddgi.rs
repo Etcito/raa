@@ -4,7 +4,8 @@
 //! extension `ddgi` (exec_ext/ddgi.rs) converts them with [`settings_from_params`].
 
 use raa_sdf_trace::mesh::{
-    DDGI_GI_NAME, DDGI_MAX_CASCADES, DdgiDebug, DdgiFar, DdgiInvalidation, DdgiSettings,
+    DDGI_GI_NAME, DDGI_MAX_CASCADES, DdgiDebug, DdgiFar, DdgiInvalidation, DdgiRelocation,
+    DdgiSettings,
 };
 
 use crate::catalog::{
@@ -17,7 +18,15 @@ use crate::validate::ValidateCtx;
 
 pub(crate) const DDGI_TYPE: &str = "pass.gi.ddgi";
 const SOURCE: &str = "crates/raa-sdf-trace/src/mesh/ddgi.rs";
-const DEBUG_OPTIONS: &[&str] = &["off", "irradiance", "coverage", "resolve", "probes"];
+const DEBUG_OPTIONS: &[&str] = &[
+    "off",
+    "irradiance",
+    "coverage",
+    "resolve",
+    "probes",
+    "quality",
+];
+const RELOCATION_OPTIONS: &[&str] = &["nearest", "rtxgi"];
 const INVALIDATION_OPTIONS: &[&str] = &["tracked", "all", "none"];
 const FAR_OPTIONS: &[&str] = &["clamp", "ambient"];
 
@@ -125,6 +134,29 @@ impl NodeFamily for Ddgi {
             Rebuild::None,
         );
         far.options = FAR_OPTIONS;
+        let mut relocation_rule = param(
+            "relocationRule",
+            "Relocation rule (nearest: away from the closest face; rtxgi: toward the farthest front face, back to the grid when free)",
+            ParamKind::Enum,
+            ParamValue::Enum("nearest".into()),
+            None,
+            None,
+            "",
+            Rebuild::None,
+        );
+        relocation_rule.options = RELOCATION_OPTIONS;
+        let surface = |key, label, value: f32, range: (f64, f64), unit| {
+            param(
+                key,
+                label,
+                ParamKind::Number,
+                number(value),
+                Some(range),
+                Some(0.01),
+                unit,
+                Rebuild::None,
+            )
+        };
         let params = vec![
             count("probeCountX", "Probes X", d.counts[0]),
             count("probeCountY", "Probes Y (up)", d.counts[1]),
@@ -251,7 +283,63 @@ impl NodeFamily for Ddgi {
                 Rebuild::None,
             ),
             flag("relocation", "Probe relocation", d.relocation),
+            relocation_rule,
+            surface(
+                "relocationLimit",
+                "Largest relocation offset (x spacing, per axis)",
+                d.relocation_limit,
+                (0.1, 0.5),
+                "",
+            ),
             flag("classification", "Probe classification", d.classification),
+            param(
+                "surfaceProbes",
+                "Surface probes (pool of extra probes in front of badly served surfaces, 0 = off)",
+                ParamKind::Int,
+                ParamValue::Int(i64::from(d.surface_probes)),
+                Some((0.0, 16384.0)),
+                Some(64.0),
+                "",
+                Rebuild::Resources,
+            ),
+            param(
+                "surfaceSpacing",
+                "Surface probe lattice (one probe per cell)",
+                ParamKind::Number,
+                number(d.surface_spacing),
+                Some((0.1, 10.0)),
+                Some(0.05),
+                "m",
+                Rebuild::Resources,
+            ),
+            surface(
+                "surfaceOffset",
+                "Surface probe distance from its surface",
+                d.surface_offset,
+                (0.02, 10.0),
+                "m",
+            ),
+            surface(
+                "surfaceNeed",
+                "Lookup quality below which a surface probe is requested",
+                d.surface_need,
+                (0.0, 1.0),
+                "",
+            ),
+            surface(
+                "surfaceReach",
+                "Distance at which a cascade probe stops counting as serving a surface (0 = any)",
+                d.surface_reach,
+                (0.0, 100.0),
+                "m",
+            ),
+            surface(
+                "surfaceRange",
+                "Surface probes within this distance of the camera",
+                d.surface_range,
+                (1.0, 1000.0),
+                "m",
+            ),
             flag("bounce", "Multiple bounces", d.bounce),
             flag(
                 "skyTransfer",
@@ -378,6 +466,21 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> DdgiSetti
             ("viewBias", ParamValue::Number(x)) => s.view_bias = *x as f32,
             ("relocation", ParamValue::Bool(b)) => s.relocation = *b,
             ("classification", ParamValue::Bool(b)) => s.classification = *b,
+            ("relocationRule", ParamValue::Enum(name)) => {
+                s.relocation_rule = match name.as_str() {
+                    "rtxgi" => DdgiRelocation::Rtxgi,
+                    _ => DdgiRelocation::Nearest,
+                }
+            }
+            ("relocationLimit", ParamValue::Number(x)) => s.relocation_limit = *x as f32,
+            ("surfaceProbes", ParamValue::Int(n)) => {
+                s.surface_probes = (*n).clamp(0, 1 << 16) as u32
+            }
+            ("surfaceSpacing", ParamValue::Number(x)) => s.surface_spacing = *x as f32,
+            ("surfaceOffset", ParamValue::Number(x)) => s.surface_offset = *x as f32,
+            ("surfaceNeed", ParamValue::Number(x)) => s.surface_need = *x as f32,
+            ("surfaceReach", ParamValue::Number(x)) => s.surface_reach = *x as f32,
+            ("surfaceRange", ParamValue::Number(x)) => s.surface_range = *x as f32,
             ("bounce", ParamValue::Bool(b)) => s.bounce = *b,
             ("skyTransfer", ParamValue::Bool(b)) => s.sky_transfer = *b,
             ("lightThreshold", ParamValue::Number(x)) => s.light_threshold = *x as f32,
@@ -394,6 +497,7 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> DdgiSetti
                     "coverage" => DdgiDebug::Coverage,
                     "resolve" => DdgiDebug::Resolve,
                     "probes" => DdgiDebug::Probes,
+                    "quality" => DdgiDebug::Quality,
                     _ => DdgiDebug::Off,
                 }
             }
