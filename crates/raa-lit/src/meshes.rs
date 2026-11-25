@@ -619,7 +619,7 @@ pub(crate) fn edge_bytes(m: &AttributedMesh, edges: &[u32]) -> Vec<u8> {
 
 fn triangle_edge_bytes(m: &AttributedMesh) -> Vec<u8> {
     let mut edges = std::collections::BTreeSet::new();
-    for t in m.base.indices.chunks_exact(3) {
+    for t in m.base.indices.as_chunks::<3>().0 {
         for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
             edges.insert((a.min(b), a.max(b)));
         }

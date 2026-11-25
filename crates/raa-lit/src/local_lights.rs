@@ -246,9 +246,9 @@ impl LocalLights {
         for (entry, record) in self.entries[..self.len]
             .iter()
             .flatten()
-            .zip(out.chunks_exact_mut(LIGHT_GPU_SIZE))
+            .zip(out.as_chunks_mut::<LIGHT_GPU_SIZE>().0.iter_mut())
         {
-            world_desc(entry).write_gpu(record.try_into().expect("one light record"));
+            world_desc(entry).write_gpu(record);
         }
     }
 
@@ -357,7 +357,9 @@ mod tests {
         let mut out = [0xff; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE];
         lights.write_gpu(&mut out);
         for (rank, record) in out[..4 * LIGHT_GPU_SIZE]
-            .chunks_exact(LIGHT_GPU_SIZE)
+            .as_chunks::<LIGHT_GPU_SIZE>()
+            .0
+            .iter()
             .enumerate()
         {
             for (offset, expected) in [
@@ -428,8 +430,10 @@ mod tests {
         assert!((gpu_float(&out, 48) - 10.0_f32.to_radians().cos()).abs() < 1e-6);
         assert!(
             out[..64]
-                .chunks_exact(4)
-                .all(|b| f32::from_le_bytes(b.try_into().unwrap()).is_finite())
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|b| f32::from_le_bytes(*b).is_finite())
         );
         assert!(out[64..].iter().all(|b| *b == 0));
         lights.remove(kept).unwrap();

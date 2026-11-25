@@ -1699,8 +1699,8 @@ impl LitRenderer {
             camera: s.select.camera_count(),
             ..InstanceFrameStats::default()
         };
-        for id in s.select.id_bytes().chunks_exact(4) {
-            let slot = u32::from_le_bytes(id.try_into().unwrap()) as usize;
+        for id in s.select.id_bytes().as_chunks::<4>().0 {
+            let slot = u32::from_le_bytes(*id) as usize;
             let level = s.levels[slot];
             stats.lods[if level == NO_CAMERA_LEVEL {
                 0

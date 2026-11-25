@@ -325,8 +325,8 @@ impl ReadbackCoordinator {
                 let values = result.ok().and_then(|()| {
                     let bytes = mapped.get_mapped_range(..).ok()?;
                     let mut values = [0; 4];
-                    for (value, word) in values.iter_mut().zip(bytes.chunks_exact(4)) {
-                        *value = u64::from(u32::from_le_bytes(word.try_into().ok()?));
+                    for (value, word) in values.iter_mut().zip(bytes.as_chunks::<4>().0) {
+                        *value = u64::from(u32::from_le_bytes(*word));
                     }
                     Some(values)
                 });

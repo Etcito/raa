@@ -1637,7 +1637,7 @@ impl LitHandle {
                     mesh.0
                 )));
             }
-            for triangle in indices.chunks_exact(3) {
+            for triangle in indices.as_chunks::<3>().0 {
                 let index = [triangle[0], triangle[1], triangle[2]];
                 let positions = [
                     source_position(source, index[0], &model_to_root)?,

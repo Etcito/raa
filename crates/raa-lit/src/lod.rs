@@ -303,7 +303,7 @@ impl Grid {
             return Err(invalid("Detail mesh is degenerate"));
         }
         let mut triangles = Vec::with_capacity(mesh.indices.len() / 3);
-        for indices in mesh.indices.chunks_exact(3) {
+        for indices in mesh.indices.as_chunks::<3>().0 {
             let triangle: [Point; 3] = std::array::from_fn(|i| points[indices[i] as usize]);
             let ab = sub(triangle[1], triangle[0]);
             let ac = sub(triangle[2], triangle[0]);

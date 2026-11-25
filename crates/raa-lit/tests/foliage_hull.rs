@@ -121,7 +121,7 @@ fn corner(mesh: &MeshData, index: u32) -> [f64; 3] {
 
 fn volume(mesh: &MeshData) -> f64 {
     let mut total = 0.0;
-    for indices in mesh.indices.chunks_exact(3) {
+    for indices in mesh.indices.as_chunks::<3>().0 {
         let a = corner(mesh, indices[0]);
         let b = corner(mesh, indices[1]);
         let c = corner(mesh, indices[2]);
@@ -132,7 +132,7 @@ fn volume(mesh: &MeshData) -> f64 {
 
 fn contains(mesh: &MeshData, point: [f32; 3]) -> bool {
     let point = point.map(f64::from);
-    for indices in mesh.indices.chunks_exact(3) {
+    for indices in mesh.indices.as_chunks::<3>().0 {
         let a = corner(mesh, indices[0]);
         let b = corner(mesh, indices[1]);
         let c = corner(mesh, indices[2]);
@@ -167,7 +167,7 @@ fn tetrahedron_has_four_outward_faces_and_volume_one_sixth() {
     assert!(volume > 0.0, "outward winding gives a positive volume");
 
     let interior = [0.25, 0.25, 0.25];
-    for indices in mesh.indices.chunks_exact(3) {
+    for indices in mesh.indices.as_chunks::<3>().0 {
         let a = corner(&mesh, indices[0]);
         let b = corner(&mesh, indices[1]);
         let c = corner(&mesh, indices[2]);

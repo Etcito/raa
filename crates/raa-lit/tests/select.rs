@@ -92,8 +92,10 @@ fn input<'a>(
 
 fn ids(prep: &IdPrep) -> Vec<u32> {
     prep.id_bytes()
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect()
 }
 
