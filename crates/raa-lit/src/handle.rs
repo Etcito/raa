@@ -288,6 +288,75 @@ fn check_msaa(msaa: u32) -> Result<(), RaaError> {
     }
 }
 
+/// What one draw loop has already set on its render pass: the pipelines it resolved, by
+/// variant key (posed bit included) and spec address, and the bound pipeline, vertex
+/// streams and index buffer. A draw loop of many sub-meshes then skips the hashed
+/// [`PipelineCache`] lookup and every WebGPU call that would rebind the same object.
+///
+/// A memo lives for ONE pass recording: the specs it keys by address must outlive it and
+/// stay in place, and every vertex/index binding of the tracked slots on that pass must go
+/// through it ([`LitHandle::bind_selected_mesh_memo`], [`DrawMemo::set_pipeline`]).
+#[derive(Default)]
+pub struct DrawMemo {
+    pipelines: Vec<(VariantKey, usize, wgpu::RenderPipeline)>,
+    bound: Option<wgpu::RenderPipeline>,
+    stream0: Option<wgpu::Buffer>,
+    stream1: Option<wgpu::Buffer>,
+    ids: Option<wgpu::Buffer>,
+    index: Option<wgpu::Buffer>,
+}
+
+impl DrawMemo {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The pipeline resolved for (`key`, `spec`) in this memo, else `resolve()` remembered.
+    fn pipeline(
+        &mut self,
+        key: VariantKey,
+        spec: &PipelineSpec,
+        resolve: impl FnOnce() -> Result<wgpu::RenderPipeline, RaaError>,
+    ) -> Result<wgpu::RenderPipeline, RaaError> {
+        let address = std::ptr::from_ref(spec) as usize;
+        if let Some((_, _, pipeline)) = self
+            .pipelines
+            .iter()
+            .find(|(k, a, _)| *k == key && *a == address)
+        {
+            return Ok(pipeline.clone());
+        }
+        let pipeline = resolve()?;
+        self.pipelines.push((key, address, pipeline.clone()));
+        Ok(pipeline)
+    }
+
+    /// `pass.set_pipeline(pipeline)` unless it is already the bound pipeline.
+    pub fn set_pipeline(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+    ) {
+        if self.bound.as_ref() != Some(pipeline) {
+            pass.set_pipeline(pipeline);
+            self.bound = Some(pipeline.clone());
+        }
+    }
+
+    /// Sets vertex slot `slot` to the whole of `buffer` unless `held` already is it.
+    fn vertex(
+        held: &mut Option<wgpu::Buffer>,
+        pass: &mut wgpu::RenderPass<'_>,
+        slot: u32,
+        buffer: &wgpu::Buffer,
+    ) {
+        if held.as_ref() != Some(buffer) {
+            pass.set_vertex_buffer(slot, buffer.slice(..));
+            *held = Some(buffer.clone());
+        }
+    }
+}
+
 /// Hash of `spec` (std SipHash with fixed keys: equal specs hash equal within a process).
 fn spec_hash(spec: &PipelineSpec) -> u64 {
     let mut h = DefaultHasher::new();
@@ -1453,6 +1522,85 @@ impl LitHandle {
         };
         pass.set_index_buffer(indices, wgpu::IndexFormat::Uint32);
         Ok(count)
+    }
+
+    /// [`bind_mesh`](Self::bind_mesh) through `memo`; see
+    /// [`bind_selected_mesh_memo`](Self::bind_selected_mesh_memo). Returns the sub-mesh's
+    /// index range in its lit mesh's whole index buffer (empty: skip the draw).
+    pub fn bind_mesh_memo(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        mesh: MeshId,
+        memo: &mut DrawMemo,
+    ) -> Result<std::ops::Range<u32>, RaaError> {
+        self.bind_selected_mesh_memo(pass, mesh, None, memo)
+    }
+
+    /// [`bind_selected_mesh`](Self::bind_selected_mesh) through `memo`: the same streams
+    /// and ids, but the WHOLE index buffer of the lit mesh, and only the bindings that differ
+    /// from what `memo` holds on `pass`. Returns the sub-mesh's index range in that buffer
+    /// (`first..first + count`); empty when the sub-mesh has no indices (skip the draw).
+    pub(crate) fn bind_selected_mesh_memo(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        mesh: MeshId,
+        capture: Option<&crate::planar_reflection::PlanarView>,
+        memo: &mut DrawMemo,
+    ) -> Result<std::ops::Range<u32>, RaaError> {
+        let s = self.shared.borrow();
+        let (selection, ids) =
+            capture.map_or((&s.select, &s.id_buffer), |view| (&view.select, &view.ids));
+        let (mesh, tag) = selection.mesh_binding(mesh);
+        let (g, first, count) = s.meshes.resolve(mesh)?;
+        let posed = s.posed_binding(tag);
+        s.bound_skin.set(posed.is_some());
+        DrawMemo::vertex(&mut memo.stream0, pass, STREAM0_SLOT, &g.stream0);
+        if let Some((skin, palette)) = &posed {
+            // Instanced skinning: rest skin records in slot 3, the palette in group 3.
+            pass.set_vertex_buffer(SKIN_SLOT, skin.slice(..));
+            pass.set_bind_group(crate::skin_draw::PALETTE_GROUP, palette, &[]);
+        }
+        DrawMemo::vertex(&mut memo.ids, pass, INSTANCE_SLOT, ids);
+        DrawMemo::vertex(&mut memo.stream1, pass, STREAM1_SLOT, &g.stream1);
+        if memo.index.as_ref() != Some(&g.index) {
+            pass.set_index_buffer(g.index.slice(..), wgpu::IndexFormat::Uint32);
+            memo.index = Some(g.index.clone());
+        }
+        Ok(first..first.saturating_add(count))
+    }
+
+    /// [`pipeline_for`](Self::pipeline_for) remembered in `memo` (the posed bit of the last
+    /// [`bind_selected_mesh_memo`](Self::bind_selected_mesh_memo) is part of the key).
+    pub fn pipeline_memo(
+        &self,
+        gpu: &GpuContext,
+        key: VariantKey,
+        spec: &PipelineSpec,
+        memo: &mut DrawMemo,
+    ) -> Result<wgpu::RenderPipeline, RaaError> {
+        let s = self.shared.borrow();
+        let mut key = key;
+        if s.bound_skin.get() && !matches!(key.pass, PassKind::VgGbuffer | PassKind::VgShade) {
+            key.flags |= crate::skin_draw::POSED;
+        }
+        memo.pipeline(key, spec, || s.pipeline_for(gpu, key, spec))
+    }
+
+    /// [`pipeline_for_draw`](Self::pipeline_for_draw) remembered in `memo`.
+    pub fn pipeline_for_draw_memo(
+        &self,
+        gpu: &GpuContext,
+        mesh: MeshId,
+        key: VariantKey,
+        spec: &PipelineSpec,
+        memo: &mut DrawMemo,
+    ) -> Result<wgpu::RenderPipeline, RaaError> {
+        let s = self.shared.borrow();
+        let mut key = key;
+        if s.posed_binding(s.select.mesh_binding(mesh).1).is_some() {
+            key.flags |= crate::skin_draw::POSED;
+        }
+        memo.pipeline(key, spec, || s.pipeline_for(gpu, key, spec))
     }
 
     /// `(first_index, index_count)` of sub-mesh `mesh` in its lit mesh's index buffer;

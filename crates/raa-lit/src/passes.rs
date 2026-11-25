@@ -28,7 +28,7 @@ use raa_pipeline::{
 };
 use raa_shader::{PassKind, VariantKey};
 
-use crate::handle::{LitHandle, PipelineSpec};
+use crate::handle::{DrawMemo, LitHandle, PipelineSpec};
 use crate::material::{DrawClass, FLAG_DOUBLE_SIDED};
 use crate::planar_reflection::{PlanarTargets, PlanarView};
 use crate::renderer::{Contributors, pipeline_busy};
@@ -161,6 +161,10 @@ fn draw_lit(
         DrawSource::Camera(flags) => (None, flags),
         DrawSource::Reflection(view) => (Some(view), 0),
     };
+    // One memo per pass recording: repeated sub-meshes of a lit mesh, pipelines and the id
+    // stream are bound once, and the hashed pipeline cache is consulted once per variant.
+    let mut memo = DrawMemo::new();
+    let edges_only = kind == PassKind::Forward && capture.is_none() && lit.surface_edges_only();
     for class in DRAWN_CLASSES {
         let camera_draws;
         let draws = if let Some(view) = capture {
@@ -173,8 +177,8 @@ fn draw_lit(
             if d.instance_count == 0 {
                 continue;
             }
-            let count = lit.bind_selected_mesh(pass, d.mesh, capture)?;
-            if count == 0 {
+            let indices = lit.bind_selected_mesh_memo(pass, d.mesh, capture, &mut memo)?;
+            if indices.is_empty() {
                 continue;
             }
             let flags = lit.material_record(d.material).map_or(0, |m| m.flags) & VARIANT_FLAGS;
@@ -184,13 +188,13 @@ fn draw_lit(
                 msaa,
                 flags: flags | lit.material_variant_flags(d.material) | extra_flags,
             };
-            let pipeline = lit.pipeline_for(gpu, key, specs.get(flags))?;
-            pass.set_pipeline(&pipeline);
+            let pipeline = lit.pipeline_memo(gpu, key, specs.get(flags), &mut memo)?;
+            memo.set_pipeline(pass, &pipeline);
             let instances = d.first_instance..d.first_instance.saturating_add(d.instance_count);
             if kind == PassKind::Forward && capture.is_none() {
-                lit.draw_surface_instances(pass, 0..count, instances);
+                lit.draw_surface_instances_with(pass, indices, instances, edges_only);
             } else {
-                pass.draw_indexed(0..count, 0, instances);
+                pass.draw_indexed(indices, 0, instances);
             }
         }
     }

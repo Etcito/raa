@@ -321,6 +321,9 @@ impl Casters {
         lit: &LitHandle,
         list: usize,
     ) -> Result<(), RaaError> {
+        // One memo per caster pass: shared sub-mesh streams, the id stream and pipelines are
+        // bound once, and the hashed pipeline cache is consulted once per variant.
+        let mut memo = raa_lit::DrawMemo::new();
         for class in CAST_CLASSES {
             let draws = lit.cascade_draws(list, class);
             for d in draws.iter() {
@@ -331,8 +334,8 @@ impl Casters {
                 if flags & FLAG_NO_SHADOW != 0 {
                     continue;
                 }
-                let count = lit.bind_mesh(pass, d.mesh)?;
-                if count == 0 {
+                let indices = lit.bind_mesh_memo(pass, d.mesh, &mut memo)?;
+                if indices.is_empty() {
                     continue;
                 }
                 let flags = flags & FLAG_DOUBLE_SIDED;
@@ -342,10 +345,11 @@ impl Casters {
                     msaa: 1,
                     flags,
                 };
-                let pipeline = lit.pipeline_for_draw(gpu, d.mesh, key, self.specs.get(flags))?;
-                pass.set_pipeline(&pipeline);
+                let pipeline =
+                    lit.pipeline_for_draw_memo(gpu, d.mesh, key, self.specs.get(flags), &mut memo)?;
+                memo.set_pipeline(pass, &pipeline);
                 let instances = d.first_instance..d.first_instance.saturating_add(d.instance_count);
-                pass.draw_indexed(0..count, 0, instances);
+                pass.draw_indexed(indices, 0, instances);
             }
         }
         Ok(())

@@ -78,13 +78,32 @@ impl LitHandle {
         indices: std::ops::Range<u32>,
         instances: std::ops::Range<u32>,
     ) {
+        let only = self.surface_edges_only();
+        self.draw_surface_instances_with(pass, indices, instances, only);
+    }
+
+    /// Whether any instance (or the global default) is in edges-only wireframe mode: read
+    /// once per draw loop for [`draw_surface_instances_with`](Self::draw_surface_instances_with).
+    pub(crate) fn surface_edges_only(&self) -> bool {
         let s = self.shared.borrow();
-        if s.editor.global != WireframeMode::Only
-            && !s.editor.wire.values().any(|m| *m == WireframeMode::Only)
-        {
+        s.editor.global == WireframeMode::Only
+            || s.editor.wire.values().any(|m| *m == WireframeMode::Only)
+    }
+
+    /// [`draw_surface_instances`](Self::draw_surface_instances) with the edges-only test
+    /// already taken (`only` from [`surface_edges_only`](Self::surface_edges_only)).
+    pub(crate) fn draw_surface_instances_with(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        indices: std::ops::Range<u32>,
+        instances: std::ops::Range<u32>,
+        only: bool,
+    ) {
+        if !only {
             pass.draw_indexed(indices, 0, instances);
             return;
         }
+        let s = self.shared.borrow();
         for i in instances {
             if s.editor.mode(tag(&s, i)) != WireframeMode::Only {
                 pass.draw_indexed(indices.clone(), 0, i..i + 1);
