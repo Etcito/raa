@@ -1,10 +1,16 @@
 //! Copies a completed display-space view to its rectangle without clearing other views.
 use raa_core::GpuContext;
+use std::cell::RefCell;
+
+/// Bind groups kept per source view: one per viewport, a destroyed source drops out by turn.
+const MAX_CACHED_GROUPS: usize = 8;
 
 pub(crate) struct Output {
     format: wgpu::TextureFormat,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
+    /// The bind group of each source view seen, so a steady frame creates none.
+    groups: RefCell<Vec<(wgpu::TextureView, wgpu::BindGroup)>>,
 }
 
 impl Output {
@@ -79,6 +85,7 @@ struct Vertex { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
             format,
             layout,
             pipeline,
+            groups: RefCell::new(Vec::new()),
         }
     }
 
@@ -94,14 +101,27 @@ struct Vertex { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f3
         destination: &wgpu::TextureView,
         rect: [u32; 4],
     ) {
-        let group = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raa.views.output.group"),
-            layout: &self.layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(source),
-            }],
-        });
+        let group = {
+            let mut groups = self.groups.borrow_mut();
+            match groups.iter().find(|(view, _)| view == source) {
+                Some((_, group)) => group.clone(),
+                None => {
+                    let group = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("raa.views.output.group"),
+                        layout: &self.layout,
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(source),
+                        }],
+                    });
+                    if groups.len() >= MAX_CACHED_GROUPS {
+                        groups.remove(0);
+                    }
+                    groups.push((source.clone(), group.clone()));
+                    group
+                }
+            }
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("raa.views.output"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

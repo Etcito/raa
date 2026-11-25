@@ -28,7 +28,7 @@ use super::{
 use crate::catalog::{Catalog, FeatureId, ParamBinding, ParamSpec, ParamValue, Rebuild};
 use crate::error::{Issue, Severity, Stage};
 use crate::format::GraphDoc;
-use crate::plan::{GraphPlan, plan_from_doc};
+use crate::plan::{GraphPlan, InputSource, plan_from_doc};
 use crate::runtime_lighting::{ISOLATION, SPHERICAL, SPHERICAL_TYPE};
 use crate::validate::{ValidateCtx, canonical_doc};
 
@@ -74,6 +74,8 @@ pub struct GraphExecutor {
     applied: Option<SettingsSnapshot>,
     /// The descriptors the graph applied, compared by `frame` through `AppliedDescs::changed`.
     applied_descs: AppliedDescs,
+    /// `Pipeline::order_generation` when `applied` was captured: the order is compared only when it moved.
+    applied_order_generation: u64,
     /// The features `frame` found changed; kept between frames so a steady frame allocates nothing.
     scratch: Vec<FeatureId>,
     /// The index of the latest frame of the active graph; `None` before one.
@@ -103,6 +105,7 @@ impl GraphExecutor {
             no_graph: None,
             applied: None,
             applied_descs: AppliedDescs::default(),
+            applied_order_generation: 0,
             scratch: Vec::new(),
             frame: None,
             last_issues: Vec::new(),
@@ -405,6 +408,7 @@ impl GraphExecutor {
         self.plan = None;
         self.applied = None;
         self.applied_descs = AppliedDescs::default();
+        h.pipeline.borrow_mut().set_display_readable(true);
         self.frame = None;
         self.last_issues.clear();
         Ok(())
@@ -534,7 +538,7 @@ impl GraphExecutor {
         ) else {
             return Ok(());
         };
-        let pipeline_moved = pipeline_moved(applied, h);
+        let pipeline_moved = pipeline_moved(applied, self.applied_order_generation, h);
         self.scratch.clear();
         self.applied_descs.changed(h, &mut self.scratch);
         if !pipeline_moved && self.scratch.is_empty() {
@@ -562,6 +566,7 @@ impl GraphExecutor {
         }
         self.applied = Some(snapshot(h));
         self.applied_descs = AppliedDescs::capture(h);
+        self.applied_order_generation = h.pipeline.borrow().order_generation();
         Ok(())
     }
 
@@ -600,6 +605,10 @@ impl GraphExecutor {
                 self.no_graph = Some(no_graph);
                 self.applied = Some(snapshot(h));
                 self.applied_descs = AppliedDescs::capture(h);
+                self.applied_order_generation = h.pipeline.borrow().order_generation();
+                h.pipeline
+                    .borrow_mut()
+                    .set_display_readable(plan_reads_display(self.plan.as_ref()));
                 self.frame = None;
                 SetResult {
                     ok: true,
@@ -917,7 +926,7 @@ fn merge_owned(order: &[String], live: &[(String, bool)]) -> Vec<String> {
 /// Whether the live pipeline differs from `applied`: an applied entry's enabled flag, read through
 /// `Pipeline::entry_enabled` without allocation, or the order of the unowned pass-role entries, read
 /// through `Pipeline::passes`.
-fn pipeline_moved(applied: &SettingsSnapshot, h: &FeatureHandles<'_>) -> bool {
+fn pipeline_moved(applied: &SettingsSnapshot, order_generation: u64, h: &FeatureHandles<'_>) -> bool {
     let pipeline = h.pipeline.borrow();
     if applied
         .passes
@@ -926,7 +935,32 @@ fn pipeline_moved(applied: &SettingsSnapshot, h: &FeatureHandles<'_>) -> bool {
     {
         return true;
     }
-    pipeline_differs(applied, &pipeline.passes())
+    // Entries are added, removed or reordered only through calls that move the generation: until
+    // it moves, the pass list is neither copied nor compared.
+    pipeline.order_generation() != order_generation && pipeline_differs(applied, &pipeline.passes())
+}
+
+/// Whether a node other than `output.display` reads the colour of a `pass.tonemap` or `pass.overlay`
+/// node (a `view.*` node): only then does the pipeline keep the display target those passes write.
+fn plan_reads_display(plan: Option<&GraphPlan>) -> bool {
+    let Some(plan) = plan else {
+        return true;
+    };
+    let is_display = |id: &str| {
+        plan.nodes
+            .iter()
+            .any(|n| n.id == id && matches!(n.type_id.as_str(), "pass.tonemap" | "pass.overlay"))
+    };
+    plan.nodes
+        .iter()
+        .filter(|n| n.type_id != "output.display")
+        .flat_map(|n| n.inputs.iter())
+        .any(|input| match &input.source {
+            InputSource::Link { node, port, .. } | InputSource::Default { node, port } => {
+                port == "color" && is_display(node)
+            }
+            InputSource::Absent => false,
+        })
 }
 
 /// Compares the graph's base entries with the observed pipeline, ignoring extension entries.
