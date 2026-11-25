@@ -743,6 +743,7 @@ impl FeaturePass for SphericalPass {
                     relight: self.staged.relight,
                     reach: self.staged.reach.take(),
                     light_threshold: state.settings.light_threshold,
+                    inside_capture: state.settings.scheduler.inside_capture,
                 },
             );
         }
@@ -1583,7 +1584,7 @@ impl SphericalGpu {
             &mut options,
             [
                 channels,
-                u32::from(extras.transfer),
+                u32::from(extras.transfer) | u32::from(extras.inside_capture) << 1,
                 reshade_first,
                 reshade_jobs,
             ],
@@ -2183,6 +2184,7 @@ struct FrameExtras<'a> {
     relight: bool,
     reach: Option<ReachRequest>,
     light_threshold: f32,
+    inside_capture: bool,
 }
 
 struct ReachPending {

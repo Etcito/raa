@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 23] = [
+const OPTIONS: [&str; 24] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
@@ -48,6 +48,7 @@ const OPTIONS: [&str; 23] = [
     "skyTransfer",
     "lightReach",
     "lightThreshold",
+    "insideCapture",
 ];
 
 fn invalid(key: &str, reason: &str) -> RaaError {
@@ -172,12 +173,14 @@ fn read_patch(
                 }
                 settings.sun_faces = count as u32;
             }
-            "skyTransfer" | "lightReach" => {
+            "skyTransfer" | "lightReach" | "insideCapture" => {
                 let on = value
                     .as_bool()
                     .ok_or_else(|| invalid(&name, "expected a boolean"))?;
                 if name == "skyTransfer" {
                     settings.sky_transfer = on;
+                } else if name == "insideCapture" {
+                    settings.scheduler.inside_capture = on;
                 } else {
                     settings.light_reach = on;
                 }
@@ -296,6 +299,11 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
     put(&result, "skyTransfer", settings.sky_transfer.into());
     put(&result, "lightReach", settings.light_reach.into());
     put(&result, "lightThreshold", settings.light_threshold.into());
+    put(
+        &result,
+        "insideCapture",
+        settings.scheduler.inside_capture.into(),
+    );
     result.into()
 }
 

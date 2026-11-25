@@ -30,6 +30,7 @@ pub(crate) const SPHERICAL_KEYS: &[&str] = &[
     "skyTransfer",
     "lightReach",
     "lightThreshold",
+    "insideCapture",
     "enabled",
 ];
 
@@ -75,6 +76,7 @@ pub(crate) fn spherical_get(settings: SphericalGiSettings, key: &str) -> Option<
         "sunFaces" => ParamValue::Int(i64::from(settings.sun_faces)),
         "skyTransfer" => ParamValue::Bool(settings.sky_transfer),
         "lightReach" => ParamValue::Bool(settings.light_reach),
+        "insideCapture" => ParamValue::Bool(settings.scheduler.inside_capture),
         "lightThreshold" => ParamValue::Number(f64::from(settings.light_threshold)),
         "debug" => ParamValue::Enum(
             DEBUG
@@ -153,6 +155,7 @@ pub(crate) fn spherical_set(
         }
         ("skyTransfer", ParamValue::Bool(value)) => settings.sky_transfer = *value,
         ("lightReach", ParamValue::Bool(value)) => settings.light_reach = *value,
+        ("insideCapture", ParamValue::Bool(value)) => settings.scheduler.inside_capture = *value,
         ("lightThreshold", ParamValue::Number(value)) if (0.0..=1000.0).contains(value) => {
             settings.light_threshold = *value as f32;
         }

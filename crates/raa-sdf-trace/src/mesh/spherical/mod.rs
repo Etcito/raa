@@ -50,6 +50,12 @@ pub struct SphericalSchedulerConfig {
     /// soon as the scene would be cut and shrinks only below 1/sqrt(2) of the current
     /// radius, so walking does not pump the shells. `grid.z_max` is the initial value.
     pub auto_range: bool,
+    /// A probe whose cell centre lies inside closed geometry keeps the centre (no
+    /// relocation, no rejection): its capture rays skip every surface met from behind
+    /// (inside a solid) and record the first front face or the sky, distances still
+    /// measured from the centre, like a camera with its near plane past the enclosing
+    /// solid. Off: the older placement at the free offset with the most clearance.
+    pub inside_capture: bool,
 }
 
 impl SphericalSchedulerConfig {
@@ -70,6 +76,7 @@ impl Default for SphericalSchedulerConfig {
             center_probe: true,
             cache_cells: 0,
             auto_range: false,
+            inside_capture: true,
         }
     }
 }
@@ -689,6 +696,9 @@ impl SphericalScheduler {
             best.sqrt()
         };
         let center = self.grid.cell_point(key, [0.0; 3]);
+        if self.config.inside_capture {
+            return center;
+        }
         let mut best = (clearance(center), center);
         if best.0 >= rho {
             return center;

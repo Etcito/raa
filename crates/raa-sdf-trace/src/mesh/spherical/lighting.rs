@@ -406,7 +406,10 @@ mod tests {
         let point = |id, position: [f32; 3], rgb: [f32; 3]| SphericalLight {
             id,
             rgb,
-            influence: Influence::Point(LocalRange { position, range: 4.0 }),
+            influence: Influence::Point(LocalRange {
+                position,
+                range: 4.0,
+            }),
         };
         let bounds = Bounds {
             min: [0.0; 3],

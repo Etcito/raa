@@ -90,6 +90,9 @@ const SPHERICAL_TRANSFER_HEADER: u32 = 16u;
 const SPHERICAL_TRANSFER_NORM_ROW: u32 = 9u;
 const SPHERICAL_REACH_ROW: u32 = 10u;
 const SPHERICAL_FLAG_TRANSFER: u32 = 1u;
+// Capture rays of a probe inside a solid skip the surfaces met from behind (options[1].y).
+const SPHERICAL_FLAG_INSIDE: u32 = 2u;
+const SPHERICAL_INSIDE_CROSSINGS: u32 = 8u;
 const SPHERICAL_SKY_PROJECT_SAMPLES: u32 = 4096u;
 // Keep in sync with spherical_gpu.rs SLOT_ROWS and RAA_SPHERICAL_SLOT_ROWS.
 const SPHERICAL_SLOT_ROWS: u32 = 167u;
@@ -260,7 +263,20 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
     let direction = normalize(raa_spherical_face_direction(work.ids.y, uv));
     let origin = work.position.xyz + work.normal.xyz * (2.0 * EPS);
     let limit = max(frame.clip.y, bitcast<f32>(options[2].y));
-    let hit = closest(Ray(origin, direction), limit, false);
+    var hit = closest(Ray(origin, direction), limit, false);
+    // Inside a solid (the first surface is met from behind): continue past each exit until
+    // the first front face or the sky, like a camera whose near plane is past the solid.
+    // `travel` keeps the distance from the probe centre (the depth moments stay consistent).
+    var travel = 0.0;
+    if (options[1].y & SPHERICAL_FLAG_INSIDE) != 0u {
+        for (var k = 0u; k < SPHERICAL_INSIDE_CROSSINGS; k++) {
+            if hit.object == MISS { break; }
+            let t = mesh_triangle(hit.object);
+            if dot(cross(t.b.position - t.a.position, t.c.position - t.a.position), direction) <= 0.0 { break; }
+            travel += hit.t + 2.0 * EPS;
+            hit = closest(Ray(origin + direction * travel, direction), max(limit - travel, 0.0), false);
+        }
+    }
     var hit_position = vec4<f32>(0.0);
     var hit_normal = vec2<u32>(0u);
     var sky_rgb = vec3<f32>(0.0);
@@ -272,7 +288,7 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         let tri = mesh_triangle(hit.object);
         let material = hit_material(tri, hit.bary);
-        let p = origin + direction * hit.t;
+        let p = origin + direction * (travel + hit.t);
         let geom = normalize(cross(tri.b.position - tri.a.position, tri.c.position - tri.a.position));
         let back = dot(geom, direction) > 0.0;
         let ng = select(geom, -geom, back);

@@ -209,6 +209,14 @@ impl NodeFamily for RuntimeLighting {
                 &[][..],
                 Rebuild::None,
             ),
+            (
+                "insideCapture",
+                "Probes inside solids capture from past the solid",
+                ParamKind::Bool,
+                None,
+                &[][..],
+                Rebuild::None,
+            ),
         ];
         vec![NodeTypeSpec {
             id: SPHERICAL_TYPE,
