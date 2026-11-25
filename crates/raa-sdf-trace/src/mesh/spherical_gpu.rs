@@ -418,6 +418,7 @@ struct Staged {
 /// One slot to re-shade: groups bit 0 sun, bit 1 sky; the blend weight of the new value.
 #[derive(Clone, Copy, Debug)]
 struct ReshadeJob {
+    key: CellKey,
     slot: u32,
     epoch: u64,
     probe: [f32; 3],
@@ -977,9 +978,11 @@ fn write_words(dst: &mut Vec<u8>, words: [u32; 4]) {
 }
 
 /// Captures start at the free-space probe; the zero normal adds no surface offset.
-fn write_work(dst: &mut Vec<u8>, slot: u32, probe: [f32; 3], index: u32) {
+/// One work entry: probe position, `w` = the cell spacing for a projection entry (the depth
+/// moments clamp distances to the DDGI maximum depth, 1.5 * sqrt(3) * spacing), 0 otherwise.
+fn write_work(dst: &mut Vec<u8>, slot: u32, probe: [f32; 3], index: u32, spacing: f32) {
     let [x, y, z] = probe;
-    write_words(dst, [x, y, z, 0.0].map(f32::to_bits));
+    write_words(dst, [x, y, z, spacing].map(f32::to_bits));
     write_words(dst, [0.0f32; 4].map(f32::to_bits));
     write_words(dst, [slot, index, 0, 0]);
 }
@@ -1310,6 +1313,7 @@ impl SphericalGpu {
                 cell.epoch,
                 groups,
                 cell.probe,
+                cell.key,
             ));
         }
         self.reshade_pending = candidates.len() as u32;
@@ -1317,7 +1321,8 @@ impl SphericalGpu {
         candidates.truncate((settings.sun_faces as usize / FACE_COUNT).max(1));
         candidates
             .into_iter()
-            .map(|(_, angle, slot, epoch, groups, probe)| ReshadeJob {
+            .map(|(_, angle, slot, epoch, groups, probe, key)| ReshadeJob {
+                key,
                 slot,
                 epoch,
                 probe,
@@ -1476,9 +1481,19 @@ impl SphericalGpu {
         let direct = projection & 0x100 != 0;
         self.work_bytes.clear();
         for &job in jobs {
-            write_work(&mut self.work_bytes, job.slot, job.probe, job.face as u32);
+            write_work(
+                &mut self.work_bytes,
+                job.slot,
+                job.probe,
+                job.face as u32,
+                0.0,
+            );
         }
         let slot_index = |rows: usize, slot: u32| (rows + SLOT_ROWS * slot as usize) as u32;
+        let spacing = |key| {
+            let (radial, angular) = scheduler.grid().cell_extent(key);
+            radial.max(angular) as f32
+        };
         self.face_masks.fill(0);
         let mut projected = 0;
         let mut projected_slots = Vec::new();
@@ -1491,7 +1506,13 @@ impl SphericalGpu {
             let bit = 1 << job.face as u8;
             if (ready | *mask) != ALL_FACES && (ready | *mask | bit) == ALL_FACES {
                 let index = slot_index(self.lookup_rows.len(), job.slot);
-                write_work(&mut self.work_bytes, job.slot, job.probe, index);
+                write_work(
+                    &mut self.work_bytes,
+                    job.slot,
+                    job.probe,
+                    index,
+                    spacing(job.key),
+                );
                 projected_slots.push(job.slot);
                 projected += 1;
             }
@@ -1502,7 +1523,13 @@ impl SphericalGpu {
             for cell in scheduler.cells() {
                 if cell.published && cell.is_ready() && !projected_slots.contains(&cell.slot) {
                     let index = slot_index(self.lookup_rows.len(), cell.slot);
-                    write_work(&mut self.work_bytes, cell.slot, cell.probe, index);
+                    write_work(
+                        &mut self.work_bytes,
+                        cell.slot,
+                        cell.probe,
+                        index,
+                        spacing(cell.key),
+                    );
                     projected_slots.push(cell.slot);
                     projected += 1;
                 }
@@ -1515,7 +1542,13 @@ impl SphericalGpu {
                 continue;
             }
             let index = slot_index(self.lookup_rows.len(), job.slot);
-            write_work(&mut self.work_bytes, job.slot, job.probe, index);
+            write_work(
+                &mut self.work_bytes,
+                job.slot,
+                job.probe,
+                index,
+                spacing(job.key),
+            );
             projected_slots.push(job.slot);
             projected += 1;
         }

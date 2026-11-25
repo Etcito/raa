@@ -507,7 +507,11 @@ fn spherical_bins(@builtin(local_invocation_id) id: vec3<u32>,
     let face = group.z % 6u;
     let probe = work.position.xyz;
     let channels = options[1].x;
-    let miss_distance = 1.5 * bitcast<f32>(options[2].y);
+    // Depth moments see distances up to the DDGI maximum depth (1.5 * sqrt(3) * the cell
+    // spacing in work.position.w): a miss stored at the outer shell (~57 m) skewed the bins
+    // toward far and let light leak through walls (spherical-normal agent).
+    let max_depth = select(1.5 * bitcast<f32>(options[2].y), 2.598 * work.position.w, work.position.w > 0.0);
+    let miss_distance = max_depth;
     let px = id.x + 8u * id.y;
     let uv = (vec2<f32>(id.xy) + 0.5) * 0.25 - 1.0;
     let direction = normalize(raa_spherical_face_direction(face, uv));
@@ -527,7 +531,7 @@ fn spherical_bins(@builtin(local_invocation_id) id: vec3<u32>,
         let facing = max(dot(n, -direction), 0.2);
         let a = solid_angle * r * r / facing;
         area = vec4<f32>(a * texel.hit_position.xyz, a);
-        normal = vec4<f32>(a * n, r);
+        normal = vec4<f32>(a * n, min(r, max_depth));
         hit = spherical_masked(texel, channels & 2u) * solid_angle;
         hit_sky = sky_radiance;
         hit_other = spherical_masked(texel, channels & 4u) * solid_angle;
