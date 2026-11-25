@@ -44,6 +44,8 @@ impl Engine {
             put(&result, "raysPerProbe", s.rays_per_probe.into());
             put(&result, "updateFraction", s.update_fraction.into());
             put(&result, "hysteresis", s.hysteresis.into());
+            put(&result, "budgetMs", s.budget_ms.into());
+            put(&result, "burstMs", s.burst_ms.into());
             if let Some(stats) = state.stats() {
                 put(&result, "probes", stats.probes.into());
                 put(&result, "scheduled", stats.scheduled.into());
@@ -55,6 +57,22 @@ impl Engine {
                 }
                 put(&result, "base", base.into());
                 put(&result, "gpuBytes", (stats.gpu_bytes as f64).into());
+                put(&result, "burst", stats.burst.into());
+                put(&result, "visible", stats.visibility.visible.into());
+                put(&result, "visibleValid", stats.visibility.valid.into());
+                put(
+                    &result,
+                    "visibleConverged",
+                    stats.visibility.converged.into(),
+                );
+                put(&result, "convergeAge", stats.converge_age.into());
+                put(&result, "msPerProbe", stats.ms_per_probe.into());
+                put(
+                    &result,
+                    "updateMs",
+                    stats.update_ms.map_or(JsValue::NULL, JsValue::from),
+                );
+                put(&result, "screenResolve", stats.screen_resolve.into());
             }
             Ok(result.into())
         })

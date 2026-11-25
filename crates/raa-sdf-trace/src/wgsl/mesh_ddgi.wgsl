@@ -14,6 +14,7 @@ struct DdgiParams {
 
 @group(0) @binding(27) var<storage, read_write> ddgi_probes: array<vec4<u32>>;
 @group(0) @binding(28) var<uniform> ddgi_params: DdgiParams;
+// Low 16 bits: slot; high 16 bits: updates the slot's probe already received (0 = fresh).
 @group(0) @binding(29) var<storage, read> ddgi_jobs: array<u32>;
 
 fn raa_ddgi_word(index: u32) -> vec4<u32> {
@@ -32,7 +33,7 @@ var<workgroup> ddgi_direction: array<vec3<f32>, 256>;
 var<workgroup> ddgi_distance: array<f32, 256>;
 var<workgroup> ddgi_irr: array<vec3<f32>, 64>;
 var<workgroup> ddgi_depth_tile: array<vec2<f32>, 256>;
-// slot, run (0 skip, 1 trace), fresh, unused
+// slot, run (0 skip, 1 trace), fresh, scheduled age
 var<workgroup> ddgi_job: vec4<u32>;
 var<workgroup> ddgi_origin: vec4<f32>;
 
@@ -87,16 +88,79 @@ fn ddgi_shade(origin: vec3<f32>, direction: vec3<f32>, limit: f32, seed: ptr<fun
     }
     let v = -direction;
     rgb += mesh_sun_at_hit(p, ng, n, v, material, true);
-    let shadow_origin = p + ng * (2.0 * EPS);
-    for (var i = 0u; i < min(256u, frame.light_info.x); i++) {
-        var light_seed = *seed;
-        rgb += mesh_local_at_hit(i, shadow_origin, p, ng, n, v, material, &light_seed, true, false);
-    }
+    rgb += ddgi_local_lights(p, ng, n, v, material, seed);
     if (ddgi_params.counts.w & DDGI_BOUNCE) != 0u {
         let bounce = raa_ddgi_sample(p, n, v);
         rgb += diffuse(material) * bounce.rgb * bounce.w;
     }
     return vec4<f32>(rgb, hit.t);
+}
+
+// Unshadowed diffuse contribution of a point, spot or directional light (rgb) and its
+// distance (w, the shadow ray length); zero when it cannot reach the hit.
+fn ddgi_light_unshadowed(light: Light, p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
+                         mat: Material) -> vec4<f32> {
+    if !any(light.radiance.rgb > vec3<f32>(0.0)) { return vec4<f32>(0.0); }
+    let travel = light.direction_outer.xyz;
+    let delta = light.position_range.xyz - p;
+    var distance = length(delta);
+    var l = delta / max(distance, EPS);
+    var weight = 1.0;
+    if light.kind == 2u {
+        l = -travel;
+        distance = frame.clip.y;
+    } else {
+        if distance >= light.position_range.w { return vec4<f32>(0.0); }
+        let window = saturate(1.0 - pow(distance / light.position_range.w, 4.0));
+        weight = window * window / max(distance * distance, 0.04);
+        if light.kind == 1u { weight *= smoothstep(light.direction_outer.w, light.inner, dot(travel, -l)); }
+    }
+    let nl = saturate(dot(n, l));
+    if nl <= 0.0 || dot(ng, l) <= 0.0 || weight <= 0.0 { return vec4<f32>(0.0); }
+    return vec4<f32>(direct_brdf(mat, n, v, l, true) * (nl * weight * light.radiance.rgb), distance);
+}
+
+fn ddgi_luma(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// Local lights at a probe-ray hit with ONE shadow ray: a point, spot or directional light is
+// picked in proportion to its unshadowed contribution and the estimate is their unshadowed sum
+// times that light's visibility (unbiased; the probe hysteresis averages the noise). Area panels
+// keep the shared one-tap estimator with its own shadow ray.
+fn ddgi_local_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: Material,
+                     seed: ptr<function, u32>) -> vec3<f32> {
+    let count = min(256u, frame.light_info.x);
+    let shadow_origin = p + ng * (2.0 * EPS);
+    var panels = vec3<f32>(0.0);
+    var total = 0.0;
+    for (var i = 0u; i < count; i++) {
+        let light = lights[i];
+        if light.kind == 3u {
+            var light_seed = *seed;
+            panels += mesh_local_at_hit(i, shadow_origin, p, ng, n, v, mat, &light_seed, true, false);
+            continue;
+        }
+        total += ddgi_luma(ddgi_light_unshadowed(light, p, ng, n, v, mat).rgb);
+    }
+    if total <= 0.0 { return panels; }
+    let pick = random(seed) * total;
+    var running = 0.0;
+    for (var i = 0u; i < count; i++) {
+        let light = lights[i];
+        if light.kind == 3u { continue; }
+        let c = ddgi_light_unshadowed(light, p, ng, n, v, mat);
+        let luma = ddgi_luma(c.rgb);
+        running += luma;
+        if luma <= 0.0 || running < pick { continue; }
+        var l = -light.direction_outer.xyz;
+        if light.kind != 2u { l = normalize(light.position_range.xyz - p); }
+        if closest(Ray(shadow_origin, l), c.w - 2.0 * EPS, true).object == MISS {
+            return panels + c.rgb * (total / luma);
+        }
+        return panels;
+    }
+    return panels;
 }
 
 fn ddgi_pack_irr(a: vec3<f32>, b: vec3<f32>) -> vec4<u32> {
@@ -128,7 +192,8 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
     let v = raa_ddgi_volume();
     let rays = min(ddgi_params.counts.x, DDGI_MAX_RAYS);
     if lid == 0u {
-        let slot = ddgi_jobs[group.x];
+        let job = ddgi_jobs[group.x];
+        let slot = job & 0xffffu;
         let g = ddgi_slot_coord(v, slot);
         let row = v.meta_row + 2u * slot;
         var record = ddgi_probes[row];
@@ -144,7 +209,7 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
             run = 0u;
             ddgi_probes[row] = vec4<u32>(record.xyz, (record.w & 0xffu) | (((turn + 1u) & 0xffu) << 8u));
         }
-        ddgi_job = vec4<u32>(slot, run, u32(fresh), 0u);
+        ddgi_job = vec4<u32>(slot, run, u32(fresh), job >> 16u);
         ddgi_origin = vec4<f32>(vec3<f32>(g) * v.spacing + offset, 0.0);
     }
     let job = workgroupUniformLoad(&ddgi_job);
@@ -212,7 +277,10 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
     }
 
     // 3. Blend irradiance (one interior texel per thread) and depth moments (four per thread).
-    let hysteresis = select(ddgi_params.tuning.x, 0.0, fresh);
+    // A young probe averages its first updates progressively (weight 1/(age+1)) before the
+    // configured hysteresis takes over, so a scrolled-in probe converges in a few updates.
+    let age = f32(job.w);
+    let hysteresis = select(min(ddgi_params.tuning.x, age / (age + 1.0)), 0.0, fresh);
     {
         let xy = vec2<u32>(lid % RAA_DDGI_IRR, lid / RAA_DDGI_IRR);
         let texel = raa_ddgi_oct_decode((vec2<f32>(xy) + 0.5) / f32(RAA_DDGI_IRR) * 2.0 - 1.0);
@@ -278,4 +346,32 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
         }
         ddgi_probes[v.depth_row + (depth_first + t) / 4u] = words;
     }
+}
+
+// Screen resolve: the volume interpolated once per pixel of the prepass depth and normal, so the
+// forward shader reads one row per pixel instead of eight probes. A row holds rgb and the blend
+// weight (f16) and the camera distance of the surface it was resolved for (f32): forward falls
+// back to the full lookup when its own surface differs (MSAA edges, surfaces absent from the
+// prepass).
+@compute @workgroup_size(8, 8, 1)
+fn ddgi_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
+    let screen = raa_ddgi_word(9u);
+    if id.x >= screen.y || id.y >= screen.z { return; }
+    let row = screen.x + id.y * screen.y + id.x;
+    let pixel = vec2<i32>(id.xy);
+    let z = textureLoad(depth, pixel, 0);
+    let normal_view = textureLoad(normals, pixel, 0).xyz;
+    if z >= 1.0 || dot(normal_view, normal_view) <= 0.0 {
+        ddgi_probes[row] = vec4<u32>(0u);
+        return;
+    }
+    let dims = vec2<f32>(f32(screen.y), f32(screen.z));
+    let p = world_at((vec2<f32>(id.xy) + 0.5) / dims, z);
+    let n = normalize((frame.inv_view * vec4<f32>(normal_view, 0.0)).xyz);
+    let to_eye = frame.camera_pos.xyz - p;
+    let distance = length(to_eye);
+    let sample = raa_ddgi_sample(p, n, to_eye / max(distance, 1e-6));
+    let rgb = clamp(sample.rgb, vec3<f32>(0.0), vec3<f32>(65504.0));
+    ddgi_probes[row] = vec4<u32>(pack2x16float(rgb.xy), pack2x16float(vec2<f32>(rgb.z, sample.w)),
+        bitcast<u32>(distance), 1u);
 }

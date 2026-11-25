@@ -8,6 +8,7 @@ pub mod spherical;
 mod spherical_gpu;
 pub use ddgi::{
     DDGI_FRAME_FEATURE, DDGI_GI_NAME, DdgiDebug, DdgiFeature, DdgiHandle, DdgiSettings, DdgiStats,
+    DdgiView, DdgiVisibility,
 };
 pub use geometry::MeshInput;
 use hybrid::PathCapture;

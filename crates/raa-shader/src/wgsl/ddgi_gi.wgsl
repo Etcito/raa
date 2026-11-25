@@ -172,10 +172,29 @@ fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32>
     return vec4<f32>(root * root * v.intensity, edge * saturate(4.0 * coverage));
 }
 
+// The screen-resolved value of a forward pixel (row 9: first row, width, height, enabled) when it
+// was resolved for this surface (camera distances within 1%), else the full eight-probe lookup.
+fn raa_ddgi_screen_or_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, frag: vec2<f32>,
+                             eye: vec3<f32>) -> vec4<f32> {
+    let screen = raa_ddgi_word(9u);
+    let pixel = vec2<u32>(max(frag, vec2<f32>(0.0)));
+    if screen.w != 0u && pixel.x < screen.y && pixel.y < screen.z {
+        let row = raa_ddgi_word(screen.x + pixel.y * screen.y + pixel.x);
+        let distance = length(p - eye);
+        let resolved = bitcast<f32>(row.z);
+        if row.w != 0u && abs(resolved - distance) <= 0.01 * distance + 0.002 {
+            let ba = unpack2x16float(row.y);
+            return vec4<f32>(unpack2x16float(row.x), ba.x, ba.y);
+        }
+    }
+    return raa_ddgi_sample(p, n, view_dir);
+}
+
 // Same contract as raa_spherical_evaluate: rgb is irradiance / pi, w the blend weight.
-fn raa_ddgi_evaluate(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> RaaSphericalResult {
+fn raa_ddgi_evaluate(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, frag: vec2<f32>,
+                     eye: vec3<f32>) -> RaaSphericalResult {
     if !raa_ddgi_active() { return RaaSphericalResult(); }
-    let sample = raa_ddgi_sample(p, n, view_dir);
+    let sample = raa_ddgi_screen_or_sample(p, n, view_dir, frag, eye);
     let debug = (raa_ddgi_word(4u).w >> 8u) & 0xffu;
     if debug == 1u { return RaaSphericalResult(sample, vec4<f32>(sample.rgb, 1.0)); }
     if debug == 2u {

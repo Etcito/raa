@@ -1,21 +1,27 @@
 //! Dynamic diffuse global illumination (Majercik et al. 2019, with the probe relocation and
 //! classification of Majercik et al. 2021) on the shared world-space mesh BVH.
 //!
-//! A camera-centred, world-aligned probe grid is addressed toroidally, so a scroll recycles only
-//! the planes that leave the volume. Each frame a scheduled subset of probes traces rotated
-//! spherical-Fibonacci rays, shades their hits (sun, local lights, emission and last frame's
-//! volume), relocates and classifies itself and blends octahedral irradiance (8x8) and distance
-//! moments (16x16). Forward and VG shading read the same storage buffer through the spherical GI
-//! binding while `RAA_DDGI_GI_FEATURE` is set.
+//! A camera-centred, world-aligned probe grid (kept inside the scene bounds) is addressed
+//! toroidally, so a scroll recycles only the planes that leave the volume. Each frame a scheduled
+//! subset of probes (see `schedule`: visible first, under a GPU-time budget with a burst while
+//! visible probes are unconverged) traces rotated spherical-Fibonacci rays, shades their hits
+//! (sun, local lights, emission and last frame's volume), relocates and classifies itself and
+//! blends octahedral irradiance (8x8) and distance moments (16x16). A screen resolve then
+//! interpolates the volume once per prepass pixel. Forward and VG shading read the same storage
+//! buffer through the spherical GI binding while `RAA_DDGI_GI_FEATURE` is set.
+
+mod schedule;
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 
 use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx};
 use wgpu::{Buffer, BufferUsages as Usage};
 
+use self::schedule::Schedule;
+pub use self::schedule::{DdgiView, Visibility as DdgiVisibility};
 use super::MeshTraceHandle;
 use super::pass::{buffer, buffer_entry, image_entry};
 
@@ -55,8 +61,14 @@ pub struct DdgiSettings {
     pub spacing: f32,
     pub rays_per_probe: u32,
     pub hysteresis: f32,
-    /// Fraction of the probes scheduled each frame (recycled probes first).
+    /// Most probes updated per frame outside a burst, as a fraction of the volume.
     pub update_fraction: f32,
+    /// GPU time of the probe update per frame (ms), converted with the measured cost per probe.
+    pub budget_ms: f32,
+    /// GPU time per frame while a visible probe is invalid or still converging (ms).
+    pub burst_ms: f32,
+    /// Interpolate the volume once per prepass pixel instead of in the forward shader.
+    pub screen_resolve: bool,
     pub intensity: f32,
     /// Surface biases as fractions of the probe spacing.
     pub normal_bias: f32,
@@ -77,6 +89,9 @@ impl Default for DdgiSettings {
             rays_per_probe: 64,
             hysteresis: 0.97,
             update_fraction: 0.25,
+            budget_ms: 0.6,
+            burst_ms: 2.0,
+            screen_resolve: true,
             intensity: 1.0,
             normal_bias: 0.1,
             view_bias: 0.3,
@@ -103,6 +118,8 @@ impl DdgiSettings {
             && (0.0..=0.995).contains(&self.hysteresis)
             && self.update_fraction > 0.0
             && self.update_fraction <= 1.0
+            && (0.05..=20.0).contains(&self.budget_ms)
+            && (0.05..=20.0).contains(&self.burst_ms)
             && (0.0..=16.0).contains(&self.intensity)
             && (0.0..=1.0).contains(&self.normal_bias)
             && (0.0..=1.0).contains(&self.view_bias);
@@ -111,7 +128,7 @@ impl DdgiSettings {
                 code: "gi.ddgi.invalid_settings",
                 message: format!(
                     "expected probe counts in [2, {MAX_AXIS}] with at most {MAX_PROBES} probes, spacing in [0.05, 100] m, \
-                     16-256 rays, hysteresis in [0, 0.995], update fraction in (0, 1], intensity in [0, 16] and biases in [0, 1]"
+                     16-256 rays, hysteresis in [0, 0.995], update fraction in (0, 1], budgets in [0.05, 20] ms, intensity in [0, 16] and biases in [0, 1]"
                 ),
             });
         }
@@ -123,6 +140,17 @@ impl DdgiSettings {
 pub struct DdgiStats {
     pub probes: u32,
     pub scheduled: u32,
+    /// Whether this frame ran the burst budget (a visible probe invalid or young).
+    pub burst: bool,
+    /// Visible probes after this frame's updates: total, valid, converged.
+    pub visibility: DdgiVisibility,
+    /// Updates a probe needs to count as converged.
+    pub converge_age: u32,
+    /// Measured GPU cost of one probe update (ms), the budget's conversion factor.
+    pub ms_per_probe: f64,
+    /// Last measured GPU time of the update dispatch (ms), when timestamps are available.
+    pub update_ms: Option<f64>,
+    pub screen_resolve: bool,
     pub update_frames: u64,
     pub recycled: u64,
     pub base: [i32; 3],
@@ -134,7 +162,7 @@ pub type DdgiHandle = Rc<RefCell<DdgiState>>;
 #[derive(Default)]
 pub struct DdgiState {
     pub settings: DdgiSettings,
-    view: Option<(usize, [f32; 3])>,
+    view: Option<(usize, DdgiView)>,
     pass_enabled: bool,
     revision: u64,
     stats: Option<DdgiStats>,
@@ -158,9 +186,9 @@ impl DdgiState {
         self.stats
     }
 
-    /// The bridge supplies the effective camera position of each view before the frame.
-    pub fn set_view(&mut self, index: usize, eye: [f32; 3]) {
-        self.view = Some((index, eye));
+    /// The bridge supplies the effective camera of each view before the frame.
+    pub fn set_view(&mut self, index: usize, view: DdgiView) {
+        self.view = Some((index, view));
     }
 }
 
@@ -177,91 +205,156 @@ impl DdgiFeature {
             staged: None,
             published: false,
             rng: 0x9e37_79b9_7f4a_7c15,
+            timer: None,
+            ms_per_probe: INITIAL_MS_PER_PROBE,
+            update_ms: None,
         }))?;
         pipeline.set_enabled(DDGI_GI_NAME, false)?;
         Ok(state)
     }
 }
 
-/// Which probe slots to update: recycled slots first, then a round robin over the volume.
-#[derive(Default)]
-struct Schedule {
-    base: Option<[i32; 3]>,
+/// The grid origin (in probe units) of the volume around `eye`: camera-centred, then kept inside
+/// the scene bounds (padded by one probe) so no plane is spent outside the geometry. An axis the
+/// volume spans entirely is centred on the scene and never scrolls.
+fn volume_base(
+    eye: [f32; 3],
     counts: [u32; 3],
-    cursor: u32,
-    recycled: VecDeque<u32>,
-    pending: Vec<bool>,
-}
-
-impl Schedule {
-    fn reset(&mut self, counts: [u32; 3]) {
-        let total = counts.iter().product::<u32>() as usize;
-        *self = Self {
-            counts,
-            pending: vec![false; total],
-            ..Self::default()
+    spacing: f32,
+    bounds: Option<([f32; 3], [f32; 3])>,
+) -> [i32; 3] {
+    std::array::from_fn(|i| {
+        let n = counts[i] as i32;
+        let centred = (eye[i] / spacing).floor() as i32 - n / 2;
+        let Some((min, max)) = bounds.filter(|(min, max)| min[i] <= max[i]) else {
+            return centred;
         };
-    }
-
-    fn slot(&self, g: [i32; 3]) -> u32 {
-        let n = self.counts.map(|n| n as i32);
-        let s: [u32; 3] = std::array::from_fn(|i| g[i].rem_euclid(n[i]) as u32);
-        s[0] + self.counts[0] * (s[1] + self.counts[1] * s[2])
-    }
-
-    /// Moves the volume to `base`, queuing every slot whose world coordinate changed.
-    fn scroll(&mut self, base: [i32; 3]) -> u32 {
-        let Some(old) = self.base.replace(base) else {
-            return 0;
-        };
-        if old == base {
-            return 0;
+        let lo = (min[i] / spacing).floor() as i32 - 1;
+        let hi = (max[i] / spacing).ceil() as i32 + 1;
+        if hi - lo + 1 <= n {
+            lo - (n - (hi - lo + 1)) / 2
+        } else {
+            centred.clamp(lo, hi - n + 1)
         }
-        let n = self.counts.map(|n| n as i32);
-        let mut queued = 0;
-        for z in 0..n[2] {
-            for y in 0..n[1] {
-                for x in 0..n[0] {
-                    let g = [base[0] + x, base[1] + y, base[2] + z];
-                    let kept = (0..3).all(|i| g[i] >= old[i] && g[i] < old[i] + n[i]);
-                    if !kept {
-                        let slot = self.slot(g);
-                        if !std::mem::replace(&mut self.pending[slot as usize], true) {
-                            self.recycled.push_back(slot);
-                            queued += 1;
-                        }
-                    }
-                }
-            }
-        }
-        queued
-    }
-
-    fn take(&mut self, budget: u32, out: &mut Vec<u32>) {
-        out.clear();
-        let total = self.pending.len() as u32;
-        while out.len() < budget as usize {
-            let Some(slot) = self.recycled.pop_front() else {
-                break;
-            };
-            self.pending[slot as usize] = false;
-            out.push(slot);
-        }
-        let mut guard = 0;
-        while out.len() < budget as usize && guard < total {
-            let slot = self.cursor;
-            self.cursor = (self.cursor + 1) % total;
-            guard += 1;
-            if !self.pending[slot as usize] {
-                out.push(slot);
-            }
-        }
-    }
+    })
 }
 
 struct Staged {
     jobs: Vec<u32>,
     recycled: u32,
+    burst: bool,
+    visibility: DdgiVisibility,
+    converge_age: u32,
+    /// Screen resolve size, when it runs this frame.
+    screen: Option<(u32, u32)>,
+}
+
+/// Starting cost model before the first timestamp readback (RTX 3090, Sponza, 64 rays).
+const INITIAL_MS_PER_PROBE: f64 = 0.0033;
+
+/// GPU timestamps around the update dispatch; one readback in flight at a time.
+struct UpdateTimer {
+    queries: wgpu::QuerySet,
+    resolve: Buffer,
+    readback: Buffer,
+    ms_per_tick: f64,
+    pending: Option<(u32, Receiver<Option<f64>>)>,
+    recorded: Option<u32>,
+}
+
+impl UpdateTimer {
+    fn new(gpu: &GpuContext) -> Option<Self> {
+        if !gpu.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return None;
+        }
+        let device = gpu.device();
+        let size = 2 * u64::from(wgpu::QUERY_SIZE);
+        Some(Self {
+            queries: device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("gi.ddgi.timer"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 2,
+            }),
+            resolve: buffer(
+                device,
+                "gi.ddgi.timer",
+                size,
+                Usage::QUERY_RESOLVE | Usage::COPY_SRC,
+            ),
+            readback: buffer(
+                device,
+                "gi.ddgi.timer",
+                size,
+                Usage::MAP_READ | Usage::COPY_DST,
+            ),
+            ms_per_tick: f64::from(gpu.queue().get_timestamp_period()) / 1e6,
+            pending: None,
+            recorded: None,
+        })
+    }
+
+    /// A finished readback: (probes, ms).
+    fn poll(&mut self) -> Option<(u32, f64)> {
+        let (jobs, receiver) = self.pending.as_ref()?;
+        match receiver.try_recv() {
+            Ok(ms) => {
+                let jobs = *jobs;
+                self.pending = None;
+                ms.map(|ms| (jobs, ms))
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.pending = None;
+                None
+            }
+        }
+    }
+
+    fn writes(&self) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+        self.pending
+            .is_none()
+            .then_some(wgpu::ComputePassTimestampWrites {
+                query_set: &self.queries,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            })
+    }
+
+    fn resolve(&mut self, encoder: &mut wgpu::CommandEncoder, jobs: u32) {
+        let bytes = 2 * u64::from(wgpu::QUERY_SIZE);
+        encoder.resolve_query_set(&self.queries, 0..2, &self.resolve, 0);
+        encoder.copy_buffer_to_buffer(&self.resolve, 0, &self.readback, 0, bytes);
+        let (send, receive) = sync_channel(1);
+        let readback = self.readback.clone();
+        let ms_per_tick = self.ms_per_tick;
+        encoder.map_buffer_on_submit(
+            &self.readback,
+            wgpu::MapMode::Read,
+            0..bytes,
+            move |result| {
+                let ms = result.ok().and_then(|()| {
+                    let ms = readback
+                        .slice(0..bytes)
+                        .get_mapped_range()
+                        .ok()
+                        .and_then(|data| {
+                            let begin = u64::from_le_bytes(data[..8].try_into().ok()?);
+                            let end = u64::from_le_bytes(data[8..16].try_into().ok()?);
+                            end.checked_sub(begin)
+                                .filter(|_| {
+                                    begin != 0 && ms_per_tick.is_finite() && ms_per_tick > 0.0
+                                })
+                                .map(|ticks| ticks as f64 * ms_per_tick)
+                        });
+                    readback.unmap();
+                    ms
+                });
+                let _ = send.send(ms);
+            },
+        );
+        self.pending = Some((jobs, receive));
+        self.recorded = Some(jobs);
+    }
 }
 
 struct DdgiPass {
@@ -272,6 +365,9 @@ struct DdgiPass {
     staged: Option<Staged>,
     published: bool,
     rng: u64,
+    timer: Option<UpdateTimer>,
+    ms_per_probe: f64,
+    update_ms: Option<f64>,
 }
 
 impl DdgiPass {
@@ -338,6 +434,7 @@ impl FeaturePass for DdgiPass {
             self.gpu = None;
             self.staged = None;
             self.schedule = Schedule::default();
+            self.timer = None;
             self.state.borrow_mut().stats = None;
         }
     }
@@ -357,28 +454,51 @@ impl FeaturePass for DdgiPass {
             }
             (state.settings, state.view, state.revision)
         };
-        let Some((_, eye)) = view.filter(|(index, _)| *index == 0) else {
+        let Some((_, camera)) = view.filter(|(index, _)| *index == 0) else {
             self.unpublish(ctx.lighting);
             return Ok(());
         };
         let probes = settings.probe_count();
-        if self
-            .gpu
-            .as_ref()
-            .is_none_or(|gpu| gpu.counts != settings.counts || gpu.revision != revision)
-        {
-            self.gpu = Some(DdgiGpu::new(ctx.gpu, settings.counts, revision));
+        // One row per pixel inside the forward's one storage binding.
+        let rows = layout(probes).rows + u64::from(ctx.size.0) * u64::from(ctx.size.1);
+        let fits = 16 * rows <= u64::from(ctx.gpu.limits().max_storage_buffer_binding_size);
+        let screen = (settings.screen_resolve && fits).then_some(ctx.size);
+        if self.gpu.as_ref().is_none_or(|gpu| {
+            gpu.counts != settings.counts || gpu.revision != revision || gpu.screen != screen
+        }) {
+            // A resize restarts the volume: the screen rows share the probe buffer.
+            self.gpu = Some(DdgiGpu::new(ctx.gpu, settings.counts, revision, screen));
             self.schedule.reset(settings.counts);
         }
-        let base: [i32; 3] = std::array::from_fn(|i| {
-            (eye[i] / settings.spacing).floor() as i32 - (settings.counts[i] / 2) as i32
-        });
-        let recycled = self.schedule.scroll(base);
-        let budget = ((probes as f32 * settings.update_fraction).ceil() as u32).clamp(1, probes);
-        let mut jobs = Vec::with_capacity(budget as usize);
-        self.schedule.take(budget, &mut jobs);
-
+        if self.timer.is_none() {
+            self.timer = UpdateTimer::new(ctx.gpu);
+        }
+        if let Some((jobs, ms)) = self.timer.as_mut().and_then(UpdateTimer::poll) {
+            self.update_ms = Some(ms);
+            if jobs >= 16 && ms > 0.0 {
+                let sample = (ms / f64::from(jobs)).clamp(1e-5, 0.1);
+                self.ms_per_probe += 0.25 * (sample - self.ms_per_probe);
+            }
+        }
         let mesh = self.mesh.borrow();
+        let bounds = mesh.geometry.world_bounds().map(|b| (b.min, b.max));
+        let base = volume_base(camera.eye, settings.counts, settings.spacing, bounds);
+        let recycled = self.schedule.scroll(base);
+        let probes_for = |ms: f32| ((f64::from(ms) / self.ms_per_probe) as u32).clamp(1, probes);
+        let cap = ((probes as f32 * settings.update_fraction).ceil() as u32).clamp(1, probes);
+        let budget = probes_for(settings.budget_ms).min(cap);
+        let burst = probes_for(settings.burst_ms).max(budget);
+        let converge_age = converge_age(settings.hysteresis);
+        let mut jobs = Vec::with_capacity(burst as usize);
+        let (visibility, bursting) = self.schedule.plan(
+            Some(&camera),
+            settings.spacing,
+            converge_age,
+            budget,
+            burst,
+            &mut jobs,
+        );
+
         let triangles = mesh.geometry.count();
         let traceable = triangles > 0 && mesh.frame.is_some() && mesh.texture_atlas.is_some();
         let sky_diffuse = mesh.sky_diffuse;
@@ -394,10 +514,11 @@ impl FeaturePass for DdgiPass {
             flags |= FLAG_RELOCATE;
         }
         gpu.write_header(ctx.gpu, base, flags, settings);
+        let resolve = gpu.screen;
         ctx.lighting
             .set_spherical_gi(Some((gpu.probes.clone(), gpu.probes.clone())));
         self.published = true;
-        if !traceable || jobs.is_empty() {
+        if !traceable {
             return Ok(());
         }
         let extent = settings
@@ -451,7 +572,14 @@ impl FeaturePass for DdgiPass {
         queue.write_buffer(&gpu.options, 0, &options);
         let job_bytes: Vec<u8> = jobs.iter().flat_map(|slot| slot.to_le_bytes()).collect();
         queue.write_buffer(&gpu.jobs, 0, &job_bytes);
-        self.staged = Some(Staged { jobs, recycled });
+        self.staged = Some(Staged {
+            jobs,
+            recycled,
+            burst: bursting,
+            visibility,
+            converge_age: u32::from(converge_age),
+            screen: resolve,
+        });
         Ok(())
     }
 
@@ -488,15 +616,49 @@ impl FeaturePass for DdgiPass {
                 buffer_entry(29, &gpu.jobs),
             ],
         });
-        let mut pass = ctx
-            .encoder
-            .begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("gi.ddgi.update"),
-                ..Default::default()
+        let jobs = staged.jobs.len() as u32;
+        if jobs > 0 {
+            let timer = self.timer.as_mut();
+            let writes = timer.as_ref().and_then(|timer| timer.writes());
+            let timed = writes.is_some();
+            {
+                let mut pass = ctx
+                    .encoder
+                    .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("gi.ddgi.update"),
+                        timestamp_writes: writes,
+                    });
+                pass.set_pipeline(&gpu.update);
+                pass.set_bind_group(0, &group, &[]);
+                pass.dispatch_workgroups(jobs, 1, 1);
+            }
+            if timed && let Some(timer) = timer {
+                timer.resolve(ctx.encoder, jobs);
+            }
+        }
+        if let Some((width, height)) = staged.screen {
+            let depth = ctx.targets.depth_input(ctx.resources, DDGI_GI_NAME);
+            let normal = ctx.targets.normal_input(ctx.resources, DDGI_GI_NAME);
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gi.ddgi.resolve"),
+                layout: &gpu.resolve.get_bind_group_layout(0),
+                entries: &[
+                    buffer_entry(0, &frame),
+                    image_entry(6, &depth),
+                    image_entry(7, &normal),
+                    buffer_entry(27, &gpu.probes),
+                ],
             });
-        pass.set_pipeline(&gpu.update);
-        pass.set_bind_group(0, &group, &[]);
-        pass.dispatch_workgroups(staged.jobs.len() as u32, 1, 1);
+            let mut pass = ctx
+                .encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("gi.ddgi.resolve"),
+                    ..Default::default()
+                });
+            pass.set_pipeline(&gpu.resolve);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+        }
         Ok(())
     }
 
@@ -511,12 +673,26 @@ impl FeaturePass for DdgiPass {
         state.stats = Some(DdgiStats {
             probes,
             scheduled: staged.jobs.len() as u32,
+            burst: staged.burst,
+            visibility: staged.visibility,
+            converge_age: staged.converge_age,
+            ms_per_probe: self.ms_per_probe,
+            update_ms: self.update_ms,
+            screen_resolve: staged.screen.is_some(),
             update_frames: previous.update_frames + 1,
             recycled: previous.recycled + u64::from(staged.recycled),
             base: self.schedule.base.unwrap_or_default(),
             gpu_bytes,
         });
     }
+}
+
+/// Updates after which a probe counts as converged: the progressive phase of the blend, where the
+/// running mean's weight 1/(age+1) reaches the configured hysteresis (capped to 4..64).
+fn converge_age(hysteresis: f32) -> u16 {
+    (1.0 / (1.0 - hysteresis.min(0.985)))
+        .round()
+        .clamp(4.0, 64.0) as u16
 }
 
 fn push_u32(dst: &mut Vec<u8>, words: [u32; 4]) {
@@ -554,7 +730,9 @@ pub(crate) fn layout(probes: u32) -> DdgiLayout {
 struct DdgiGpu {
     counts: [u32; 3],
     revision: u64,
+    screen: Option<(u32, u32)>,
     update: wgpu::ComputePipeline,
+    resolve: wgpu::ComputePipeline,
     probes: Buffer,
     params: Buffer,
     options: Buffer,
@@ -563,7 +741,7 @@ struct DdgiGpu {
 }
 
 impl DdgiGpu {
-    fn new(gpu: &GpuContext, counts: [u32; 3], revision: u64) -> Self {
+    fn new(gpu: &GpuContext, counts: [u32; 3], revision: u64, screen: Option<(u32, u32)>) -> Self {
         let device = gpu.device();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(DDGI_GI_NAME),
@@ -577,11 +755,22 @@ impl DdgiGpu {
             compilation_options: Default::default(),
             cache: None,
         });
-        let rows = layout(counts.iter().product()).rows;
+        let resolve = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("gi.ddgi.resolve"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("ddgi_resolve"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let pixels = screen.map_or(0, |(w, h)| u64::from(w) * u64::from(h));
+        let rows = layout(counts.iter().product()).rows + pixels;
         Self {
             counts,
             revision,
+            screen,
             update,
+            resolve,
             probes: buffer(
                 device,
                 "gi.ddgi.probes",
@@ -667,6 +856,17 @@ impl DdgiGpu {
         );
         // Distance moments saturate at one and a half probe diagonals.
         push_f32(&mut header, [1.5 * 3f32.sqrt() * spacing, 0.0, 0.0, 0.0]);
+        // Screen resolve rows: first row, width, height, enabled.
+        let (width, height) = self.screen.unwrap_or((0, 0));
+        push_u32(
+            &mut header,
+            [
+                rows.rows as u32,
+                width,
+                height,
+                u32::from(self.screen.is_some()),
+            ],
+        );
         header.resize(16 * HEADER_ROWS as usize, 0);
         if header != self.header {
             gpu.queue().write_buffer(&self.probes, 0, &header);
@@ -715,26 +915,19 @@ mod tests {
     }
 
     #[test]
-    fn scroll_recycles_only_the_planes_that_left() {
-        let mut schedule = Schedule::default();
-        schedule.reset([4, 2, 4]);
-        assert_eq!(schedule.scroll([0, 0, 0]), 0);
-        // One cell along +x recycles one 2x4 plane.
-        assert_eq!(schedule.scroll([1, 0, 0]), 8);
-        let mut jobs = Vec::new();
-        schedule.take(8, &mut jobs);
-        let expected: Vec<u32> = (0..2)
-            .flat_map(|y| (0..4).map(move |z| (y, z)))
-            .map(|(y, z)| schedule.slot([4, y, z]))
-            .collect();
-        let mut sorted = jobs.clone();
-        sorted.sort_unstable();
-        let mut want = expected.clone();
-        want.sort_unstable();
-        assert_eq!(sorted, want);
-        // The round robin then continues over every slot.
-        schedule.take(32, &mut jobs);
-        assert_eq!(jobs.len(), 32);
+    fn volume_stays_inside_the_scene_bounds() {
+        let bounds = Some(([-15.0, -0.2, -6.5], [14.0, 15.0, 6.5]));
+        // z spans 13 m + padding = 13 probe cells at 1.3 m: fits in 24, centred, independent of the eye
+        let a = volume_base([-8.8, 1.6, -0.9], [24, 12, 24], 1.3, bounds);
+        let b = volume_base([5.0, 7.0, 3.0], [24, 12, 24], 1.3, bounds);
+        assert_eq!(a[2], b[2]);
+        assert!(a[2] <= (-6.5f32 / 1.3).floor() as i32 - 1);
+        assert!(a[2] + 23 >= (6.5f32 / 1.3).ceil() as i32 + 1);
+        // x (29 m) does not fit 24 * 1.3: the camera-centred origin is clamped to the padded bounds
+        assert_eq!(a[0], (-15.0f32 / 1.3).floor() as i32 - 1);
+        assert_eq!(b[0] + 23, (14.0f32 / 1.3).ceil() as i32 + 1);
+        // no geometry: camera-centred
+        assert_eq!(volume_base([0.0; 3], [4, 4, 4], 1.0, None), [-2, -2, -2]);
     }
 
     #[test]
@@ -747,6 +940,9 @@ mod tests {
             staged: None,
             published: false,
             rng: 12345,
+            timer: None,
+            ms_per_probe: INITIAL_MS_PER_PROBE,
+            update_ms: None,
         };
         for _ in 0..16 {
             let m = pass_rng.random_rotation();

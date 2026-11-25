@@ -135,12 +135,32 @@ impl NodeFamily for Ddgi {
             ),
             param(
                 "updateFraction",
-                "Probes updated per frame",
+                "Max probes updated per frame (fraction)",
                 ParamKind::Number,
                 number(d.update_fraction),
                 Some((0.01, 1.0)),
                 Some(0.01),
                 "",
+                Rebuild::None,
+            ),
+            param(
+                "budgetMs",
+                "Update GPU budget",
+                ParamKind::Number,
+                number(d.budget_ms),
+                Some((0.05, 20.0)),
+                Some(0.05),
+                "ms",
+                Rebuild::None,
+            ),
+            param(
+                "burstMs",
+                "Burst GPU budget (unconverged visible probes)",
+                ParamKind::Number,
+                number(d.burst_ms),
+                Some((0.05, 20.0)),
+                Some(0.05),
+                "ms",
                 Rebuild::None,
             ),
             param(
@@ -176,6 +196,7 @@ impl NodeFamily for Ddgi {
             flag("relocation", "Probe relocation", d.relocation),
             flag("classification", "Probe classification", d.classification),
             flag("bounce", "Multiple bounces", d.bounce),
+            flag("screenResolve", "Screen resolve pass", d.screen_resolve),
             debug,
         ];
         vec![NodeTypeSpec {
@@ -260,12 +281,15 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> DdgiSetti
             }
             ("hysteresis", ParamValue::Number(x)) => s.hysteresis = *x as f32,
             ("updateFraction", ParamValue::Number(x)) => s.update_fraction = *x as f32,
+            ("budgetMs", ParamValue::Number(x)) => s.budget_ms = *x as f32,
+            ("burstMs", ParamValue::Number(x)) => s.burst_ms = *x as f32,
             ("intensity", ParamValue::Number(x)) => s.intensity = *x as f32,
             ("normalBias", ParamValue::Number(x)) => s.normal_bias = *x as f32,
             ("viewBias", ParamValue::Number(x)) => s.view_bias = *x as f32,
             ("relocation", ParamValue::Bool(b)) => s.relocation = *b,
             ("classification", ParamValue::Bool(b)) => s.classification = *b,
             ("bounce", ParamValue::Bool(b)) => s.bounce = *b,
+            ("screenResolve", ParamValue::Bool(b)) => s.screen_resolve = *b,
             ("debug", ParamValue::Enum(name)) => {
                 s.debug = match name.as_str() {
                     "irradiance" => DdgiDebug::Irradiance,

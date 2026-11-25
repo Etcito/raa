@@ -95,7 +95,14 @@ pub(crate) fn prepare(
         let mut volume = volume.borrow_mut();
         if volume.active() {
             ddgi = view == 0;
-            volume.set_view(view, st.scene.camera.eye.to_array());
+            let camera = st.scene.camera;
+            volume.set_view(
+                view,
+                raa_sdf_trace::mesh::DdgiView {
+                    eye: camera.eye.to_array(),
+                    view_proj: camera.view_proj().cols,
+                },
+            );
         }
     }
     if !active && !spherical && !ddgi {
