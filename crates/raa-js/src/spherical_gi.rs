@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 19] = [
+const OPTIONS: [&str; 20] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
@@ -43,6 +43,7 @@ const OPTIONS: [&str; 19] = [
     "sphereDirect",
     "directSunRange",
     "frontProbes",
+    "traceTexel",
     "autoRange",
 ];
 
@@ -146,6 +147,13 @@ fn read_patch(
                 settings.sphere_direct = value
                     .as_bool()
                     .ok_or_else(|| invalid(&name, "expected a boolean"))?;
+            }
+            "traceTexel" => {
+                let texel = number()?;
+                if !(0.0..=4294967295.0).contains(&texel) {
+                    return Err(invalid(&name, "expected x + 1 | (y + 1) << 16"));
+                }
+                settings.trace_texel = texel as u32;
             }
             "frontProbes" => {
                 settings.front_probes = value
@@ -302,12 +310,20 @@ impl Engine {
             let Some(handle) = st.features.get::<SphericalGiHandle>() else {
                 return Ok(JsValue::NULL);
             };
-            let state = handle.borrow();
+            let mut state = handle.borrow_mut();
+            let trace = state.trace();
             let Some(stats) = state.stats() else {
                 return Ok(JsValue::NULL);
             };
             let result = Object::new();
             put(&result, "active", state.active().into());
+            if let Some(trace) = trace {
+                let words = Array::new();
+                for word in trace {
+                    words.push(&f64::from(word).into());
+                }
+                put(&result, "trace", words.into());
+            }
             let scheduler = stats.scheduler;
             for (name, value) in [
                 ("cells", scheduler.cells as f64),

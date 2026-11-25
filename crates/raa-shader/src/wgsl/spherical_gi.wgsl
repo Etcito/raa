@@ -570,6 +570,14 @@ struct RaaSphericalFront {
     nominal: f32,
 }
 
+// Diagnostic trace (header row 6 w = resolve texel x+1 | (y+1) << 16, 0 off): the resolve
+// sets raa_spherical_tracing for that texel and replaces raa_spherical_trace with a writer
+// of the rows after the resolve rows (read back by sphericalGiStats().trace). Elsewhere the
+// lookup is read-only and the trace is a no-op.
+var<private> raa_spherical_tracing: bool;
+var<private> raa_spherical_trace_count: u32;
+fn raa_spherical_trace(row: u32, value: vec4<u32>) {}
+
 fn raa_spherical_front_add(acc: ptr<function, RaaSphericalFront>, entry: u32, kernel: f32,
                            p: vec3<f32>, n: vec3<f32>, far: f32) {
     let mask = raa_spherical_data[1].z;
@@ -584,6 +592,18 @@ fn raa_spherical_front_add(acc: ptr<function, RaaSphericalFront>, entry: u32, ke
     let to_probe = probe.xyz - p;
     let front = smoothstep(0.0, 0.5, dot(to_probe, n) * inverseSqrt(max(dot(to_probe, to_probe), 1e-12)));
     let w = kernel * front * live;
+    if raa_spherical_tracing && raa_spherical_trace_count < 24u {
+        let visibility = raa_spherical_visibility(entry, mask, p, n);
+        let value = raa_spherical_probe_value(entry, mask, p, n, far);
+        let row = 8u + 4u * raa_spherical_trace_count;
+        raa_spherical_trace(row, raa_spherical_data[entry + 1u]);
+        raa_spherical_trace(row + 1u, vec4<u32>(raa_spherical_data[entry].x, bitcast<u32>(kernel),
+            bitcast<u32>(front), bitcast<u32>(live)));
+        raa_spherical_trace(row + 2u, bitcast<vec4<u32>>(vec4<f32>(dot(to_probe, n), visibility,
+            w * visibility, length(to_probe))));
+        raa_spherical_trace(row + 3u, bitcast<vec4<u32>>(vec4<f32>(value, validity)));
+        raa_spherical_trace_count += 1u;
+    }
     if w <= 1e-6 { return; }
     (*acc).front += w;
     let seen = w * raa_spherical_visibility(entry, mask, p, n);
@@ -677,8 +697,23 @@ fn raa_spherical_diffuse_front(p: vec3<f32>, normal: vec3<f32>,
             smoothstep(0.0, 0.25, acc.coverage / max(acc.nominal, 1e-6)) * edge);
     }
     let fallback = 1.0 - smoothstep(0.02, 0.15, acc.front);
+    var corners = vec4<f32>(0.0);
     if fallback > 0.0 {
-        value = mix(value, raa_spherical_diffuse_corners(p, normal, cell), fallback);
+        corners = raa_spherical_diffuse_corners(p, normal, cell);
+    }
+    if raa_spherical_tracing {
+        raa_spherical_trace(0u, vec4<u32>(0x7ace0001u, raa_spherical_trace_count,
+            bitcast<u32>(fallback), bitcast<u32>(acc.front)));
+        raa_spherical_trace(1u, bitcast<vec4<u32>>(vec4<f32>(acc.total, acc.coverage, acc.nominal, cell.radius)));
+        raa_spherical_trace(2u, bitcast<vec4<u32>>(vec4<f32>(p, f32(cell.shell))));
+        raa_spherical_trace(3u, bitcast<vec4<u32>>(vec4<f32>(normal, f32(cell.face))));
+        raa_spherical_trace(4u, bitcast<vec4<u32>>(value));
+        raa_spherical_trace(5u, bitcast<vec4<u32>>(corners));
+        raa_spherical_trace(6u, bitcast<vec4<u32>>(vec4<f32>(at, kernel)));
+        raa_spherical_trace(7u, raa_spherical_data[0]);
+    }
+    if fallback > 0.0 {
+        value = mix(value, corners, fallback);
     }
     return value;
 }
