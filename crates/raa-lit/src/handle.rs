@@ -1232,6 +1232,49 @@ fn whole(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     }
 }
 
+/// The group-0 layout of the foliage appearance compute pipeline: bindings 0-7 of
+/// `frame_layout_entries` with `COMPUTE` visibility. Binding 8 (the vertex-only previous
+/// records) is left out so the compute group keeps six storage buffers.
+fn compute_frame_layout(gpu: &GpuContext) -> wgpu::BindGroupLayout {
+    let mut all = frame_layout_entries();
+    let entries = &mut all[..8];
+    for entry in entries.iter_mut() {
+        entry.visibility = wgpu::ShaderStages::COMPUTE;
+    }
+    gpu.device()
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raa.lit.compute_frame_layout"),
+            entries,
+        })
+}
+
+/// A compute group 0 over the renderer's live frame, material, extras and instance buffers,
+/// its current texture atlas and material data (bindings 0-7 of `frame_layout_entries`).
+fn create_material_compute_group(
+    gpu: &GpuContext,
+    layout: &wgpu::BindGroupLayout,
+    buffers: [&wgpu::Buffer; 4],
+    textures: &TextureAtlas,
+    data: &MaterialData,
+) -> wgpu::BindGroup {
+    let [frame, materials, extras, instances] = buffers;
+    let [atlas, sampler, rects] = textures.bind_entries();
+    gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raa.lit.material_compute_group"),
+        layout,
+        entries: &[
+            whole(0, frame),
+            whole(1, materials),
+            whole(2, extras),
+            atlas,
+            sampler,
+            rects,
+            data.bind_entry(),
+            whole(7, instances),
+        ],
+    })
+}
+
 /// Writes the part of `bytes` that fits `buffer` at offset 0 (nothing when empty).
 fn write_prefix(queue: &wgpu::Queue, buffer: &wgpu::Buffer, bytes: &[u8]) {
     let n = bytes.len().min(buffer.size() as usize);
@@ -1882,6 +1925,52 @@ impl LitHandle {
     /// each frame rather than keeping it.
     pub fn frame_bind_group(&self) -> wgpu::BindGroup {
         self.shared.borrow().frame_bind_group.clone()
+    }
+
+    /// The WGSL source of material function `id`, after the canonical-id mapping the
+    /// pipeline cache uses (`canonical_fn`): a clone of the registry entry's
+    /// source, or `None` when `id` is unknown. No borrow of the shared state outlives it.
+    ///
+    /// Handoff: cards 'Assemble stochastic foliage and its volume' and 'Run differentiable
+    /// foliage optimization' reach this method only through `sample_foliage_albedo`
+    /// (`crates/raa-lit/src/foliage_appearance.rs`); it gives that compute pass the source
+    /// material function of its native generation.
+    pub fn material_fn_source(&self, id: MaterialFnId) -> Option<String> {
+        let s = self.shared.borrow();
+        s.fns
+            .get(s.canonical_fn(id))
+            .map(|entry| entry.wgsl.clone())
+    }
+
+    /// The compute-visible group 0 of the foliage appearance pipeline: a new layout with
+    /// bindings 0-7 of `frame_layout_entries` at `COMPUTE` visibility (binding 8, the
+    /// vertex-only previous records, is left out) and a bind group over the renderer's live
+    /// frame, material, extras and instance buffers, its current texture atlas and material
+    /// data. Fetch the pair again for each submission: the atlas can replace its bindings.
+    ///
+    /// Handoff: cards 'Assemble stochastic foliage and its volume' and 'Run differentiable
+    /// foliage optimization' reach this method only through `sample_foliage_albedo`
+    /// (`crates/raa-lit/src/foliage_appearance.rs`); it binds the renderer's live material
+    /// resources to that compute pass.
+    pub fn material_compute_group(
+        &self,
+        gpu: &GpuContext,
+    ) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+        let s = self.shared.borrow();
+        let layout = compute_frame_layout(gpu);
+        let group = create_material_compute_group(
+            gpu,
+            &layout,
+            [
+                &s.frame_buffer,
+                &s.material_buffer,
+                &s.extras_buffer,
+                &s.instance_storage,
+            ],
+            &s.textures,
+            &s.data,
+        );
+        (layout, group)
     }
 
     /// The render pipeline of shader variant `key` with the fixed-function state `spec`:
