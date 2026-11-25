@@ -112,9 +112,12 @@ impl Geometry {
     pub fn update(&mut self, inputs: &[MeshInput<'_>]) -> Result<(), RaaError> {
         let count: usize = inputs.iter().map(|input| input.indices.len() / 3).sum();
         if count > MAX_TRIANGLES {
-            return Err(RaaError::Resource(format!(
-                "mesh tracing supports {MAX_TRIANGLES} triangles per view, received {count}"
-            )));
+            return Err(RaaError::FrameGraph {
+                code: "trace.mesh_capacity",
+                message: format!(
+                    "Mesh tracing needs {count} triangles in this view. The current ray geometry limit is {MAX_TRIANGLES}. Select a render profile without mesh tracing to render this scene at full geometry."
+                ),
+            });
         }
         let rebuild = self.parts.len() != inputs.len()
             || inputs
@@ -349,6 +352,39 @@ impl Geometry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capacity_refusal_preserves_the_previous_geometry_and_allows_a_later_update() {
+        let original = MeshInput {
+            key: 1,
+            mesh: 0,
+            positions: &[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            normals: &[[0., 0., 1.]; 3],
+            colors: None,
+            indices: &[0, 1, 2],
+            material: 0,
+            world: Mat4::IDENTITY,
+        };
+        let mut geometry = Geometry::default();
+        geometry.update(std::slice::from_ref(&original)).unwrap();
+        let revision = geometry.revision;
+        let too_many = vec![0; (MAX_TRIANGLES + 1) * 3];
+        let error = geometry
+            .update(&[MeshInput {
+                indices: &too_many,
+                ..original
+            }])
+            .unwrap_err();
+        assert_eq!(error.code(), "trace.mesh_capacity");
+        assert!(error.to_string().contains(&(MAX_TRIANGLES + 1).to_string()));
+        assert!(error.to_string().contains(&MAX_TRIANGLES.to_string()));
+        assert_eq!(geometry.revision, revision);
+        assert_eq!(geometry.count(), 1);
+
+        geometry.update(&[]).unwrap();
+        assert_eq!(geometry.count(), 0);
+        assert_ne!(geometry.revision, revision);
+    }
 
     #[test]
     fn packs_linear_rgb_in_index_order_and_uses_white_for_uncolored_meshes() {
