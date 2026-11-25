@@ -9,19 +9,29 @@
 // y = parallax range (f32 metres, 0 = always parallax patches), z = first screen-resolve
 // row (0 none), w = resolve width | height << 16;
 // 4.. shell inner, centre, outer (row 4 w: sphere-only direct near-sun radius in metres as
-// f32, 0 = off). Entry rows: key, slot, first publication frame,
-// light hash; probe xyz + spacing; reserved xyz + published.
-
-const RAA_SPHERICAL_TABLE: u32 = 68u;
+// f32, 0 = off); 68 sun group scale rgb, 69 sky group scale rgb (see below).
+// Entry rows: key, slot, first publication frame, light hash; probe xyz + spacing;
+// reserved xyz + published.
+//
+// Light groups: probes store the sun and sky groups at UNIT intensity (the sun group
+// divided by the sun radiance at capture, the sky group captured from the sky texture
+// divided by its DC luminance, or from a unit ambient); the lookup multiplies them by
+// header rows 68 and 69, so a sun or sky intensity / tint change recaptures nothing.
+// The other group (local lights, emission) is stored absolute and invalidated per light.
+const RAA_SPHERICAL_TABLE: u32 = 70u;
+const RAA_SPHERICAL_SUN_SCALE_ROW: u32 = 68u;
+const RAA_SPHERICAL_SKY_SCALE_ROW: u32 = 69u;
 // 21 legacy rows (uniform average, six world-axis faces, three light groups each),
-// 24 parallax patches x 3 rows (hit centroid + R², intensity + coherence, miss flux +
-// octahedral mean normal), 96 depth-moment bins two per row, one information row, one
-// light row (sphere-only direct: sun visibility, two light indices, their visibility).
-const RAA_SPHERICAL_SLOT_ROWS: u32 = 143u;
+// 24 parallax patches x 5 rows (hit centroid + R², sun intensity + coherence, sky miss
+// flux + octahedral mean normal, sky intensity, other intensity), 96 depth-moment bins
+// two per row, one information row, one light row (sphere-only direct: sun visibility,
+// two light indices, their visibility).
+const RAA_SPHERICAL_SLOT_ROWS: u32 = 191u;
 const RAA_SPHERICAL_PATCH_ROW: u32 = 21u;
-const RAA_SPHERICAL_MOMENT_ROW: u32 = 93u;
-const RAA_SPHERICAL_INFO_ROW: u32 = 141u;
-const RAA_SPHERICAL_LIGHT_ROW: u32 = 142u;
+const RAA_SPHERICAL_PATCH_STRIDE: u32 = 5u;
+const RAA_SPHERICAL_MOMENT_ROW: u32 = 141u;
+const RAA_SPHERICAL_INFO_ROW: u32 = 189u;
+const RAA_SPHERICAL_LIGHT_ROW: u32 = 190u;
 const RAA_SPHERICAL_EMPTY: u32 = 0xffffffffu;
 const RAA_SPHERICAL_CENTER: u32 = 0xffffu;
 const RAA_SPHERICAL_FADE_FRAMES: f32 = 8.0;
@@ -124,12 +134,24 @@ fn raa_spherical_incident(entry: u32, mask: u32, channels: u32) -> vec3<f32> {
     return raa_spherical_channel_sum(raa_spherical_slot(entry, mask), channels);
 }
 
+// Group scales of the unit-intensity sky (x) and sun (y) groups, rgb each.
+fn raa_spherical_sky_scale() -> vec3<f32> {
+    return bitcast<vec3<f32>>(raa_spherical_data[RAA_SPHERICAL_SKY_SCALE_ROW].xyz);
+}
+fn raa_spherical_sun_scale() -> vec3<f32> {
+    return bitcast<vec3<f32>>(raa_spherical_data[RAA_SPHERICAL_SUN_SCALE_ROW].xyz);
+}
+
 fn raa_spherical_channel_sum(base: u32, channels: u32) -> vec3<f32> {
     var rgb = vec3<f32>(0.0);
-    for (var i = 0u; i < 3u; i++) {
-        if (channels & (1u << i)) != 0u {
-            rgb += bitcast<vec3<f32>>(raa_spherical_data[base + i].rgb);
-        }
+    if (channels & 1u) != 0u {
+        rgb += raa_spherical_sky_scale() * bitcast<vec3<f32>>(raa_spherical_data[base].rgb);
+    }
+    if (channels & 2u) != 0u {
+        rgb += raa_spherical_sun_scale() * bitcast<vec3<f32>>(raa_spherical_data[base + 1u].rgb);
+    }
+    if (channels & 4u) != 0u {
+        rgb += bitcast<vec3<f32>>(raa_spherical_data[base + 2u].rgb);
     }
     return rgb;
 }
@@ -150,31 +172,38 @@ fn raa_spherical_probe_irradiance(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f
     let hi = n > vec3<f32>(0.82);
     let culled = select(0u, 0xfu, lo.x) | select(0u, 0xf0u, hi.x) | select(0u, 0xf00u, lo.y)
         | select(0u, 0xf000u, hi.y) | select(0u, 0xf0000u, lo.z) | select(0u, 0xf00000u, hi.z);
-    var e = vec3<f32>(0.0);
+    var e_sun = vec3<f32>(0.0);
+    var e_sky = vec3<f32>(0.0);
+    var e_other = vec3<f32>(0.0);
     for (var k = 0u; k < 24u; k++) {
         if ((culled >> k) & 1u) != 0u {
             continue;
         }
-        let r0 = bitcast<vec4<f32>>(raa_spherical_data[base + 3u * k]);
+        let row = base + RAA_SPHERICAL_PATCH_STRIDE * k;
+        let r0 = bitcast<vec4<f32>>(raa_spherical_data[row]);
         if r0.w >= 0.0 {
             let delta = r0.xyz - p;
             let d2 = dot(delta, delta);
             let w = delta * inverseSqrt(max(d2, 1e-10));
             let cos_n = dot(n, w);
             if cos_n > 0.0 {
-                let r1 = bitcast<vec4<f32>>(raa_spherical_data[base + 3u * k + 1u]);
-                let normal = raa_spherical_oct_decode(unpack2x16snorm(raa_spherical_data[base + 3u * k + 2u].w));
+                let r1 = bitcast<vec4<f32>>(raa_spherical_data[row + 1u]);
+                let normal = raa_spherical_oct_decode(unpack2x16snorm(raa_spherical_data[row + 2u].w));
                 let cos_h = mix(1.0, max(0.0, -dot(normal, w)), r1.w);
-                e += r1.xyz * (cos_h * cos_n / (d2 + r0.w));
+                let g = cos_h * cos_n / (d2 + r0.w);
+                e_sun += r1.xyz * g;
+                e_sky += bitcast<vec3<f32>>(raa_spherical_data[row + 3u].xyz) * g;
+                e_other += bitcast<vec3<f32>>(raa_spherical_data[row + 4u].xyz) * g;
             }
         }
         if (misses & (1u << k)) != 0u {
-            let miss = bitcast<vec3<f32>>(raa_spherical_data[base + 3u * k + 2u].xyz);
+            let miss = bitcast<vec3<f32>>(raa_spherical_data[row + 2u].xyz);
             let corner = vec2<f32>(f32(k & 1u), f32((k >> 1u) & 1u)) - 0.5;
             let d = normalize(raa_spherical_face_direction(k / 4u, corner));
-            e += miss * max(0.0, dot(n, d));
+            e_sky += miss * max(0.0, dot(n, d));
         }
     }
+    let e = raa_spherical_sun_scale() * e_sun + raa_spherical_sky_scale() * e_sky + e_other;
     return e * 0.31830988;
 }
 

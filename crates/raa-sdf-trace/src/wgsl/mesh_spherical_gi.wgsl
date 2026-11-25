@@ -49,9 +49,17 @@ fn spherical_unpack(words: vec2<u32>) -> vec3<f32> {
     return vec3<f32>(unpack2x16float(words.x), unpack2x16float(words.y).x);
 }
 
+// Unit-intensity sky group: the environment divided by its DC luminance (options[2].x
+// holds the reciprocal), or a unit ambient. The lookup scales it back (header row 69).
 fn spherical_sky(direction: vec3<f32>) -> vec3<f32> {
-    if options[0].z == 0u { return frame.ambient.rgb; }
+    if options[0].z == 0u { return vec3<f32>(1.0); }
     return bitcast<f32>(options[2].x) * textureSampleLevel(sky, raa_linear_clamp, direction, 0.0).rgb;
+}
+
+// Unit-intensity sun group: the sun's contribution divided by its radiance.
+fn spherical_unit_sun(rgb: vec3<f32>) -> vec3<f32> {
+    let c = frame.sun_color.rgb;
+    return select(vec3<f32>(0.0), rgb / max(c, vec3<f32>(1e-30)), c > vec3<f32>(0.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -103,7 +111,7 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
             other_rgb += material.base_roughness.rgb;
         } else if (material.flags.x & 1u) == 0u {
             var seed = (work.ids.x * 747796405u + work.ids.y * 277803737u + px) ^ 0x85ebca6bu;
-            sun_rgb = mesh_sun_at_hit(p, ng, n, -direction, material, true);
+            sun_rgb = spherical_unit_sun(mesh_sun_at_hit(p, ng, n, -direction, material, true));
             let shadow_origin = p + ng * (2.0 * EPS);
             let light_count = min(256u, frame.light_info.x);
             let light_samples = options[3].z;
@@ -185,12 +193,12 @@ var<workgroup> spherical_hit_sum: array<vec2<f32>, 64>;
 var<workgroup> spherical_miss_patches: atomic<u32>;
 
 // Slot row layout after the 21 legacy rows (keep in sync with spherical_gpu.rs and
-// RAA_SPHERICAL_* in spherical_gi.wgsl): 24 patches x 3 rows, 96 depth-moment bins
+// RAA_SPHERICAL_* in spherical_gi.wgsl): 24 patches x 5 rows, 96 depth-moment bins
 // two per row, then one probe information row and one light row (sphere-only direct). Everything is f32 so consumers
 // validate without the float16-in-float32 capability.
 const SPHERICAL_PATCH_ROW: u32 = 21u;
-const SPHERICAL_MOMENT_ROW: u32 = 93u;
-const SPHERICAL_INFO_ROW: u32 = 141u;
+const SPHERICAL_MOMENT_ROW: u32 = 141u;
+const SPHERICAL_INFO_ROW: u32 = 189u;
 
 fn spherical_backface(texel: SphericalTexel) -> bool {
     let flag = unpack2x16float(texel.hit_normal.y).y;
@@ -278,10 +286,13 @@ fn spherical_masked(texel: SphericalTexel, channels: u32) -> vec3<f32> {
     return rgb;
 }
 
-// Patch accumulators: a * hit (xyz), a; a * normal (xyz), distance; hit flux; miss flux.
+// Patch accumulators: a * hit (xyz), a; a * normal (xyz), distance; hit flux per light
+// group (sun, sky, other); miss flux (sky group).
 var<workgroup> spherical_bin_area: array<vec4<f32>, 64>;
 var<workgroup> spherical_bin_normal: array<vec4<f32>, 64>;
 var<workgroup> spherical_bin_hit: array<vec3<f32>, 64>;
+var<workgroup> spherical_bin_hit_sky: array<vec3<f32>, 64>;
+var<workgroup> spherical_bin_hit_other: array<vec3<f32>, 64>;
 var<workgroup> spherical_bin_miss: array<vec3<f32>, 64>;
 
 // One workgroup per (probe, face). It reduces the face into 2x2 parallax patches
@@ -300,10 +311,12 @@ fn spherical_bins(@builtin(local_invocation_id) id: vec3<u32>,
     let direction = normalize(raa_spherical_face_direction(face, uv));
     let solid_angle = 0.0625 * pow(1.0 + dot(uv, uv), -1.5);
     let texel = spherical_faces[384u * work.ids.x + 64u * face + px];
-    let radiance = spherical_masked(texel, channels) * solid_angle;
+    let sky_radiance = spherical_masked(texel, channels & 1u) * solid_angle;
     var area = vec4<f32>(0.0);
     var normal = vec4<f32>(0.0, 0.0, 0.0, miss_distance);
     var hit = vec3<f32>(0.0);
+    var hit_sky = vec3<f32>(0.0);
+    var hit_other = vec3<f32>(0.0);
     var miss = vec3<f32>(0.0);
     if texel.hit_position.w > 0.5 {
         let delta = texel.hit_position.xyz - probe;
@@ -313,13 +326,17 @@ fn spherical_bins(@builtin(local_invocation_id) id: vec3<u32>,
         let a = solid_angle * r * r / facing;
         area = vec4<f32>(a * texel.hit_position.xyz, a);
         normal = vec4<f32>(a * n, r);
-        hit = radiance;
+        hit = spherical_masked(texel, channels & 2u) * solid_angle;
+        hit_sky = sky_radiance;
+        hit_other = spherical_masked(texel, channels & 4u) * solid_angle;
     } else {
-        miss = radiance;
+        miss = sky_radiance;
     }
     spherical_bin_area[px] = area;
     spherical_bin_normal[px] = normal;
     spherical_bin_hit[px] = hit;
+    spherical_bin_hit_sky[px] = hit_sky;
+    spherical_bin_hit_other[px] = hit_other;
     spherical_bin_miss[px] = miss;
     workgroupBarrier();
     let slot_base = work.ids.y;
@@ -328,6 +345,8 @@ fn spherical_bins(@builtin(local_invocation_id) id: vec3<u32>,
         var a = vec4<f32>(0.0);
         var n = vec3<f32>(0.0);
         var flux_hit = vec3<f32>(0.0);
+        var flux_sky = vec3<f32>(0.0);
+        var flux_other = vec3<f32>(0.0);
         var flux_miss = vec3<f32>(0.0);
         for (var y = 0u; y < 4u; y++) {
             for (var x = 0u; x < 4u; x++) {
@@ -335,11 +354,15 @@ fn spherical_bins(@builtin(local_invocation_id) id: vec3<u32>,
                 a += spherical_bin_area[t];
                 n += spherical_bin_normal[t].xyz;
                 flux_hit += spherical_bin_hit[t];
+                flux_sky += spherical_bin_hit_sky[t];
+                flux_other += spherical_bin_hit_other[t];
                 flux_miss += spherical_bin_miss[t];
             }
         }
         var row0 = vec4<f32>(probe, -1.0);
         var intensity = vec3<f32>(0.0);
+        var intensity_sky = vec3<f32>(0.0);
+        var intensity_other = vec3<f32>(0.0);
         var coherence = 0.0;
         var mean_normal = vec3<f32>(0.0, 0.0, 1.0);
         if a.w > 0.0 {
@@ -353,13 +376,17 @@ fn spherical_bins(@builtin(local_invocation_id) id: vec3<u32>,
             let facing = max(dot(mean_normal, to_probe * inverseSqrt(max(d2, 1e-12))), 0.2);
             let g = mix(1.0, facing, coherence) / (d2 + r2);
             intensity = flux_hit / max(g, 1e-8);
+            intensity_sky = flux_sky / max(g, 1e-8);
+            intensity_other = flux_other / max(g, 1e-8);
             row0 = vec4<f32>(h, r2);
         }
-        let patch_row = slot_base + SPHERICAL_PATCH_ROW + 3u * (4u * face + px);
+        let patch_row = slot_base + SPHERICAL_PATCH_ROW + 5u * (4u * face + px);
         spherical_lookup[patch_row] = bitcast<vec4<u32>>(row0);
         spherical_lookup[patch_row + 1u] = bitcast<vec4<u32>>(vec4<f32>(intensity, coherence));
         spherical_lookup[patch_row + 2u] = vec4<u32>(bitcast<vec3<u32>>(flux_miss),
             pack2x16snorm(spherical_oct_encode(mean_normal)));
+        spherical_lookup[patch_row + 3u] = bitcast<vec4<u32>>(vec4<f32>(intensity_sky, 0.0));
+        spherical_lookup[patch_row + 4u] = bitcast<vec4<u32>>(vec4<f32>(intensity_other, 0.0));
     } else if px < 12u {
         // Two 2x2 depth-moment bins per row.
         let pair = px - 4u;
@@ -387,7 +414,7 @@ fn spherical_bins(@builtin(local_invocation_id) id: vec3<u32>,
 // (16 rays toward a 5 cm jittered emitter). Lights are ranked by their unshadowed
 // irradiance at the probe; a spot outside its cone keeps a tenth of it so receivers
 // inside the cone near the probe are still served.
-const SPHERICAL_LIGHT_ROW: u32 = 142u;
+const SPHERICAL_LIGHT_ROW: u32 = 190u;
 const SPHERICAL_NO_LIGHT: u32 = 0xffffu;
 var<workgroup> spherical_light_best: array<vec2<f32>, 128>;
 var<workgroup> spherical_light_pick: vec2<u32>;
