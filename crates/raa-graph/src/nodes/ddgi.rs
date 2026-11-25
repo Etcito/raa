@@ -3,7 +3,7 @@
 //! its volume through the same lighting binding. Its parameters are node-bound; the executor
 //! extension `ddgi` (exec_ext/ddgi.rs) converts them with [`settings_from_params`].
 
-use raa_sdf_trace::mesh::{DDGI_GI_NAME, DdgiDebug, DdgiSettings};
+use raa_sdf_trace::mesh::{DDGI_GI_NAME, DdgiDebug, DdgiInvalidation, DdgiSettings};
 
 use crate::catalog::{
     Category, NodeFamily, NodeTypeSpec, ParamBinding, ParamKind, ParamSpec, ParamValue, Rebuild,
@@ -16,6 +16,7 @@ use crate::validate::ValidateCtx;
 pub(crate) const DDGI_TYPE: &str = "pass.gi.ddgi";
 const SOURCE: &str = "crates/raa-sdf-trace/src/mesh/ddgi.rs";
 const DEBUG_OPTIONS: &[&str] = &["off", "irradiance", "coverage", "resolve"];
+const INVALIDATION_OPTIONS: &[&str] = &["tracked", "all", "none"];
 
 pub fn family() -> Box<dyn NodeFamily> {
     Box::new(Ddgi)
@@ -99,6 +100,17 @@ impl NodeFamily for Ddgi {
             Rebuild::None,
         );
         debug.options = DEBUG_OPTIONS;
+        let mut invalidation = param(
+            "invalidation",
+            "Retrace on a lighting change (tracked: sun group on a sun rotation, probes a changed light reaches)",
+            ParamKind::Enum,
+            ParamValue::Enum("tracked".into()),
+            None,
+            None,
+            "",
+            Rebuild::None,
+        );
+        invalidation.options = INVALIDATION_OPTIONS;
         let params = vec![
             count("probeCountX", "Probes X", d.counts[0]),
             count("probeCountY", "Probes Y (up)", d.counts[1]),
@@ -196,6 +208,22 @@ impl NodeFamily for Ddgi {
             flag("relocation", "Probe relocation", d.relocation),
             flag("classification", "Probe classification", d.classification),
             flag("bounce", "Multiple bounces", d.bounce),
+            flag(
+                "skyTransfer",
+                "Sky as an SH transfer (follows sky changes without tracing)",
+                d.sky_transfer,
+            ),
+            invalidation,
+            param(
+                "lightThreshold",
+                "Light mask threshold (linear luma)",
+                ParamKind::Number,
+                number(d.light_threshold),
+                Some((0.0, 1.0)),
+                Some(0.0005),
+                "",
+                Rebuild::None,
+            ),
             debug,
         ];
         vec![NodeTypeSpec {
@@ -288,6 +316,15 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> DdgiSetti
             ("relocation", ParamValue::Bool(b)) => s.relocation = *b,
             ("classification", ParamValue::Bool(b)) => s.classification = *b,
             ("bounce", ParamValue::Bool(b)) => s.bounce = *b,
+            ("skyTransfer", ParamValue::Bool(b)) => s.sky_transfer = *b,
+            ("lightThreshold", ParamValue::Number(x)) => s.light_threshold = *x as f32,
+            ("invalidation", ParamValue::Enum(name)) => {
+                s.invalidation = match name.as_str() {
+                    "all" => DdgiInvalidation::All,
+                    "none" => DdgiInvalidation::None,
+                    _ => DdgiInvalidation::Tracked,
+                }
+            }
             ("debug", ParamValue::Enum(name)) => {
                 s.debug = match name.as_str() {
                     "irradiance" => DdgiDebug::Irradiance,

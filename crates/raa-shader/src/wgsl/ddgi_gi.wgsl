@@ -10,6 +10,8 @@ const RAA_DDGI_IRR_TEXELS: u32 = 100u;
 const RAA_DDGI_DEPTH: u32 = 16u;
 const RAA_DDGI_DEPTH_TILE: u32 = 18u;
 const RAA_DDGI_DEPTH_TEXELS: u32 = 324u;
+// Rows of a probe record: coordinate and state, offset, light mask (2 rows, 256 bits).
+const RAA_DDGI_META_ROWS: u32 = 4u;
 const RAA_DDGI_VALID: u32 = 1u;
 const RAA_DDGI_INACTIVE: u32 = 2u;
 const RAA_DDGI_INSIDE: u32 = 4u;
@@ -136,12 +138,12 @@ fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32>
         let corner = vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
         let g = v.base + cell + vec3<i32>(corner);
         let slot = raa_ddgi_slot(v, g);
-        let record = raa_ddgi_word(v.meta_row + 2u * slot);
+        let record = raa_ddgi_word(v.meta_row + RAA_DDGI_META_ROWS * slot);
         if any(bitcast<vec3<i32>>(record.xyz) != g) || (record.w & RAA_DDGI_VALID) == 0u
             || (record.w & RAA_DDGI_INACTIVE) != 0u {
             continue;
         }
-        let offset = bitcast<vec3<f32>>(raa_ddgi_word(v.meta_row + 2u * slot + 1u).xyz);
+        let offset = bitcast<vec3<f32>>(raa_ddgi_word(v.meta_row + RAA_DDGI_META_ROWS * slot + 1u).xyz);
         let probe = vec3<f32>(g) * v.spacing + offset;
         let tri = mix(1.0 - alpha, alpha, vec3<f32>(corner));
         let trilinear = tri.x * tri.y * tri.z;
