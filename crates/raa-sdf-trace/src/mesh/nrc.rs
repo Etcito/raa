@@ -48,7 +48,9 @@ pub struct NrcSettings {
     pub enabled: bool,
     /// Hidden layers of 64 neurons (the paper uses 5).
     pub hidden_layers: u32,
-    /// Triangle-wave octaves of the position encoding per axis (the paper uses 12).
+    /// Triangle-wave octaves of the position encoding per axis. The paper uses 12; queried at
+    /// the visible point after a few seconds of training, 12 shows coloured high-frequency
+    /// speckle on dark Sponza walls, 6 does not.
     pub frequencies: u32,
     /// Training samples per frame, a power of two; above 16 384 several Adam steps run.
     pub train_samples: u32,
@@ -77,7 +79,7 @@ impl Default for NrcSettings {
         Self {
             enabled: false,
             hidden_layers: 3,
-            frequencies: 12,
+            frequencies: 6,
             train_samples: 16_384,
             learning_rate: 2e-3,
             ema: 0.99,
