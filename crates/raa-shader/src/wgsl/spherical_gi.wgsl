@@ -554,8 +554,10 @@ fn raa_spherical_front_add(acc: ptr<function, RaaSphericalFront>, entry: u32, ke
         + RAA_SPHERICAL_INFO_ROW].x);
     let live = smoothstep(0.0, RAA_SPHERICAL_FADE_FRAMES, age + 1.0) * clamp(validity, 0.0, 1.0);
     (*acc).coverage += kernel * live;
-    // Strictly in front of the receiver's tangent plane, ramping over 0.15 probe spacing.
-    let front = smoothstep(0.0, 0.15 * probe.w, dot(probe.xyz - p, n));
+    // Strictly in front of the receiver's tangent plane, ramping in over the first 30 degrees
+    // above it (a ramp over 0.15 spacing drew hard bands on curved arches, sphS run A).
+    let to_probe = probe.xyz - p;
+    let front = smoothstep(0.0, 0.5, dot(to_probe, n) * inverseSqrt(max(dot(to_probe, to_probe), 1e-12)));
     let w = kernel * front * live;
     if w <= 1e-6 { return; }
     (*acc).front += w;
@@ -583,13 +585,18 @@ fn raa_spherical_diffuse_front(p: vec3<f32>, normal: vec3<f32>,
     let anchor = bitcast<vec4<f32>>(raa_spherical_data[0]).xyz;
     let cells = f32(grid.x);
     let at = vec3<f32>(cell.angular, raa_spherical_shell_cells(cell.shell, cell.radius));
-    let base = min(vec2<i32>(i32(grid.x) - 1), vec2<i32>(floor(cell.angular)));
-    let reach = 1.0 / (RAA_SPHERICAL_FRONT_KERNEL * RAA_SPHERICAL_FRONT_KERNEL);
+    // EVAL (parallaxRange 9001): 4x4x4 block, kernel 1.6 cells.
+    let wide = bitcast<f32>(raa_spherical_data[3].y) > 9000.5;
+    let span = select(3, 4, wide);
+    let kernel = select(RAA_SPHERICAL_FRONT_KERNEL, 1.6, wide);
+    let first = vec3<i32>(floor(at - select(0.0, 0.5, wide))) - 1;
+    let base = vec2<i32>(min(first.xy, vec2<i32>(i32(grid.x) - 2)));
+    let reach = 1.0 / (kernel * kernel);
     var acc = RaaSphericalFront();
     // The centre probe (a sphere of radius clipStart): Euclidean kernel over 1.15 x the
     // radius of shell 0's centre.
-    if cell.shell <= 1u {
-        let c0 = bitcast<f32>(raa_spherical_data[4u].y) * RAA_SPHERICAL_FRONT_KERNEL;
+    if cell.shell <= 2u {
+        let c0 = bitcast<f32>(raa_spherical_data[4u].y) * kernel;
         let nominal = cell.radius / c0;
         acc.nominal += select(0.0, (1.0 - nominal * nominal) * (1.0 - nominal * nominal), nominal < 1.0);
         let entry = raa_spherical_find(raa_spherical_key(RAA_SPHERICAL_CENTER, 0u, vec2<i32>(0), grid.x), mask);
@@ -599,11 +606,11 @@ fn raa_spherical_diffuse_front(p: vec3<f32>, normal: vec3<f32>,
             if x < 1.0 { raa_spherical_front_add(&acc, entry, (1.0 - x * x) * (1.0 - x * x), p, normal, far); }
         }
     }
-    for (var layer = i32(cell.shell) - 1; layer <= i32(cell.shell) + 1; layer++) {
+    for (var layer = first.z; layer < first.z + span; layer++) {
         if layer < 0 || layer >= i32(grid.y) { continue; }
         let shell = u32(layer);
-        for (var m = 0; m < 9; m++) {
-            let ij = base + vec2<i32>(m % 3 - 1, m / 3 - 1);
+        for (var m = 0; m < span * span; m++) {
+            let ij = base + vec2<i32>(m % span, m / span);
             // Past a cube corner three faces meet: no unique cell (and no duplicate).
             let outside = (ij < vec2<i32>(0)) | (ij >= vec2<i32>(i32(grid.x)));
             if outside.x && outside.y { continue; }
