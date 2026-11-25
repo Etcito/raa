@@ -41,6 +41,14 @@ impl Engine {
             }
             put(&result, "counts", counts.into());
             put(&result, "spacing", s.spacing.into());
+            put(&result, "cascades", s.cascades.into());
+            let cascade_counts = Array::new();
+            for n in s.cascade_counts {
+                cascade_counts.push(&n.into());
+            }
+            put(&result, "cascadeCounts", cascade_counts.into());
+            put(&result, "far", (s.far as u32).into());
+            put(&result, "screenAo", s.screen_ao.into());
             put(&result, "raysPerProbe", s.rays_per_probe.into());
             put(&result, "updateFraction", s.update_fraction.into());
             put(&result, "hysteresis", s.hysteresis.into());
@@ -58,6 +66,15 @@ impl Engine {
                     base.push(&b.into());
                 }
                 put(&result, "base", base.into());
+                let bases = Array::new();
+                for b in stats.cascade_bases.iter().take(stats.cascades as usize) {
+                    let base = Array::new();
+                    for x in b {
+                        base.push(&(*x).into());
+                    }
+                    bases.push(&base);
+                }
+                put(&result, "cascadeBases", bases.into());
                 put(&result, "gpuBytes", (stats.gpu_bytes as f64).into());
                 put(&result, "burst", stats.burst.into());
                 put(&result, "visible", stats.visibility.visible.into());

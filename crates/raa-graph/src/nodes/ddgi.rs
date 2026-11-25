@@ -3,7 +3,9 @@
 //! its volume through the same lighting binding. Its parameters are node-bound; the executor
 //! extension `ddgi` (exec_ext/ddgi.rs) converts them with [`settings_from_params`].
 
-use raa_sdf_trace::mesh::{DDGI_GI_NAME, DdgiDebug, DdgiInvalidation, DdgiSettings};
+use raa_sdf_trace::mesh::{
+    DDGI_GI_NAME, DDGI_MAX_CASCADES, DdgiDebug, DdgiFar, DdgiInvalidation, DdgiSettings,
+};
 
 use crate::catalog::{
     Category, NodeFamily, NodeTypeSpec, ParamBinding, ParamKind, ParamSpec, ParamValue, Rebuild,
@@ -17,6 +19,7 @@ pub(crate) const DDGI_TYPE: &str = "pass.gi.ddgi";
 const SOURCE: &str = "crates/raa-sdf-trace/src/mesh/ddgi.rs";
 const DEBUG_OPTIONS: &[&str] = &["off", "irradiance", "coverage", "resolve"];
 const INVALIDATION_OPTIONS: &[&str] = &["tracked", "all", "none"];
+const FAR_OPTIONS: &[&str] = &["clamp", "ambient"];
 
 pub fn family() -> Box<dyn NodeFamily> {
     Box::new(Ddgi)
@@ -111,6 +114,17 @@ impl NodeFamily for Ddgi {
             Rebuild::None,
         );
         invalidation.options = INVALIDATION_OPTIONS;
+        let mut far = param(
+            "far",
+            "Beyond the finer cascades (clamp: border probes, renormalized; ambient: legacy fade to the flat ambient term)",
+            ParamKind::Enum,
+            ParamValue::Enum("clamp".into()),
+            None,
+            None,
+            "",
+            Rebuild::None,
+        );
+        far.options = FAR_OPTIONS;
         let params = vec![
             count("probeCountX", "Probes X", d.counts[0]),
             count("probeCountY", "Probes Y (up)", d.counts[1]),
@@ -124,6 +138,37 @@ impl NodeFamily for Ddgi {
                 Some(0.05),
                 "m",
                 Rebuild::Resources,
+            ),
+            param(
+                "cascades",
+                "Cascades (spacing doubles per cascade)",
+                ParamKind::Int,
+                ParamValue::Int(i64::from(d.cascades)),
+                Some((1.0, f64::from(DDGI_MAX_CASCADES))),
+                Some(1.0),
+                "",
+                Rebuild::Resources,
+            ),
+            count(
+                "cascadeCountX",
+                "Coarse cascade probes X",
+                d.cascade_counts[0],
+            ),
+            count(
+                "cascadeCountY",
+                "Coarse cascade probes Y (up)",
+                d.cascade_counts[1],
+            ),
+            count(
+                "cascadeCountZ",
+                "Coarse cascade probes Z",
+                d.cascade_counts[2],
+            ),
+            far,
+            flag(
+                "screenAo",
+                "Screen AO (GTAO) on the DDGI irradiance",
+                d.screen_ao,
             ),
             param(
                 "raysPerProbe",
@@ -284,7 +329,8 @@ impl NodeFamily for Ddgi {
                 param: Some("probeCountX".into()),
                 link: None,
                 message: error.message().into(),
-                fix: "Use at most 32768 probes, 2 to 128 per axis.".into(),
+                fix: "Use 1 to 3 cascades and at most 32768 probes in all, 2 to 128 per axis."
+                    .into(),
             });
         }
     }
@@ -303,6 +349,23 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> DdgiSetti
             ("probeCountY", ParamValue::Int(n)) => s.counts[1] = (*n).clamp(0, 1 << 16) as u32,
             ("probeCountZ", ParamValue::Int(n)) => s.counts[2] = (*n).clamp(0, 1 << 16) as u32,
             ("probeSpacing", ParamValue::Number(x)) => s.spacing = *x as f32,
+            ("cascades", ParamValue::Int(n)) => s.cascades = (*n).clamp(0, 16) as u32,
+            ("cascadeCountX", ParamValue::Int(n)) => {
+                s.cascade_counts[0] = (*n).clamp(0, 1 << 16) as u32
+            }
+            ("cascadeCountY", ParamValue::Int(n)) => {
+                s.cascade_counts[1] = (*n).clamp(0, 1 << 16) as u32
+            }
+            ("cascadeCountZ", ParamValue::Int(n)) => {
+                s.cascade_counts[2] = (*n).clamp(0, 1 << 16) as u32
+            }
+            ("far", ParamValue::Enum(name)) => {
+                s.far = match name.as_str() {
+                    "ambient" => DdgiFar::Ambient,
+                    _ => DdgiFar::Clamp,
+                }
+            }
+            ("screenAo", ParamValue::Bool(b)) => s.screen_ao = *b,
             ("raysPerProbe", ParamValue::Int(n)) => {
                 s.rays_per_probe = (*n).clamp(0, 1 << 16) as u32
             }

@@ -4,9 +4,16 @@
 //! (stalest first, visible first). A scroll resets the age of the slots that changed probe, so
 //! newly scrolled-in visible probes preempt every refresh.
 //!
+//! Cascades share one slot space (cascade k owns slots `offset_k..offset_k + probes_k`) and one
+//! budget. A probe of cascade k >= 1 whose whole support lies where cascade k - 1 has full weight
+//! is never read by the lookup and is not scheduled; it becomes needed (age 0, urgent when
+//! visible) when the finer cascade scrolls away from it.
+//!
 //! A probe keeps one age per lighting group (geometry with the sky transfer, sun with the sky
 //! residual, other lights). `invalidate` lowers the age of the named groups of the named probes;
 //! a job refreshes only the groups that are still young, or all of them for a periodic refresh.
+
+use super::CascadeLayout;
 
 /// Geometry of the probe: depth moments, relocation, classification and the sky transfer.
 pub const GROUP_GEOMETRY: u32 = 1;
@@ -62,8 +69,11 @@ pub struct Visibility {
 
 #[derive(Default)]
 pub(super) struct Schedule {
-    pub(super) base: Option<[i32; 3]>,
-    counts: [u32; 3],
+    /// Grid origin of each cascade (probe units of that cascade).
+    pub(super) bases: Option<Vec<[i32; 3]>>,
+    cascades: Vec<CascadeLayout>,
+    /// Sides of each cascade that reach the scene bounds (see `closed_sides`).
+    closed: Vec<u32>,
     /// Updates each slot's current probe received (saturating): geometry group.
     age: Vec<u16>,
     /// Updates of the sun and of the other group since their last invalidation (saturating).
@@ -79,11 +89,18 @@ pub(super) struct Schedule {
 
 const CLASS_SHIFT: u32 = 40;
 
+/// Cells from an open side of a cascade where its lookup weight reaches one (the band starts at
+/// half a cell): `BAND_START + BAND_WIDTH`, plus the largest surface bias (0.4 cell) as margin.
+pub(super) const BAND_START: f32 = 0.5;
+pub(super) const BAND_WIDTH: f32 = 1.5;
+const FULL_WEIGHT_CELLS: f32 = BAND_START + BAND_WIDTH + 0.5;
+
 impl Schedule {
-    pub(super) fn reset(&mut self, counts: [u32; 3]) {
-        let total = counts.iter().product::<u32>() as usize;
+    pub(super) fn reset(&mut self, cascades: &[CascadeLayout]) {
+        let total = cascades.iter().map(|c| c.probes).sum::<u32>() as usize;
         *self = Self {
-            counts,
+            cascades: cascades.to_vec(),
+            closed: vec![0; cascades.len()],
             age: vec![0; total],
             age_sun: vec![0; total],
             age_other: vec![0; total],
@@ -93,10 +110,55 @@ impl Schedule {
         };
     }
 
-    pub(super) fn slot(&self, g: [i32; 3]) -> u32 {
-        let n = self.counts.map(|n| n as i32);
+    /// Toroidal slot of world probe coordinate `g` of cascade `k`.
+    pub(super) fn slot(&self, k: usize, g: [i32; 3]) -> u32 {
+        let c = &self.cascades[k];
+        let n = c.counts.map(|n| n as i32);
         let s: [u32; 3] = std::array::from_fn(|i| g[i].rem_euclid(n[i]) as u32);
-        s[0] + self.counts[0] * (s[1] + self.counts[1] * s[2])
+        c.offset + s[0] + c.counts[0] * (s[1] + c.counts[1] * s[2])
+    }
+
+    /// Calls `visit(cascade, slot, g)` for every probe of every cascade.
+    fn each(&self, bases: &[[i32; 3]], mut visit: impl FnMut(usize, u32, [i32; 3])) {
+        for (k, c) in self.cascades.iter().enumerate() {
+            let base = bases[k];
+            let n = c.counts;
+            for z in 0..n[2] {
+                for y in 0..n[1] {
+                    for x in 0..n[0] {
+                        let g = [base[0] + x as i32, base[1] + y as i32, base[2] + z as i32];
+                        visit(k, self.slot(k, g), g);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether the lookup can read probe `g` of cascade `k`: cascade 0 always; a coarser probe
+    /// unless its support (one cell of its own spacing around it) lies inside the region where
+    /// cascade k - 1 has full weight.
+    fn needed(&self, bases: &[[i32; 3]], k: usize, g: [i32; 3]) -> bool {
+        if k == 0 {
+            return true;
+        }
+        let fine = &self.cascades[k - 1];
+        let s = self.cascades[k].spacing;
+        let closed = self.closed[k - 1];
+        !(0..3).all(|i| {
+            let p = g[i] as f32 * s;
+            let lo = if closed & (1 << (2 * i)) != 0 {
+                f32::NEG_INFINITY
+            } else {
+                (bases[k - 1][i] as f32 + FULL_WEIGHT_CELLS) * fine.spacing
+            };
+            let hi = if closed & (2 << (2 * i)) != 0 {
+                f32::INFINITY
+            } else {
+                (bases[k - 1][i] as f32 + (fine.counts[i] - 1) as f32 - FULL_WEIGHT_CELLS)
+                    * fine.spacing
+            };
+            p - s >= lo && p + s <= hi
+        })
     }
 
     #[cfg(test)]
@@ -104,33 +166,31 @@ impl Schedule {
         self.age[slot as usize]
     }
 
-    /// Moves the volume to `base`; every slot whose world coordinate changed becomes fresh.
-    /// Returns how many did.
-    pub(super) fn scroll(&mut self, base: [i32; 3]) -> u32 {
-        let Some(old) = self.base.replace(base) else {
+    /// Moves the cascades to `bases` (with their closed sides); every slot whose world coordinate
+    /// changed becomes fresh. Returns how many did.
+    pub(super) fn scroll(&mut self, bases: &[[i32; 3]], closed: &[u32]) -> u32 {
+        self.closed.clear();
+        self.closed.extend_from_slice(closed);
+        let Some(old) = self.bases.replace(bases.to_vec()) else {
             return 0;
         };
-        if old == base {
+        if old == bases {
             return 0;
         }
-        let n = self.counts.map(|n| n as i32);
-        let mut recycled = 0;
-        for z in 0..n[2] {
-            for y in 0..n[1] {
-                for x in 0..n[0] {
-                    let g = [base[0] + x, base[1] + y, base[2] + z];
-                    if !(0..3).all(|i| g[i] >= old[i] && g[i] < old[i] + n[i]) {
-                        let slot = self.slot(g) as usize;
-                        self.age[slot] = 0;
-                        self.age_sun[slot] = 0;
-                        self.age_other[slot] = 0;
-                        self.mask_reset[slot] = true;
-                        recycled += 1;
-                    }
-                }
+        let mut stale = Vec::new();
+        self.each(bases, |k, slot, g| {
+            let n = self.cascades[k].counts.map(|n| n as i32);
+            if !(0..3).all(|i| g[i] >= old[k][i] && g[i] < old[k][i] + n[i]) {
+                stale.push(slot as usize);
             }
+        });
+        for &slot in &stale {
+            self.age[slot] = 0;
+            self.age_sun[slot] = 0;
+            self.age_other[slot] = 0;
+            self.mask_reset[slot] = true;
         }
-        recycled
+        stale.len() as u32
     }
 
     /// Lowers the age of `groups` of one slot to at most `cap` updates (the geometry group keeps
@@ -169,20 +229,16 @@ impl Schedule {
             .count() as u32
     }
 
-    /// Calls `visit(slot, probe grid position in metres)` for every probe of the volume.
-    pub(super) fn for_each_probe(&self, spacing: f32, mut visit: impl FnMut(u32, [f32; 3])) {
-        let Some(base) = self.base else {
+    /// Calls `visit(slot, probe grid position in metres, spacing)` for every probe of every
+    /// cascade.
+    pub(super) fn for_each_probe(&self, mut visit: impl FnMut(u32, [f32; 3], f32)) {
+        let Some(bases) = self.bases.as_ref() else {
             return;
         };
-        let n = self.counts;
-        for z in 0..n[2] {
-            for y in 0..n[1] {
-                for x in 0..n[0] {
-                    let g = [base[0] + x as i32, base[1] + y as i32, base[2] + z as i32];
-                    visit(self.slot(g), g.map(|c| c as f32 * spacing));
-                }
-            }
-        }
+        self.each(bases, |k, slot, g| {
+            let s = self.cascades[k].spacing;
+            visit(slot, g.map(|c| c as f32 * s), s);
+        });
     }
 
     fn effective_age(&self, slot: usize) -> u16 {
@@ -200,7 +256,6 @@ impl Schedule {
     pub(super) fn plan(
         &mut self,
         view: Option<&DdgiView>,
-        spacing: f32,
         converge_age: u16,
         budget: u32,
         burst: u32,
@@ -209,55 +264,57 @@ impl Schedule {
         out.clear();
         self.frame = self.frame.wrapping_add(1);
         let mut refreshed = [0u32; 3];
-        let Some(base) = self.base else {
+        let Some(bases) = self.bases.take() else {
             return (Visibility::default(), false, refreshed);
         };
-        let n = self.counts;
         let planes = view.map(DdgiView::planes);
-        let centre: [f32; 3] =
-            std::array::from_fn(|i| (base[i] as f32 + 0.5 * (n[i] - 1) as f32) * spacing);
+        let c0 = &self.cascades[0];
+        let centre: [f32; 3] = std::array::from_fn(|i| {
+            (bases[0][i] as f32 + 0.5 * (c0.counts[i] - 1) as f32) * c0.spacing
+        });
         let eye = view.map_or(centre, |v| v.eye);
-        let reach = 1.75 * spacing;
         let mut seen = Visibility::default();
-        self.keys.clear();
-        for z in 0..n[2] {
-            for y in 0..n[1] {
-                for x in 0..n[0] {
-                    let g = [base[0] + x as i32, base[1] + y as i32, base[2] + z as i32];
-                    let p = g.map(|c| c as f32 * spacing);
-                    // 0 visible, 1 periphery, 2 elsewhere
-                    let zone = planes.map_or(0u64, |planes| {
-                        let worst = planes
-                            .iter()
-                            .map(|q| q[0] * p[0] + q[1] * p[1] + q[2] * p[2] + q[3])
-                            .fold(f32::INFINITY, f32::min);
-                        if worst >= -reach {
-                            0
-                        } else if worst >= -3.0 * reach {
-                            1
-                        } else {
-                            2
-                        }
-                    });
-                    let slot = self.slot(g);
-                    let age = self.effective_age(slot as usize);
-                    if zone == 0 {
-                        seen.visible += 1;
-                    }
-                    let d = (0..3).map(|i| (p[i] - eye[i]).powi(2)).sum::<f32>().sqrt();
-                    let near = ((d * 100.0) as u64).min((1 << 20) - 1);
-                    let (class, metric) = if age >= converge_age {
-                        let stale = u64::from(self.frame.wrapping_sub(self.last[slot as usize]));
-                        (6 + zone.min(1), (1u64 << 32).saturating_sub(stale))
-                    } else if age == 0 {
-                        (zone * 2, near)
-                    } else {
-                        (zone * 2 + 1, (u64::from(age) << 20) | near)
-                    };
-                    self.keys.push(((class << CLASS_SHIFT) | metric, slot));
-                }
+        let mut keys = std::mem::take(&mut self.keys);
+        keys.clear();
+        self.each(&bases, |k, slot, g| {
+            if !self.needed(&bases, k, g) {
+                return;
             }
-        }
+            let spacing = self.cascades[k].spacing;
+            let reach = 1.75 * spacing;
+            let p = g.map(|c| c as f32 * spacing);
+            // 0 visible, 1 periphery, 2 elsewhere
+            let zone = planes.map_or(0u64, |planes| {
+                let worst = planes
+                    .iter()
+                    .map(|q| q[0] * p[0] + q[1] * p[1] + q[2] * p[2] + q[3])
+                    .fold(f32::INFINITY, f32::min);
+                if worst >= -reach {
+                    0
+                } else if worst >= -3.0 * reach {
+                    1
+                } else {
+                    2
+                }
+            });
+            let age = self.effective_age(slot as usize);
+            if zone == 0 {
+                seen.visible += 1;
+            }
+            let d = (0..3).map(|i| (p[i] - eye[i]).powi(2)).sum::<f32>().sqrt();
+            let near = ((d * 100.0) as u64).min((1 << 20) - 1);
+            let (class, metric) = if age >= converge_age {
+                let stale = u64::from(self.frame.wrapping_sub(self.last[slot as usize]));
+                (6 + zone.min(1), (1u64 << 32).saturating_sub(stale))
+            } else if age == 0 {
+                (zone * 2, near)
+            } else {
+                (zone * 2 + 1, (u64::from(age) << 20) | near)
+            };
+            keys.push(((class << CLASS_SHIFT) | metric, slot));
+        });
+        self.bases = Some(bases);
+        self.keys = keys;
         let urgent = self.keys.iter().any(|&(key, _)| key >> CLASS_SHIFT <= 1);
         let take = (if urgent { burst } else { budget }).min(self.keys.len() as u32) as usize;
         if take > 0 && take < self.keys.len() {
@@ -312,6 +369,15 @@ impl Schedule {
 mod tests {
     use super::*;
 
+    fn one(counts: [u32; 3]) -> Vec<CascadeLayout> {
+        vec![CascadeLayout {
+            counts,
+            spacing: 1.0,
+            offset: 0,
+            probes: counts.iter().product(),
+        }]
+    }
+
     fn looking_down_x() -> DdgiView {
         // Camera at the origin looking along +x, 90 degree fov, square, depth 0..1 (0.1..100).
         let (near, far) = (0.1f32, 100.0f32);
@@ -347,21 +413,21 @@ mod tests {
     #[test]
     fn scroll_resets_only_the_planes_that_left() {
         let mut s = Schedule::default();
-        s.reset([4, 2, 4]);
-        assert_eq!(s.scroll([0, 0, 0]), 0);
+        s.reset(&one([4, 2, 4]));
+        assert_eq!(s.scroll(&[[0, 0, 0]], &[0]), 0);
         let mut jobs = Vec::new();
-        s.plan(None, 1.0, 4, 32, 32, &mut jobs);
+        s.plan(None, 4, 32, 32, &mut jobs);
         assert!((0..32).all(|slot| s.age(slot) == 1));
-        assert_eq!(s.scroll([1, 0, 0]), 8);
+        assert_eq!(s.scroll(&[[1, 0, 0]], &[0]), 8);
         let fresh: Vec<u32> = (0..32).filter(|&slot| s.age(slot) == 0).collect();
         let mut want: Vec<u32> = (0..2)
             .flat_map(|y| (0..4).map(move |z| (y, z)))
-            .map(|(y, z)| s.slot([4, y, z]))
+            .map(|(y, z)| s.slot(0, [4, y, z]))
             .collect();
         want.sort_unstable();
         assert_eq!(fresh, want);
         // The fresh slots go first and carry age 0 in their job.
-        s.plan(None, 1.0, 4, 8, 8, &mut jobs);
+        s.plan(None, 4, 8, 8, &mut jobs);
         let mut picked: Vec<u32> = jobs.chunks(2).map(|j| j[0] & 0xffff).collect();
         picked.sort_unstable();
         assert_eq!(picked, want);
@@ -378,14 +444,14 @@ mod tests {
     #[test]
     fn an_invalidated_group_is_refreshed_alone_and_first() {
         let mut s = Schedule::default();
-        s.reset([4, 1, 1]);
-        s.scroll([0, 0, 0]);
+        s.reset(&one([4, 1, 1]));
+        s.scroll(&[[0, 0, 0]], &[0]);
         let mut jobs = Vec::new();
         // Converge every group of every probe (converge age 3).
         for _ in 0..3 {
-            s.plan(None, 1.0, 3, 4, 4, &mut jobs);
+            s.plan(None, 3, 4, 4, &mut jobs);
         }
-        let (seen, burst, _) = s.plan(None, 1.0, 3, 1, 4, &mut jobs);
+        let (seen, burst, _) = s.plan(None, 3, 1, 4, &mut jobs);
         assert!(!burst);
         assert_eq!(seen.converged, 4);
         assert_eq!(
@@ -400,7 +466,7 @@ mod tests {
             "already that young"
         );
         assert_eq!(s.invalidate_all(GROUP_SUN, 2), 4);
-        let (seen, burst, refreshed) = s.plan(None, 1.0, 3, 1, 4, &mut jobs);
+        let (seen, burst, refreshed) = s.plan(None, 3, 1, 4, &mut jobs);
         assert!(burst);
         assert_eq!(
             seen.converged, 3,
@@ -417,13 +483,13 @@ mod tests {
                 .skip(1)
                 .all(|j| (j[1] >> 16) & 7 == GROUP_SUN)
         );
-        let (seen, burst, refreshed) = s.plan(None, 1.0, 3, 1, 4, &mut jobs);
+        let (seen, burst, refreshed) = s.plan(None, 3, 1, 4, &mut jobs);
         // The burst fills up with periodic refreshes of the three converged probes.
         assert_eq!(refreshed, [3, 3, 4]);
         assert_eq!(jobs[0] & 0xffff, 2);
         assert_eq!((jobs[1] >> 16) & 7, GROUP_OTHER);
         assert!(burst);
-        let (seen2, burst2, _) = s.plan(None, 1.0, 3, 1, 4, &mut jobs);
+        let (seen2, burst2, _) = s.plan(None, 3, 1, 4, &mut jobs);
         assert!(!burst2);
         assert_eq!((seen.converged, seen2.converged), (4, 4));
     }
@@ -432,16 +498,20 @@ mod tests {
     fn visible_probes_go_first_nearest_first_then_burst_ends() {
         let view = looking_down_x();
         let mut s = Schedule::default();
-        s.reset([8, 1, 1]);
+        s.reset(&one([8, 1, 1]));
         // Probes at x = -4..3 on the camera axis: x > 0 are in front (x = 0 sits on the eye).
-        s.scroll([-4, 0, 0]);
+        s.scroll(&[[-4, 0, 0]], &[0]);
         let mut jobs = Vec::new();
-        let (seen, burst, _) = s.plan(Some(&view), 1.0, 2, 2, 3, &mut jobs);
+        let (seen, burst, _) = s.plan(Some(&view), 2, 2, 3, &mut jobs);
         assert!(burst);
         let xs: Vec<i32> = jobs
             .chunks(2)
             .map(|j| (j[0] & 0xffff) as i32)
-            .map(|slot| (-4..4).find(|&x| s.slot([x, 0, 0]) == slot as u32).unwrap())
+            .map(|slot| {
+                (-4..4)
+                    .find(|&x| s.slot(0, [x, 0, 0]) == slot as u32)
+                    .unwrap()
+            })
             .collect();
         // Influence reaches 1.75 cells behind the eye: x = 0 and -1 count as visible too,
         // nearest first (x = 1 and x = -1 tie).
@@ -453,7 +523,7 @@ mod tests {
         // Keep planning until every visible probe has converged: the budget drops to 2.
         let mut frames = 0;
         loop {
-            let (seen, burst, _) = s.plan(Some(&view), 1.0, 2, 2, 3, &mut jobs);
+            let (seen, burst, _) = s.plan(Some(&view), 2, 2, 3, &mut jobs);
             frames += 1;
             if !burst {
                 assert_eq!(seen.converged, seen.visible);
@@ -463,5 +533,77 @@ mod tests {
             assert_eq!(jobs.len(), 6);
             assert!(frames < 10);
         }
+    }
+}
+
+#[cfg(test)]
+mod cascade_tests {
+    use super::*;
+
+    #[test]
+    fn coarse_probes_under_the_fine_cascade_are_not_scheduled() {
+        // Cascade 0: 8 cells of 1 m on x, cascade 1: 8 cells of 2 m, both starting at x = 0 m.
+        let cascades = vec![
+            CascadeLayout {
+                counts: [8, 1, 1],
+                spacing: 1.0,
+                offset: 0,
+                probes: 8,
+            },
+            CascadeLayout {
+                counts: [8, 1, 1],
+                spacing: 2.0,
+                offset: 8,
+                probes: 8,
+            },
+        ];
+        let mut s = Schedule::default();
+        s.reset(&cascades);
+        // y and z closed (the scene ends there), x open on both sides.
+        let closed = 0b111100;
+        s.scroll(&[[0, 0, 0], [0, 0, 0]], &[closed, closed]);
+        let mut jobs = Vec::new();
+        s.plan(None, 4, 64, 64, &mut jobs);
+        let mut picked: Vec<u32> = jobs.chunks(2).map(|j| j[0] & 0xffff).collect();
+        picked.sort_unstable();
+        // Fine full weight for x in [2.5, 4.5] m: a coarse probe at 2 m spans [0, 4] m, needed;
+        // none spans only [2.5, 4.5]. Every coarse probe stays needed with so short a cascade.
+        assert_eq!(picked, (0..16).collect::<Vec<_>>());
+        // A long fine cascade (40 cells): coarse probes at 6..30 m are inside it, not needed.
+        let cascades = vec![
+            CascadeLayout {
+                counts: [40, 1, 1],
+                spacing: 1.0,
+                offset: 0,
+                probes: 40,
+            },
+            CascadeLayout {
+                counts: [24, 1, 1],
+                spacing: 2.0,
+                offset: 40,
+                probes: 24,
+            },
+        ];
+        s.reset(&cascades);
+        s.scroll(&[[0, 0, 0], [0, 0, 0]], &[closed, closed]);
+        s.plan(None, 4, 128, 128, &mut jobs);
+        let coarse: Vec<i32> = jobs
+            .chunks(2)
+            .map(|j| j[0] & 0xffff)
+            .filter(|&slot| slot >= 40)
+            .map(|slot| 2 * (slot as i32 - 40))
+            .collect();
+        assert!(
+            coarse.iter().all(|&x| x - 2 < 3 || x + 2 > 36),
+            "{coarse:?}"
+        );
+        assert!(coarse.contains(&0) && coarse.contains(&46));
+        // Closing the fine cascade's low x side drops the coarse probes there too.
+        s.scroll(&[[0, 0, 0], [0, 0, 0]], &[closed | 1, closed]);
+        s.plan(None, 4, 128, 128, &mut jobs);
+        assert!(jobs.chunks(2).all(|j| {
+            let slot = j[0] & 0xffff;
+            slot < 40 || 2 * (slot as i32 - 40) + 2 > 36
+        }));
     }
 }

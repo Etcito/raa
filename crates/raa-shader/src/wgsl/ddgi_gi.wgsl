@@ -15,6 +15,13 @@ const RAA_DDGI_META_ROWS: u32 = 4u;
 const RAA_DDGI_VALID: u32 = 1u;
 const RAA_DDGI_INACTIVE: u32 = 2u;
 const RAA_DDGI_INSIDE: u32 = 4u;
+// Header flags (row 4.w): screen AO multiplies the DDGI term; legacy far fade to ambient.
+const RAA_DDGI_SCREEN_AO: u32 = 0x10000u;
+const RAA_DDGI_FAR_AMBIENT: u32 = 0x20000u;
+// Cascade blend band, in cells from an open side (see schedule.rs BAND_START, BAND_WIDTH).
+const RAA_DDGI_BAND_START: f32 = 0.5;
+const RAA_DDGI_BAND_WIDTH: f32 = 1.5;
+const RAA_DDGI_MAX_CASCADES: u32 = 3u;
 
 struct RaaDdgiVolume {
     base: vec3<i32>,
@@ -28,20 +35,58 @@ struct RaaDdgiVolume {
     irr_row: u32,
     depth_row: u32,
     max_depth: f32,
+    // First slot of the cascade, and its sides that reach the scene bounds (bit 2i low side of
+    // axis i, 2i + 1 high side).
+    offset: u32,
+    closed: u32,
 }
 
 fn raa_ddgi_active() -> bool {
     return raa_ddgi_word(3u).x == RAA_DDGI_MAGIC;
 }
 
+// Cascade 0 (rows 4-8).
 fn raa_ddgi_volume() -> RaaDdgiVolume {
     let base = raa_ddgi_word(4u);
     let counts = raa_ddgi_word(5u);
     let tuning = bitcast<vec4<f32>>(raa_ddgi_word(6u));
     let rows = raa_ddgi_word(7u);
-    let extra = bitcast<vec4<f32>>(raa_ddgi_word(8u));
+    let extra = raa_ddgi_word(8u);
     return RaaDdgiVolume(bitcast<vec3<i32>>(base.xyz), base.w, counts.xyz, tuning.x, tuning.y,
-        tuning.z, tuning.w, rows.x, rows.y, rows.z, extra.x);
+        tuning.z, tuning.w, rows.x, rows.y, rows.z, bitcast<f32>(extra.x), 0u, extra.z);
+}
+
+fn raa_ddgi_cascades() -> u32 {
+    return clamp(raa_ddgi_word(8u).y, 1u, RAA_DDGI_MAX_CASCADES);
+}
+
+// Cascade k: rows 11 + 2(k - 1) (base, first slot | closed << 16) and 12 + 2(k - 1) (counts,
+// spacing); biases and the distance cap scale with the spacing.
+fn raa_ddgi_volume_at(k: u32) -> RaaDdgiVolume {
+    var v = raa_ddgi_volume();
+    if k == 0u { return v; }
+    let a = raa_ddgi_word(9u + 2u * k);
+    let b = raa_ddgi_word(10u + 2u * k);
+    let spacing = bitcast<f32>(b.w);
+    let scale = spacing / max(v.spacing, 1e-6);
+    v.base = bitcast<vec3<i32>>(a.xyz);
+    v.counts = b.xyz;
+    v.spacing = spacing;
+    v.normal_bias *= scale;
+    v.view_bias *= scale;
+    v.max_depth *= scale;
+    v.offset = a.w & 0xffffu;
+    v.closed = a.w >> 16u;
+    return v;
+}
+
+// The cascade that owns a slot.
+fn raa_ddgi_cascade_of(slot: u32) -> u32 {
+    var k = 0u;
+    for (var c = 1u; c < raa_ddgi_cascades(); c++) {
+        if slot >= (raa_ddgi_word(9u + 2u * c).w & 0xffffu) { k = c; }
+    }
+    return k;
 }
 
 fn raa_ddgi_sign(v: vec2<f32>) -> vec2<f32> {
@@ -69,7 +114,7 @@ fn raa_ddgi_oct_decode(uv: vec2<f32>) -> vec3<f32> {
 fn raa_ddgi_slot(v: RaaDdgiVolume, g: vec3<i32>) -> u32 {
     let n = vec3<i32>(v.counts);
     let s = ((g % n) + n) % n;
-    return u32(s.x) + v.counts.x * (u32(s.y) + v.counts.y * u32(s.z));
+    return v.offset + u32(s.x) + v.counts.x * (u32(s.y) + v.counts.y * u32(s.z));
 }
 
 fn raa_ddgi_irr_texel(v: RaaDdgiVolume, slot: u32, xy: vec2<u32>) -> vec3<f32> {
@@ -117,27 +162,53 @@ fn raa_ddgi_depth(v: RaaDdgiVolume, slot: u32, dir: vec3<f32>) -> vec2<f32> {
     return mix(mix(a, b, t.f.x), mix(c, d, t.f.x), t.f.y);
 }
 
-// Irradiance / pi at a surface (the cosine-weighted mean incident radiance) in rgb and a
-// confidence in w: the trilinear coverage of usable probes times a fade over the outer cell.
-fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32> {
-    let v = raa_ddgi_volume();
-    if any(v.counts < vec3<u32>(2u)) || v.spacing <= 0.0 { return vec4<f32>(0.0); }
+// The eight probes of one cascade around a surface point and their weights (trilinear, smooth
+// backface, Chebyshev visibility, small weights crushed), with the trilinear coverage of usable
+// probes and the cascade's own weight `band`:
+// - an inner cascade fades over RAA_DDGI_BAND_* cells from its open sides (none where it reaches
+//   the scene bounds), the next cascade taking over;
+// - the last cascade, with `clamp`, takes points beyond it from its border probes (trilinear at
+//   the clamped position, the normal-oriented weights only);
+// - legacy (`clamp` off on the last cascade): fades to zero over its outer half cell.
+struct RaaDdgiCorners {
+    slot: array<u32, 8>,
+    weight: array<f32, 8>,
+    total: f32,
+    coverage: f32,
+    band: f32,
+}
+
+fn raa_ddgi_corners(v: RaaDdgiVolume, p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>,
+                    last: bool, clamp_far: bool) -> RaaDdgiCorners {
+    var out: RaaDdgiCorners;
+    if any(v.counts < vec3<u32>(2u)) || v.spacing <= 0.0 { return out; }
     let biased = p + n * v.normal_bias + view_dir * v.view_bias;
     let local = biased / v.spacing - vec3<f32>(v.base);
-    let last = vec3<f32>(v.counts) - 1.0;
-    let inside = min(local, last - local);
-    // Fade to the ambient term over the outer half cell of the volume.
-    let edge = saturate(2.0 * min(min(inside.x, inside.y), inside.z));
-    if edge <= 0.0 { return vec4<f32>(0.0); }
+    let top = vec3<f32>(v.counts) - 1.0;
+    let lo = select(local, vec3<f32>(1e9), vec3<bool>((v.closed & 1u) != 0u, (v.closed & 4u) != 0u,
+        (v.closed & 16u) != 0u));
+    let hi = select(top - local, vec3<f32>(1e9), vec3<bool>((v.closed & 2u) != 0u,
+        (v.closed & 8u) != 0u, (v.closed & 32u) != 0u));
+    let inside = min(min(min(lo.x, lo.y), min(lo.z, hi.x)), min(hi.y, hi.z));
+    var outside = false;
+    if last && clamp_far {
+        out.band = 1.0;
+        outside = any(local < vec3<f32>(0.0)) || any(local > top);
+    } else if last {
+        // Legacy: fade over the outer half cell whatever the scene bounds.
+        let edge = min(local, top - local);
+        out.band = saturate(2.0 * min(min(edge.x, edge.y), edge.z));
+    } else {
+        out.band = saturate((inside - RAA_DDGI_BAND_START) / RAA_DDGI_BAND_WIDTH);
+    }
+    if out.band <= 0.0 { return out; }
     let cell = clamp(vec3<i32>(floor(local)), vec3<i32>(0), vec3<i32>(v.counts) - 2);
     let alpha = clamp(local - vec3<f32>(cell), vec3<f32>(0.0), vec3<f32>(1.0));
-    var sum = vec3<f32>(0.0);
-    var total = 0.0;
-    var coverage = 0.0;
     for (var i = 0u; i < 8u; i++) {
         let corner = vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
         let g = v.base + cell + vec3<i32>(corner);
         let slot = raa_ddgi_slot(v, g);
+        out.slot[i] = slot;
         let record = raa_ddgi_word(v.meta_row + RAA_DDGI_META_ROWS * slot);
         if any(bitcast<vec3<i32>>(record.xyz) != g) || (record.w & RAA_DDGI_VALID) == 0u
             || (record.w & RAA_DDGI_INACTIVE) != 0u {
@@ -151,28 +222,67 @@ fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32>
         let to_probe = normalize(probe - p);
         var weight = 0.5 * (dot(to_probe, n) + 1.0);
         weight = weight * weight + 0.2;
-        // Chebyshev visibility from the probe's mean distance and its square.
-        let from_probe = biased - probe;
-        let distance = length(from_probe);
-        let moments = raa_ddgi_depth(v, slot, from_probe / max(distance, 1e-4));
-        if distance > moments.x {
-            let variance = abs(moments.x * moments.x - moments.y);
-            let gap = distance - moments.x;
-            var visible = variance / max(variance + gap * gap, 1e-8);
-            visible = visible * visible * visible;
-            weight *= max(0.05, visible);
+        if !outside {
+            // Chebyshev visibility from the probe's mean distance and its square.
+            let from_probe = biased - probe;
+            let distance = length(from_probe);
+            let moments = raa_ddgi_depth(v, slot, from_probe / max(distance, 1e-4));
+            if distance > moments.x {
+                let variance = abs(moments.x * moments.x - moments.y);
+                let gap = distance - moments.x;
+                var visible = variance / max(variance + gap * gap, 1e-8);
+                visible = visible * visible * visible;
+                weight *= max(0.05, visible);
+            }
         }
         weight = max(weight, 1e-6);
         if weight < 0.2 { weight *= weight * weight / 0.04; }
         weight *= trilinear;
-        let irradiance = raa_ddgi_irradiance(v, slot, n);
-        sum += sqrt(max(irradiance, vec3<f32>(0.0))) * weight;
-        total += weight;
-        coverage += trilinear;
+        out.weight[i] = weight;
+        out.total += weight;
+        out.coverage += trilinear;
     }
-    if total <= 0.0 { return vec4<f32>(0.0); }
-    let root = sum / total;
-    return vec4<f32>(root * root * v.intensity, edge * saturate(4.0 * coverage));
+    return out;
+}
+
+// Weight of one cascade's estimate: its band times its probe coverage.
+fn raa_ddgi_confidence(c: RaaDdgiCorners) -> f32 {
+    if c.total <= 0.0 { return 0.0; }
+    return c.band * saturate(4.0 * c.coverage);
+}
+
+// Irradiance / pi at a surface (the cosine-weighted mean incident radiance) in rgb and a
+// confidence in w. Cascades from the finest: each takes the weight its confidence leaves to the
+// coarser ones. With the default far mode the result is renormalized and w is 1 wherever any
+// probe is usable (no flat-ambient remainder); legacy mode keeps the faded confidence.
+fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32> {
+    let v0 = raa_ddgi_volume();
+    let clamp_far = (v0.flags & RAA_DDGI_FAR_AMBIENT) == 0u;
+    let cascades = raa_ddgi_cascades();
+    var rgb = vec3<f32>(0.0);
+    var weight = 0.0;
+    var remaining = 1.0;
+    for (var k = 0u; k < cascades; k++) {
+        let v = raa_ddgi_volume_at(k);
+        let c = raa_ddgi_corners(v, p, n, view_dir, k + 1u == cascades, clamp_far);
+        let confidence = raa_ddgi_confidence(c);
+        if confidence <= 0.0 { continue; }
+        var sum = vec3<f32>(0.0);
+        for (var i = 0u; i < 8u; i++) {
+            if c.weight[i] <= 0.0 { continue; }
+            let irradiance = raa_ddgi_irradiance(v, c.slot[i], n);
+            sum += sqrt(max(irradiance, vec3<f32>(0.0))) * c.weight[i];
+        }
+        let root = sum / c.total;
+        let share = remaining * confidence;
+        rgb += share * root * root;
+        weight += share;
+        remaining -= share;
+        if remaining <= 1e-3 { break; }
+    }
+    if weight <= 0.0 { return vec4<f32>(0.0); }
+    if clamp_far { return vec4<f32>(rgb / weight * v0.intensity, 1.0); }
+    return vec4<f32>(rgb * v0.intensity / weight, weight);
 }
 
 // The screen-resolved value at a forward pixel (row 9: first row, width, height, scale): a
@@ -214,6 +324,11 @@ fn raa_ddgi_screen(p: vec3<f32>, frag: vec2<f32>, eye: vec3<f32>) -> vec4<f32> {
     raa_ddgi_fallback = true;
     if any_total > 0.0 { return any_sum / any_total; }
     return vec4<f32>(0.0);
+}
+
+// Whether the DDGI term takes the screen AO (the pass's combined material and GTAO occlusion).
+fn raa_ddgi_screen_ao() -> bool {
+    return (raa_ddgi_word(4u).w & RAA_DDGI_SCREEN_AO) != 0u;
 }
 
 // Same contract as raa_spherical_evaluate: rgb is irradiance / pi, w the blend weight.
