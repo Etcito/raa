@@ -168,6 +168,13 @@ impl WeldState {
         }
     }
 
+    /// Saves the tangent stream when a second pass needs a different grid.
+    pub(crate) fn reset_grid(&mut self, bounds: &InputBounds, margin: f32) -> Self {
+        let mut replacement = Self::new(bounds, margin);
+        replacement.tangents = std::mem::take(&mut self.tangents);
+        std::mem::replace(self, replacement)
+    }
+
     pub(crate) fn set_tangents(&mut self, normals: &[[f32; 3]], tangents: &[[f32; 4]]) {
         self.tangents = normals
             .iter()

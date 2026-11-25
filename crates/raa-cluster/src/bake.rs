@@ -287,7 +287,7 @@ impl ClusterBake {
         if !self.weld.step(&self.input) {
             return;
         }
-        let weld = std::mem::replace(&mut self.weld, WeldState::new(&self.bounds, 0.0));
+        let weld = self.weld.reset_grid(&self.bounds, 0.0);
         self.welded = weld.finish();
         if self.welded.triangles.is_empty() {
             self.fail(ClusterError::new(
@@ -312,7 +312,7 @@ impl ClusterBake {
         };
         self.foliage = FoliageSearch::default();
         if foliage {
-            self.weld = WeldState::new(&self.bounds, FOLIAGE_GRID_MARGIN);
+            self.weld.reset_grid(&self.bounds, FOLIAGE_GRID_MARGIN);
             self.weld_steps = 0;
             self.phase = Phase::Reweld;
         } else {
@@ -506,4 +506,34 @@ mod tangent_tests {
         frames.sort_unstable();
         assert_eq!(frames, [0x8000, 0xa000, 0xd000]);
     }
+    #[test]
+    fn foliage_reweld_keeps_tangents() {
+        let positions: Vec<_> = (0..16)
+            .flat_map(|piece| {
+                let x = piece as f32 * 2.0;
+                [[x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x, 1.0, 0.0]]
+            })
+            .collect();
+        let mesh = MeshData {
+            normals: vec![[0.0, 0.0, 1.0]; positions.len()],
+            indices: (0..positions.len() as u32).collect(),
+            positions,
+        };
+        let input = ClusterInput {
+            mesh: &mesh,
+            uvs: None,
+        };
+        let options = BuildOptions::default();
+        let tangents = vec![[1.0, 0.0, 0.0, -1.0]; mesh.positions.len()];
+        let mut bake = ClusterBake::with_tangents(input, &options, &tangents).unwrap();
+        let mut reweld = false;
+        while bake.step(WorkBudget { units: 1 }) == BakeStatus::Working {
+            reweld |= bake.phase == Phase::Reweld;
+        }
+        assert!(reweld, "the fixture must exercise the foliage grid");
+        let mesh = bake.finish().unwrap();
+        assert!(!mesh.vertices.is_empty());
+        assert!(mesh.vertices.iter().all(|vertex| vertex.data[7] == 0xc000));
+    }
+
 }
