@@ -29,6 +29,9 @@ pub const SPHERICAL_CUBE_WGSL: &str = include_str!("wgsl/spherical_cube.wgsl");
 /// Shared world-space spherical GI lookup. Compose with [`SPHERICAL_CUBE_WGSL`]
 /// and declare `raa_spherical_data: array<vec4<u32>>` as read-only storage.
 pub const SPHERICAL_GI_WGSL: &str = include_str!("wgsl/spherical_gi.wgsl");
+/// DDGI probe volume lookup. Compose after [`SPHERICAL_GI_WGSL`] and define
+/// `fn raa_ddgi_word(index: u32) -> vec4<u32>` over the probe buffer.
+pub const DDGI_GI_WGSL: &str = include_str!("wgsl/ddgi_gi.wgsl");
 /// Standalone S10 weather declarations, neutral defaults and directional radiance boundary.
 /// Already included once in [`PRELUDE_WGSL`]. Cloud shadow composition consumes these
 /// bindings; standalone directional consumers can include this source without the prelude.

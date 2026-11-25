@@ -43,7 +43,12 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
     var c = raa_pass_shade_ctx(s, in, ao, shadow);
     let unlit = raa_pass_unlit(in.record);
     var spherical_debug = vec4<f32>(0.0);
-    if !capture && !unlit && raa_feature_enabled(RAA_SPHERICAL_GI_FEATURE)
+    if !capture && !unlit && raa_feature_enabled(RAA_DDGI_GI_FEATURE)
+        && !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
+        let ddgi = raa_ddgi_evaluate(c.position, s.normal, c.view_dir);
+        spherical_debug = ddgi.debug;
+        c.spherical_diffuse = ddgi.diffuse;
+    } else if !capture && !unlit && raa_feature_enabled(RAA_SPHERICAL_GI_FEATURE)
         && !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
         let spherical = raa_spherical_evaluate(c.position, s.normal);
         spherical_debug = spherical.debug;

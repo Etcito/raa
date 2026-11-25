@@ -1,10 +1,14 @@
 //! Hybrid mesh reflections and an explicit full-frame path-traced reference.
 
+mod ddgi;
 mod geometry;
 mod hybrid;
 mod pass;
 pub mod spherical;
 mod spherical_gpu;
+pub use ddgi::{
+    DDGI_FRAME_FEATURE, DDGI_GI_NAME, DdgiDebug, DdgiFeature, DdgiHandle, DdgiSettings, DdgiStats,
+};
 pub use geometry::MeshInput;
 use hybrid::PathCapture;
 pub use hybrid::PathMode;
@@ -279,6 +283,7 @@ pub struct MeshTraceScene {
     geometry: Geometry,
     gpu_geometry: Option<pass::GeometryBuffers>,
     spherical_active: bool,
+    ddgi_active: bool,
     graph_reports: BTreeMap<String, Rc<RefCell<TraceReport>>>,
     materials: Vec<MeshTraceMaterial>,
     material_bytes: Vec<u8>,
@@ -428,6 +433,11 @@ impl MeshTraceScene {
         self.release_gpu_geometry_if_idle();
     }
 
+    fn set_ddgi_active(&mut self, active: bool) {
+        self.ddgi_active = active;
+        self.release_gpu_geometry_if_idle();
+    }
+
     /// Whether a legacy or graph trace is configured for this scene.
     pub fn active(&self) -> bool {
         self.needs_trace_geometry(true)
@@ -440,7 +450,7 @@ impl MeshTraceScene {
     }
 
     fn release_gpu_geometry_if_idle(&mut self) {
-        if !self.spherical_active && !self.active() {
+        if !self.spherical_active && !self.ddgi_active && !self.active() {
             self.gpu_geometry = None;
         }
     }

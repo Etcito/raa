@@ -90,7 +90,15 @@ pub(crate) fn prepare(
             }
         }
     }
-    if !active && !spherical {
+    let mut ddgi = false;
+    if let Some(volume) = st.features.get::<raa_sdf_trace::mesh::DdgiHandle>() {
+        let mut volume = volume.borrow_mut();
+        if volume.active() {
+            ddgi = view == 0;
+            volume.set_view(view, st.scene.camera.eye.to_array());
+        }
+    }
+    if !active && !spherical && !ddgi {
         return Ok(());
     }
     let lit = st.lit.handle();

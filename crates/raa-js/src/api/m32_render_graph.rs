@@ -151,6 +151,7 @@ pub(crate) mod web {
     pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
         crate::mesh_trace::install_for_graph(ctx);
         crate::spherical_gi::install_for_graph(ctx)?;
+        crate::ddgi_gi::install_for_graph(ctx)?;
         ctx.features.insert(RenderGraphState {
             executor: GraphExecutor::new(),
             catalog: Catalog::build(),
@@ -214,6 +215,7 @@ pub(crate) mod web {
             vg: st.features.get::<VgHandle>().cloned(),
             gi: st.features.get::<GiHandle>().cloned(),
             spherical: st.features.get::<raa_sdf_trace::mesh::SphericalGiHandle>().cloned(),
+            ddgi: st.features.get::<raa_sdf_trace::mesh::DdgiHandle>().cloned(),
             taa: st.features.get::<TaaHandle>().cloned(),
             sky: st.features.get::<raa_sky::SkyHandle>().cloned(),
         };

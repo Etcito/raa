@@ -21,6 +21,7 @@ fn main() {
         ("RAA_DIRECT_ONLY_FEATURE", "u32", 42),
         ("RAA_INDIRECT_ONLY_FEATURE", "u32", 43),
         ("RAA_SPHERICAL_GI_FEATURE", "u32", 44),
+        ("RAA_DDGI_GI_FEATURE", "u32", 52),
     ];
     let (first_word, word_bits, word_count) = (2, 32, 2);
     let mut rust = String::new();

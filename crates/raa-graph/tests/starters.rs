@@ -217,6 +217,7 @@ fn starters_are_named_from_their_files_in_file_stem_order() {
         [
             ("area-learned", "Area inference pilot"),
             ("custom-denoise", "Custom denoise"),
+            ("ddgi-gi", "DDGI GI"),
             ("debug", "Debug"),
             ("full-gi", "Full GI"),
             ("full-gi-stages", "Full GI stages"),

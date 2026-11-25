@@ -172,6 +172,12 @@ impl Composer {
                 "@group(1) @binding(21) var<storage, read> raa_spherical_data: array<vec4<u32>>;",
             );
             section(&mut out, "spherical GI", crate::SPHERICAL_GI_WGSL);
+            section(
+                &mut out,
+                "DDGI binding",
+                "fn raa_ddgi_word(index: u32) -> vec4<u32> { return raa_spherical_data[index]; }",
+            );
+            section(&mut out, "DDGI", crate::DDGI_GI_WGSL);
         }
         if matches!(key.pass, PassKind::VgGbuffer | PassKind::VgShade) {
             section(&mut out, "depth", DEPTH_WGSL);
