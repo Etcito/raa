@@ -1,7 +1,6 @@
 //! Spherical diffuse capture and lookup on the shared world-space mesh BVH.
 
 use std::cell::RefCell;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, sync_channel};
 
@@ -262,6 +261,7 @@ impl SphericalGiFeature {
             mesh,
             gpu: None,
             staged: Staged::default(),
+            light_key: LightKey::default(),
         }))?;
         pipeline.set_enabled(SPHERICAL_GI_NAME, false)?;
         Ok(state)
@@ -285,6 +285,7 @@ struct SphericalPass {
     mesh: MeshTraceHandle,
     gpu: Option<SphericalGpu>,
     staged: Staged,
+    light_key: LightKey,
 }
 
 impl FeaturePass for SphericalPass {
@@ -340,7 +341,7 @@ impl FeaturePass for SphericalPass {
             return Ok(());
         };
         let mut mesh = self.mesh.borrow_mut();
-        let light_revision = light_revision(ctx.lighting, view.light, mesh.sky_diffuse);
+        let light_revision = self.light_key.update(ctx.lighting, view.light);
         let capacity = settings.scheduler.max_cells;
         if self.gpu.as_ref().is_none_or(|gpu| gpu.capacity != capacity) {
             self.gpu = Some(SphericalGpu::new(ctx.gpu, capacity, grid_revision));
@@ -419,26 +420,34 @@ impl FeaturePass for SphericalPass {
         let Some(scheduler) = &state.scheduler else {
             return Ok(());
         };
-        if !self.staged.jobs.is_empty() {
+        {
             let mut mesh = self.mesh.borrow_mut();
             let Some(frame) = mesh.frame.clone() else {
                 return Ok(());
             };
-            let texture_atlas = mesh
-                .texture_atlas
-                .clone()
-                .expect("prepared mesh trace atlas");
-            let geometry = mesh.geometry_buffers(ctx.gpu);
-            gpu.record(
+            gpu.write_options(
                 ctx,
                 scheduler,
-                &self.staged.jobs,
-                &frame,
-                &geometry,
-                &texture_atlas,
+                self.staged.jobs.len(),
                 mesh.geometry.count(),
                 mesh.sky_diffuse,
             );
+            gpu.record_scales(ctx, &frame);
+            if !self.staged.jobs.is_empty() {
+                let texture_atlas = mesh
+                    .texture_atlas
+                    .clone()
+                    .expect("prepared mesh trace atlas");
+                let geometry = mesh.geometry_buffers(ctx.gpu);
+                gpu.record(
+                    ctx,
+                    scheduler,
+                    &self.staged.jobs,
+                    &frame,
+                    &geometry,
+                    &texture_atlas,
+                );
+            }
         }
         self.staged.recorded = true;
         self.staged.feedback = gpu.record_light_feedback(ctx);
@@ -521,17 +530,81 @@ impl FeaturePass for SphericalPass {
     }
 }
 
-fn light_revision(lighting: &LightingResources, view: [f32; 10], sky_diffuse: f32) -> u64 {
-    let mut hash = DefaultHasher::new();
-    view.map(f32::to_bits).hash(&mut hash);
-    if let Some(sh) = lighting.environment_diffuse_sh() {
-        sky_diffuse.to_bits().hash(&mut hash);
-        for coefficient in sh {
-            coefficient.map(f32::to_bits).hash(&mut hash);
+/// Largest change of a scale-free sky coefficient that keeps the captured faces (f16 cube storage
+/// and the filter's rounding move a rescaled sky by far less).
+const SKY_SHAPE_TOLERANCE: f32 = 0.02;
+
+/// What invalidates every captured face: the sun direction and far plane, whether an environment
+/// is published, and the SHAPE of the sky (its diffuse SH, or the flat ambient colour, divided by
+/// their luminance; a sky without light is its own state). The sun colour and intensity, the
+/// environment intensity and the magnitude of the sky (the physical sky follows the sun
+/// intensity) are lookup factors (header row 3, `spherical_scales`) and never restart captures.
+#[derive(Default)]
+struct LightKey {
+    reference: Option<LightShape>,
+    revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LightShape {
+    exact: [u32; 5],
+    dark: bool,
+    shape: [f32; 27],
+}
+
+impl LightShape {
+    fn of(sh: Option<&[[f32; 4]; 9]>, view: [f32; 10]) -> Self {
+        let luma = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let mut shape = [0.0; 27];
+        let (env, colors): (bool, Vec<[f32; 3]>) = match sh {
+            Some(sh) => (true, sh.iter().map(|c| [c[0], c[1], c[2]]).collect()),
+            None => (false, vec![[view[6], view[7], view[8]]]),
+        };
+        let norm = luma(colors[0]);
+        let dark = !(norm.abs() > 1e-8) || !norm.is_finite();
+        if !dark {
+            for (i, c) in colors.iter().enumerate() {
+                for (k, v) in c.iter().enumerate() {
+                    shape[3 * i + k] = v / norm;
+                }
+            }
+        }
+        Self {
+            exact: [
+                view[0].to_bits(),
+                view[1].to_bits(),
+                view[2].to_bits(),
+                view[9].to_bits(),
+                u32::from(env),
+            ],
+            dark,
+            shape,
         }
     }
-    // Fits exactly through the public JS number counters; the scheduler still gets 53 bits.
-    hash.finish() & ((1 << 53) - 1)
+
+    fn matches(&self, other: &Self) -> bool {
+        self.exact == other.exact
+            && self.dark == other.dark
+            && self
+                .shape
+                .iter()
+                .zip(&other.shape)
+                .all(|(a, b)| (a - b).abs() <= SKY_SHAPE_TOLERANCE)
+    }
+}
+
+impl LightKey {
+    fn update(&mut self, lighting: &LightingResources, view: [f32; 10]) -> u64 {
+        self.update_shape(LightShape::of(lighting.environment_diffuse_sh(), view))
+    }
+
+    fn update_shape(&mut self, shape: LightShape) -> u64 {
+        if !self.reference.as_ref().is_some_and(|r| r.matches(&shape)) {
+            self.revision = self.revision.wrapping_add(1);
+            self.reference = Some(shape);
+        }
+        self.revision
+    }
 }
 
 fn hash_key(mut key: u32) -> usize {
@@ -566,6 +639,7 @@ struct SphericalGpu {
     grid_revision: u64,
     capture: wgpu::ComputePipeline,
     project: wgpu::ComputePipeline,
+    scales: wgpu::ComputePipeline,
     options: Buffer,
     work: Buffer,
     faces: Buffer,
@@ -609,6 +683,7 @@ impl SphericalGpu {
             grid_revision,
             capture: pipeline("spherical_capture"),
             project: pipeline("spherical_project"),
+            scales: pipeline("spherical_scales"),
             options: sized("gi.spherical.options", 64, Usage::UNIFORM | Usage::COPY_DST),
             work: sized(
                 "gi.spherical.work",
@@ -741,6 +816,61 @@ impl SphericalGpu {
         self.uploaded_rows.clone_from(rows);
     }
 
+    /// Options of this frame's capture and scale dispatches (written every recorded frame).
+    fn write_options(
+        &self,
+        ctx: &mut RecordCtx<'_>,
+        scheduler: &SphericalScheduler,
+        jobs: usize,
+        triangle_count: u32,
+        sky_diffuse: f32,
+    ) {
+        let env = ctx.lighting.environment_diffuse_sh().is_some();
+        let mut options = Vec::with_capacity(64);
+        write_words(&mut options, [triangle_count, jobs as u32, u32::from(env), 0]);
+        write_words(&mut options, [0; 4]);
+        let end = scheduler
+            .grid()
+            .radial_shell(scheduler.grid().shell_count() - 1)
+            .expect("last shell")
+            .outer;
+        write_words(&mut options, [sky_diffuse.to_bits(), end.to_bits(), 0, 0]);
+        // The shared local-light integrator uses its one-tap area estimator for this capture.
+        write_words(&mut options, [1, 0, 0, 0]);
+        ctx.gpu.queue().write_buffer(&self.options, 0, &options);
+    }
+
+    /// Header row 3 (sun rgb, sky scale) of this frame. It runs after the frame's lookup upload,
+    /// so it also restores the row whenever a partial CPU upload covered it.
+    fn record_scales(&self, ctx: &mut RecordCtx<'_>, frame: &Buffer) {
+        let group = ctx
+            .gpu
+            .device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gi.spherical.scales"),
+                layout: &self.scales.get_bind_group_layout(0),
+                entries: &[
+                    buffer_entry(0, frame),
+                    buffer_entry(1, &self.options),
+                    image_entry(14, ctx.lighting.env_specular_view()),
+                    wgpu::BindGroupEntry {
+                        binding: 15,
+                        resource: wgpu::BindingResource::Sampler(ctx.lighting.linear_clamp()),
+                    },
+                    buffer_entry(23, &self.lookup),
+                ],
+            });
+        let mut pass = ctx
+            .encoder
+            .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("gi.spherical.scales"),
+                ..Default::default()
+            });
+        pass.set_pipeline(&self.scales);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+
     fn record(
         &mut self,
         ctx: &mut RecordCtx<'_>,
@@ -749,8 +879,6 @@ impl SphericalGpu {
         frame: &Buffer,
         geometry: &[Buffer; 3],
         texture_atlas: &wgpu::TextureView,
-        triangle_count: u32,
-        sky_diffuse: f32,
     ) {
         let device = ctx.gpu.device();
         self.work_bytes.clear();
@@ -773,23 +901,7 @@ impl SphericalGpu {
             }
             *mask |= bit;
         }
-        let env = ctx.lighting.environment_diffuse_sh().is_some();
-        let mut options = Vec::with_capacity(64);
-        write_words(
-            &mut options,
-            [triangle_count, jobs.len() as u32, u32::from(env), 0],
-        );
-        write_words(&mut options, [0; 4]);
-        let end = scheduler
-            .grid()
-            .radial_shell(scheduler.grid().shell_count() - 1)
-            .expect("last shell")
-            .outer;
-        write_words(&mut options, [sky_diffuse.to_bits(), end.to_bits(), 0, 0]);
-        // The shared local-light integrator uses its one-tap area estimator for this capture.
-        write_words(&mut options, [1, 0, 0, 0]);
         let queue = ctx.gpu.queue();
-        queue.write_buffer(&self.options, 0, &options);
         queue.write_buffer(&self.work, 0, &self.work_bytes);
         let capture_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("gi.spherical.capture"),
@@ -1137,6 +1249,36 @@ mod tests {
             Some(([-3.0, -0.5, 10.0], [2.0, 0.0, 80.0]))
         );
         assert_eq!(ids, [532, 533, SKY_LIGHT_ID, SUN_LIGHT_ID]);
+    }
+
+    #[test]
+    fn light_key_ignores_intensities_and_sky_magnitude() {
+        let sh = |k: f32, tilt: f32| {
+            let mut sh = [[0.0f32; 4]; 9];
+            sh[0] = [0.8 * k, 0.9 * k, 1.2 * k, 0.0];
+            sh[2] = [0.3 * k * tilt, 0.35 * k * tilt, 0.5 * k * tilt, 0.0];
+            sh
+        };
+        let view = |sun: f32, ambient: f32| {
+            [0.2, -0.9, 0.1, 3.0 * sun, 2.9 * sun, 2.7 * sun, 0.18 * ambient, 0.21 * ambient, 0.27 * ambient, 40.0]
+        };
+        let mut key = LightKey::default();
+        let first = key.update_shape(LightShape::of(Some(&sh(1.0, 1.0)), view(1.0, 1.0)));
+        // Sun colour/intensity, environment (ambient) intensity and sky magnitude: same revision.
+        assert_eq!(key.update_shape(LightShape::of(Some(&sh(0.1, 1.0)), view(0.1, 3.0))), first);
+        assert_eq!(key.update_shape(LightShape::of(Some(&sh(2.5, 1.0)), view(2.0, 0.0))), first);
+        // A different sky shape, sun direction, far plane or a sky going dark: new revision.
+        let tilted = key.update_shape(LightShape::of(Some(&sh(1.0, 2.0)), view(1.0, 1.0)));
+        assert_ne!(tilted, first);
+        let mut moved = view(1.0, 1.0);
+        moved[0] = 0.3;
+        assert_ne!(key.update_shape(LightShape::of(Some(&sh(1.0, 2.0)), moved)), tilted);
+        let dark = key.update_shape(LightShape::of(Some(&sh(0.0, 2.0)), moved));
+        assert_ne!(dark, tilted);
+        assert_eq!(key.update_shape(LightShape::of(Some(&sh(0.0, 2.0)), moved)), dark);
+        // Before an environment exists the ambient colour is the sky: its magnitude is a factor.
+        let flat = key.update_shape(LightShape::of(None, view(1.0, 1.0)));
+        assert_eq!(key.update_shape(LightShape::of(None, view(1.0, 4.0))), flat);
     }
 
     #[test]

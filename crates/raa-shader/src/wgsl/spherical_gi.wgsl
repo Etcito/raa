@@ -63,12 +63,19 @@ fn raa_spherical_incident(entry: u32, mask: u32, channels: u32) -> vec3<f32> {
     return raa_spherical_channel_sum(raa_spherical_slot(entry, mask), channels);
 }
 
+// The groups are stored at unit intensity (sky / sky norm, white unit sun, other as lit): header
+// row 3 holds this frame's factors (sun rgb, sky scale), so intensity edits never recapture.
 fn raa_spherical_channel_sum(base: u32, channels: u32) -> vec3<f32> {
+    let scale = bitcast<vec4<f32>>(raa_spherical_data[3]);
     var rgb = vec3<f32>(0.0);
-    for (var i = 0u; i < 3u; i++) {
-        if (channels & (1u << i)) != 0u {
-            rgb += bitcast<vec3<f32>>(raa_spherical_data[base + i].rgb);
-        }
+    if (channels & 1u) != 0u {
+        rgb += scale.w * bitcast<vec3<f32>>(raa_spherical_data[base].rgb);
+    }
+    if (channels & 2u) != 0u {
+        rgb += scale.xyz * bitcast<vec3<f32>>(raa_spherical_data[base + 1u].rgb);
+    }
+    if (channels & 4u) != 0u {
+        rgb += bitcast<vec3<f32>>(raa_spherical_data[base + 2u].rgb);
     }
     return rgb;
 }
