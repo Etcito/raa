@@ -385,7 +385,10 @@ impl ExecExtension for WiringExtension {
                 source_free,
                 tonemap: node.type_id == "pass.tonemap",
                 resolve_display: matches!(node.type_id.as_str(), "pass.taa" | "neural.super-resolution"),
-                display_post: matches!(node.type_id.as_str(), "pass.bloom" | "pass.grading"),
+                display_post: matches!(
+                    node.type_id.as_str(),
+                    "pass.bloom" | "pass.grading" | "pass.sharpen"
+                ),
             });
         }
         resolve_display_branches(&mut bindings);

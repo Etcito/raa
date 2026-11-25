@@ -2400,6 +2400,22 @@ fn post_types() -> Vec<NodeTypeSpec> {
             // The grading layout (raa-grading/src/feature.rs:101): uniform, texture, sampler.
             vec![budget(Fragment, 1, 1, 0, 0, 1)],
         ),
+        // The S47 `sharpen` entry (order 195). Its strength stays the engine's `setSharpening`
+        // value; the node only places the pass in the colour chain. It is a fullscreen post
+        // pass, so after a display-sized resolve it runs at the display extent.
+        pass_type(
+            "pass.sharpen",
+            Post,
+            "Sharpen",
+            "Contrast-adaptive sharpening over the colour chain (strength: setSharpening).",
+            "sharpen",
+            195,
+            vec![color_input(195)],
+            vec![color_output()],
+            Vec::new(),
+            // The sharpen layout (raa-sharpen/src/feature.rs:75): uniform and HDR source.
+            vec![budget(Fragment, 1, 0, 0, 0, 1)],
+        ),
         pass_type(
             "pass.cel.resolve",
             Post,
