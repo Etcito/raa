@@ -141,6 +141,8 @@ fn raa_area_stochastic_visibility(index: u32, frag: vec4<f32>) -> vec2<f32> {
 // The caller passes the packed uniform index (not a stable CPU handle) to visibility.
 fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let light = raa_local_lights[index];
+    // Keep authored lights addressable even while off, but skip their shadow and BRDF work.
+    if all(light.color_inv_range_sq.rgb == vec3<f32>(0.0)) { return vec3<f32>(0.0); }
     let capture = raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE);
     var direction = -light.direction_cos_outer.xyz;
     var distance = 0.0;
