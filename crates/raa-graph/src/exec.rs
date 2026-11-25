@@ -51,6 +51,7 @@ pub struct HandleSet {
     pub gi: Option<raa_gi::GiHandle>,
     pub spherical: Option<raa_sdf_trace::mesh::SphericalGiHandle>,
     pub ddgi: Option<raa_sdf_trace::mesh::DdgiHandle>,
+    pub nrc: Option<raa_sdf_trace::mesh::NrcHandle>,
     pub taa: Option<raa_taa::TaaHandle>,
     pub sky: Option<raa_sky::SkyHandle>,
 }

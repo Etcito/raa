@@ -49,6 +49,14 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
             raa_frame.camera_pos.xyz);
         spherical_debug = ddgi.debug;
         c.spherical_diffuse = ddgi.diffuse;
+    } else if !capture && !unlit && raa_feature_enabled(RAA_NRC_GI_FEATURE)
+        && !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
+        // Neural radiance cache: indirect irradiance / pi resolved per pixel in the GI screen
+        // slot, alpha = view depth (0 where the cache has no surface).
+        let nrc_size = vec2<i32>(textureDimensions(raa_gi_screen));
+        let nrc = textureLoad(raa_gi_screen,
+            clamp(vec2<i32>(in.frag_coord.xy), vec2<i32>(0), nrc_size - vec2<i32>(1)), 0);
+        c.spherical_diffuse = vec4<f32>(nrc.rgb, select(0.0, 1.0, nrc.a > 0.0));
     } else if !capture && !unlit && raa_feature_enabled(RAA_SPHERICAL_GI_FEATURE)
         && !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
         let spherical = raa_spherical_evaluate(c.position, s.normal);

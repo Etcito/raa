@@ -1,0 +1,439 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>NRC MLP micro-benchmark</title>
+<pre id="log"></pre>
+<script type="module">
+// Fully fused tiny MLP (64 inputs, HIDDEN x 64 ReLU, 3 linear outputs, no bias) in WGSL compute:
+// inference throughput, one training step (forward + backward + gradient + Adam) and trained accuracy,
+// for f32, shader-f16 and "f16 storage, f32 math". Result in window.__result.
+const say = (...a) => { console.log('[nrc]', ...a); document.getElementById('log').textContent += a.join(' ') + '\n' }
+const query = new URLSearchParams(location.search)
+const HIDDEN_LIST = (query.get('hidden') ?? '5,2').split(',').map(Number)
+const TRAIN_STEPS = Number(query.get('steps') ?? 1500)
+const BATCH = Number(query.get('batch') ?? 16384)
+const CHUNK = 256
+const LOSS = query.get('loss') ?? 'relative'
+const LR = Number(query.get('lr') ?? 3e-3)
+const ROWS = 4 // weight rows accumulated by one gradient invocation
+
+function shader(kind, hidden) {
+  const f16 = kind !== 'f32'
+  const T = f16 ? 'f16' : 'f32'
+  // M = math type. 'f16s' stores f16 but computes in f32.
+  const M = kind === 'f16' ? 'f16' : 'f32'
+  const layers = hidden + 1
+  const W4 = hidden * 1024 + 48
+  return `${f16 ? 'enable f16;' : ''}
+alias T = ${T};
+alias M = ${M};
+const HIDDEN = ${hidden}u;
+const LAYERS = ${layers}u;
+const W4 = ${W4}u;
+const BATCH = ${BATCH}u;
+const CHUNK = ${CHUNK}u;
+const CHUNKS = ${BATCH / CHUNK}u;
+const ROWS = ${ROWS}u;
+struct U { seed: u32, count: u32, lr: f32, loss_scale: f32, beta1: f32, beta2: f32, corr1: f32, corr2: f32 }
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var<storage, read> weights: array<vec4<T>>;
+@group(0) @binding(2) var<storage, read_write> acts: array<vec4<T>>;
+@group(0) @binding(3) var<storage, read_write> deltas: array<vec4<T>>;
+@group(0) @binding(4) var<storage, read_write> partial: array<vec4f>;
+@group(0) @binding(5) var<storage, read_write> result: array<vec4f>;
+
+fn pcg(v: u32) -> u32 { let s = v * 747796405u + 2891336453u; let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+fn rnd(state: ptr<function, u32>) -> f32 { *state = pcg(*state); return f32(*state) * (1.0 / 4294967296.0); }
+
+// Synthetic radiance field with smooth lobes and hard edges, in f32.
+fn target_of(p: vec3f, w: vec2f, n: vec2f, r: f32, a: vec3f) -> vec3f {
+  let lobe = exp(-12.0 * dot(p - vec3f(0.3, 0.6, 0.4), p - vec3f(0.3, 0.6, 0.4)));
+  let edge = step(0.5, fract(p.x * 3.0 + p.z)) * 0.6;
+  let wave = 0.5 + 0.5 * sin(6.28318 * (2.0 * p.y + w.x));
+  let facing = max(0.0, cos(3.14159 * (n.x - w.y)));
+  let light = vec3f(lobe * 3.0 + edge, wave * facing, 0.25 + 0.75 * lobe * (1.0 - r));
+  return light * (0.2 + 0.8 * a);
+}
+struct Sample { p: vec3f, w: vec2f, n: vec2f, r: f32, a: vec3f, s: vec3f }
+fn sample_of(index: u32, seed: u32) -> Sample {
+  var state = pcg(index ^ (seed * 0x9e3779b9u));
+  var s: Sample;
+  s.p = vec3f(rnd(&state), rnd(&state), rnd(&state));
+  s.w = vec2f(rnd(&state), rnd(&state));
+  s.n = vec2f(rnd(&state), rnd(&state));
+  s.r = rnd(&state);
+  s.a = vec3f(rnd(&state), rnd(&state), rnd(&state));
+  s.s = vec3f(rnd(&state), rnd(&state), rnd(&state));
+  return s;
+}
+fn blob(x: f32, k: f32) -> f32 { let d = (x - (k + 0.5) * 0.25) * 4.0; return exp(-0.5 * d * d); }
+fn blob4(x: f32) -> vec4f { return vec4f(blob(x, 0.0), blob(x, 1.0), blob(x, 2.0), blob(x, 3.0)); }
+// Paper encoding: 12 frequencies per position axis (triangle wave), one-blob (k = 4) for direction,
+// normal and roughness, identity for the albedos; 62 values padded with ones to 64.
+fn tri(x: f32) -> f32 { return abs(fract(x) * 2.0 - 1.0) * 2.0 - 1.0; }
+fn encode(s: Sample, x: ptr<function, array<vec4<M>, 16>>) {
+  for (var axis = 0u; axis < 3u; axis++) {
+    let v = s.p[axis];
+    (*x)[axis * 3u] = vec4<M>(vec4f(tri(v), tri(v * 2.0), tri(v * 4.0), tri(v * 8.0)));
+    (*x)[axis * 3u + 1u] = vec4<M>(vec4f(tri(v * 16.0), tri(v * 32.0), tri(v * 64.0), tri(v * 128.0)));
+    (*x)[axis * 3u + 2u] = vec4<M>(vec4f(tri(v * 256.0), tri(v * 512.0), tri(v * 1024.0), tri(v * 2048.0)));
+  }
+  (*x)[9] = vec4<M>(blob4(s.w.x));
+  (*x)[10] = vec4<M>(blob4(s.w.y));
+  (*x)[11] = vec4<M>(blob4(s.n.x));
+  (*x)[12] = vec4<M>(blob4(s.n.y));
+  (*x)[13] = vec4<M>(blob4(s.r));
+  (*x)[14] = vec4<M>(vec4f(s.a, s.s.x));
+  (*x)[15] = vec4<M>(vec4f(s.s.yz, 1.0, 1.0));
+}
+fn hidden_layer(layer: u32, a: ptr<function, array<vec4<M>, 16>>, o: ptr<function, array<vec4<M>, 16>>) {
+  let base = layer * 1024u;
+  for (var i4 = 0u; i4 < 16u; i4++) {
+    var r: vec4<M>;
+    for (var k = 0u; k < 4u; k++) {
+      let row = base + (i4 * 4u + k) * 16u;
+      var sum = M(0.0);
+      for (var j = 0u; j < 16u; j++) { sum += dot(vec4<M>(weights[row + j]), (*a)[j]); }
+      r[k] = sum;
+    }
+    (*o)[i4] = max(r, vec4<M>(0.0));
+  }
+}
+fn output_layer(a: ptr<function, array<vec4<M>, 16>>) -> vec3<M> {
+  let base = HIDDEN * 1024u;
+  var r: vec3<M>;
+  for (var k = 0u; k < 3u; k++) {
+    var sum = M(0.0);
+    for (var j = 0u; j < 16u; j++) { sum += dot(vec4<M>(weights[base + k * 16u + j]), (*a)[j]); }
+    r[k] = sum;
+  }
+  return r;
+}
+
+@compute @workgroup_size(64)
+fn infer(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= u.count) { return; }
+  let s = sample_of(id.x, u.seed);
+  var a: array<vec4<M>, 16>;
+  var b: array<vec4<M>, 16>;
+  encode(s, &a);
+  for (var layer = 0u; layer < HIDDEN; layer++) {
+    if ((layer & 1u) == 0u) { hidden_layer(layer, &a, &b); } else { hidden_layer(layer, &b, &a); }
+  }
+  var o: vec3<M>;
+  if ((HIDDEN & 1u) == 1u) { o = output_layer(&b); } else { o = output_layer(&a); }
+  result[id.x] = vec4f(vec3f(o), 1.0);
+}
+
+// Same network, also writes the f32 target next to the prediction (accuracy readback).
+@compute @workgroup_size(64)
+fn evaluate(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= u.count) { return; }
+  let s = sample_of(id.x, u.seed);
+  var a: array<vec4<M>, 16>;
+  var b: array<vec4<M>, 16>;
+  encode(s, &a);
+  for (var layer = 0u; layer < HIDDEN; layer++) {
+    if ((layer & 1u) == 0u) { hidden_layer(layer, &a, &b); } else { hidden_layer(layer, &b, &a); }
+  }
+  var o: vec3<M>;
+  if ((HIDDEN & 1u) == 1u) { o = output_layer(&b); } else { o = output_layer(&a); }
+  result[id.x * 2u] = vec4f(vec3f(o), 1.0);
+  result[id.x * 2u + 1u] = vec4f(target_of(s.p, s.w, s.n, s.r, s.a), 1.0);
+}
+
+// One invocation per training sample: forward keeping every layer input, relative L2 loss, backward.
+@compute @workgroup_size(64)
+fn forward_backward(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= BATCH) { return; }
+  let s = sample_of(id.x, u.seed);
+  var x: array<array<vec4<M>, 16>, ${layers}>;
+  var a: array<vec4<M>, 16>;
+  var b: array<vec4<M>, 16>;
+  encode(s, &a);
+  x[0] = a;
+  for (var layer = 0u; layer < HIDDEN; layer++) {
+    hidden_layer(layer, &a, &b);
+    a = b;
+    x[layer + 1u] = a;
+  }
+  let prediction = vec3f(output_layer(&a));
+  let wanted = target_of(s.p, s.w, s.n, s.r, s.a);
+  let gradient = 2.0 * (prediction - wanted) / (${LOSS === 'l2' ? 'vec3f(1.0)' : 'prediction * prediction + vec3f(0.01)'}) * u.loss_scale;
+  var delta: array<vec4<M>, 16>;
+  delta[0] = vec4<M>(vec4f(gradient, 0.0));
+  let out = id.x * LAYERS * 16u;
+  for (var j = 0u; j < 16u; j++) {
+    acts[out + HIDDEN * 16u + j] = vec4<T>(x[HIDDEN][j]);
+    deltas[out + HIDDEN * 16u + j] = vec4<T>(delta[j]);
+  }
+  var rows = 3u;
+  for (var step = 0u; step < HIDDEN; step++) {
+    let layer = HIDDEN - step; // delta of this layer's outputs -> delta of its inputs
+    let base = layer * 1024u;
+    var back: array<vec4<M>, 16>;
+    for (var i = 0u; i < rows; i++) {
+      let d = delta[i >> 2u][i & 3u];
+      for (var j = 0u; j < 16u; j++) { back[j] += vec4<M>(weights[base + i * 16u + j]) * d; }
+    }
+    for (var j = 0u; j < 16u; j++) {
+      delta[j] = select(vec4<M>(0.0), back[j], x[layer][j] > vec4<M>(0.0));
+      acts[out + (layer - 1u) * 16u + j] = vec4<T>(x[layer - 1u][j]);
+      deltas[out + (layer - 1u) * 16u + j] = vec4<T>(delta[j]);
+    }
+    rows = 64u;
+  }
+}
+
+// One invocation per (chunk, layer, 4 output rows): sum of delta_i * act_j over the chunk samples.
+@compute @workgroup_size(64)
+fn gradient(@builtin(global_invocation_id) id: vec3u) {
+  let per_chunk = LAYERS * (64u / ROWS);
+  let chunk = id.x / per_chunk;
+  if (chunk >= CHUNKS) { return; }
+  let rest = id.x % per_chunk;
+  let layer = rest / (64u / ROWS);
+  let row4 = rest % (64u / ROWS);
+  if (layer == HIDDEN && row4 > 0u) { return; }
+  var sum: array<array<vec4f, 16>, ${ROWS}>;
+  for (var n = 0u; n < CHUNK; n++) {
+    let at = ((chunk * CHUNK + n) * LAYERS + layer) * 16u;
+    let d = vec4f(deltas[at + row4]);
+    for (var j = 0u; j < 16u; j++) {
+      let a = vec4f(acts[at + j]);
+      sum[0][j] += a * d.x; sum[1][j] += a * d.y; sum[2][j] += a * d.z; sum[3][j] += a * d.w;
+    }
+  }
+  let rows = select(4u, 3u, layer == HIDDEN);
+  for (var k = 0u; k < rows; k++) {
+    let to = chunk * W4 + layer * 1024u + (row4 * 4u + k) * 16u;
+    for (var j = 0u; j < 16u; j++) { partial[to + j] = sum[k][j]; }
+  }
+}
+`
+}
+
+const adamShader = (kind, hidden) => `${kind === 'f32' ? '' : 'enable f16;'}
+alias T = ${kind === 'f32' ? 'f32' : 'f16'};
+const W4 = ${hidden * 1024 + 48}u;
+const CHUNKS = ${BATCH / CHUNK}u;
+struct U { seed: u32, count: u32, lr: f32, loss_scale: f32, beta1: f32, beta2: f32, corr1: f32, corr2: f32 }
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var<storage, read_write> weights: array<vec4<T>>;
+@group(0) @binding(2) var<storage, read_write> master: array<vec4f>;
+@group(0) @binding(3) var<storage, read_write> moment1: array<vec4f>;
+@group(0) @binding(4) var<storage, read_write> moment2: array<vec4f>;
+@group(0) @binding(5) var<storage, read> partial: array<vec4f>;
+@compute @workgroup_size(64)
+fn adam(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= W4) { return; }
+  var g = vec4f(0.0);
+  for (var chunk = 0u; chunk < CHUNKS; chunk++) { g += partial[chunk * W4 + id.x]; }
+  g /= f32(${BATCH}) * u.loss_scale;
+  let m = mix(g, moment1[id.x], u.beta1);
+  let v = mix(g * g, moment2[id.x], u.beta2);
+  moment1[id.x] = m;
+  moment2[id.x] = v;
+  let w = master[id.x] - u.lr * (m * u.corr1) / (sqrt(v * u.corr2) + vec4f(1e-8));
+  master[id.x] = w;
+  weights[id.x] = vec4<T>(w);
+}`
+
+const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
+const features = [...adapter.features].sort()
+const info = adapter.info ?? {}
+say('adapter', info.vendor, info.architecture, info.device, info.description)
+say('features', features.join(' '))
+const want = ['shader-f16', 'timestamp-query', 'subgroups', 'chromium-experimental-subgroup-matrix'].filter((f) => adapter.features.has(f))
+const device = await adapter.requestDevice({ requiredFeatures: want, requiredLimits: { maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize } })
+const errors = []
+device.addEventListener('uncapturederror', (e) => { errors.push(e.error.message); say('GPU error', e.error.message) })
+const hasTime = device.features.has('timestamp-query')
+const out = { adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description }, features, wgslLanguageFeatures: [...(navigator.gpu.wgslLanguageFeatures ?? [])], batch: BATCH, loss: LOSS, lr: LR, steps: TRAIN_STEPS, runs: [] , errors }
+
+const storage = (bytes, extra = 0) => device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | extra })
+const querySet = hasTime ? device.createQuerySet({ type: 'timestamp', count: 8 }) : null
+const queryBuffer = hasTime ? device.createBuffer({ size: 64, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }) : null
+async function readBuffer(buffer, bytes) {
+  const copy = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ })
+  const encoder = device.createCommandEncoder()
+  encoder.copyBufferToBuffer(buffer, 0, copy, 0, bytes)
+  device.queue.submit([encoder.finish()])
+  await copy.mapAsync(GPUMapMode.READ)
+  const data = copy.getMappedRange().slice(0)
+  copy.destroy()
+  return data
+}
+const median = (values) => { const s = [...values].sort((a, b) => a - b); return s[s.length >> 1] }
+
+async function bench(kind, hidden) {
+  const f16 = kind !== 'f32'
+  const elem = f16 ? 8 : 16 // bytes per vec4<T>
+  const W4 = hidden * 1024 + 48
+  const layers = hidden + 1
+  const module = device.createShaderModule({ code: shader(kind, hidden) })
+  const adamModule = device.createShaderModule({ code: adamShader(kind, hidden) })
+  for (const m of [module, adamModule]) {
+    const compiled = await m.getCompilationInfo()
+    for (const message of compiled.messages) if (message.type === 'error') throw new Error(`${kind}: ${message.lineNum}: ${message.message}`)
+  }
+  const QUERIES = 1 << 21
+  const uniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+  const weights = storage(W4 * elem)
+  const master = storage(W4 * 16)
+  const moment1 = storage(W4 * 16)
+  const moment2 = storage(W4 * 16)
+  const acts = storage(BATCH * layers * 16 * elem)
+  const deltas = storage(BATCH * layers * 16 * elem)
+  const partial = storage((BATCH / CHUNK) * W4 * 16)
+  const result = storage(QUERIES * 16)
+  // Xavier-uniform initial weights, same values for every format.
+  let state = 0x1234567
+  const random = () => { state ^= state << 13; state ^= state >>> 17; state ^= state << 5; return (state >>> 0) / 4294967296 }
+  const init = new Float32Array(W4 * 4)
+  for (let i = 0; i < init.length; i++) {
+    const fanOut = i >= hidden * 4096 ? 3 : 64
+    init[i] = (random() * 2 - 1) * Math.sqrt(6 / (64 + fanOut))
+  }
+  device.queue.writeBuffer(master, 0, init)
+  const layout = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+    ...[2, 3, 4, 5].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } })),
+  ] })
+  const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] })
+  const pipeline = (entryPoint) => device.createComputePipelineAsync({ layout: pipelineLayout, compute: { module, entryPoint } })
+  const [infer, evaluate, forwardBackward, gradient] = await Promise.all(['infer', 'evaluate', 'forward_backward', 'gradient'].map(pipeline))
+  const adam = await device.createComputePipelineAsync({ layout: 'auto', compute: { module: adamModule, entryPoint: 'adam' } })
+  const group = device.createBindGroup({ layout, entries: [uniform, weights, acts, deltas, partial, result].map((buffer, binding) => ({ binding, resource: { buffer } })) })
+  const adamGroup = device.createBindGroup({ layout: adam.getBindGroupLayout(0), entries: [uniform, weights, master, moment1, moment2, partial].map((buffer, binding) => ({ binding, resource: { buffer } })) })
+  // f16 math: keep the relative-loss gradient (up to 2 * range / 0.01) inside the half range.
+  const lossScale = kind === 'f16' ? 1 / 32 : 1
+  let step = 0
+  const setUniform = (seed, count, lr) => {
+    const data = new ArrayBuffer(32)
+    const view = new DataView(data)
+    view.setUint32(0, seed, true); view.setUint32(4, count, true); view.setFloat32(8, lr, true); view.setFloat32(12, lossScale, true)
+    view.setFloat32(16, 0.9, true); view.setFloat32(20, 0.999, true)
+    view.setFloat32(24, 1 / (1 - Math.pow(0.9, Math.max(step, 1))), true); view.setFloat32(28, 1 / (1 - Math.pow(0.999, Math.max(step, 1))), true)
+    device.queue.writeBuffer(uniform, 0, data)
+  }
+  const pass = (encoder, pipe, bind, groups, slot) => {
+    const p = encoder.beginComputePass(hasTime && slot !== undefined ? { timestampWrites: { querySet, beginningOfPassWriteIndex: slot * 2, endOfPassWriteIndex: slot * 2 + 1 } } : {})
+    p.setPipeline(pipe); p.setBindGroup(0, bind); p.dispatchWorkgroups(groups); p.end()
+  }
+  const trainStep = (encoder, timed) => {
+    pass(encoder, forwardBackward, group, BATCH / 64, timed ? 0 : undefined)
+    pass(encoder, gradient, group, Math.ceil((BATCH / CHUNK) * layers * (64 / ROWS) / 64), timed ? 1 : undefined)
+    pass(encoder, adam, adamGroup, Math.ceil(W4 / 64), timed ? 2 : undefined)
+  }
+  const stamps = async (count) => {
+    const data = new BigUint64Array(await readBuffer(queryBuffer, count * 16))
+    return Array.from({ length: count }, (_, i) => Number(data[i * 2 + 1] - data[i * 2]) / 1e6)
+  }
+  // Publish the initial weights in the storage format (Adam with lr 0 and a zero gradient).
+  setUniform(0, 0, 0)
+  { const encoder = device.createCommandEncoder(); pass(encoder, adam, adamGroup, Math.ceil(W4 / 64)); device.queue.submit([encoder.finish()]) }
+  const run = { kind, hidden, weights: W4 * 4 }
+
+  // Inference throughput.
+  for (const count of [1 << 19, 1 << 21]) {
+    setUniform(7, count, 0)
+    const times = []
+    for (let i = 0; i < 24; i++) {
+      const encoder = device.createCommandEncoder()
+      pass(encoder, infer, group, count / 64, 0)
+      if (hasTime) encoder.resolveQuerySet(querySet, 0, 2, queryBuffer, 0)
+      device.queue.submit([encoder.finish()])
+      if (hasTime) times.push((await stamps(1))[0]); else await device.queue.onSubmittedWorkDone()
+    }
+    const repeat = 20
+    await device.queue.onSubmittedWorkDone()
+    const start = performance.now()
+    const encoder = device.createCommandEncoder()
+    for (let i = 0; i < repeat; i++) pass(encoder, infer, group, count / 64)
+    device.queue.submit([encoder.finish()])
+    await device.queue.onSubmittedWorkDone()
+    const wall = (performance.now() - start) / repeat
+    const ms = hasTime ? median(times.slice(4)) : wall
+    run[`infer${count}`] = { gpuMs: hasTime ? ms : null, wallMs: wall, queriesPerSecond: count / (ms / 1000) }
+    say(kind, `hidden ${hidden}`, `infer ${count}: gpu ${hasTime ? ms.toFixed(3) : '-'} ms, wall ${wall.toFixed(3)} ms, ${(count / ms / 1000).toFixed(1)} M queries/s`)
+  }
+
+  // Training step cost (timed passes), before the long run.
+  {
+    const rows = []
+    for (let i = 0; i < 40; i++) {
+      step++
+      setUniform(1000 + step, 0, 0)
+      const encoder = device.createCommandEncoder()
+      trainStep(encoder, true)
+      if (hasTime) encoder.resolveQuerySet(querySet, 0, 6, queryBuffer, 0)
+      device.queue.submit([encoder.finish()])
+      if (hasTime) rows.push(await stamps(3)); else await device.queue.onSubmittedWorkDone()
+    }
+    const repeat = 40
+    await device.queue.onSubmittedWorkDone()
+    const start = performance.now()
+    const encoder = device.createCommandEncoder()
+    for (let i = 0; i < repeat; i++) trainStep(encoder, false)
+    device.queue.submit([encoder.finish()])
+    await device.queue.onSubmittedWorkDone()
+    const wall = (performance.now() - start) / repeat
+    const parts = hasTime ? [0, 1, 2].map((k) => median(rows.slice(5).map((r) => r[k]))) : [null, null, null]
+    const total = hasTime ? parts[0] + parts[1] + parts[2] : wall
+    run.train = { forwardBackwardMs: parts[0], gradientMs: parts[1], adamMs: parts[2], gpuMs: hasTime ? total : null, wallMs: wall, samplesPerSecond: BATCH / (total / 1000) }
+    say(kind, `hidden ${hidden}`, `train step B=${BATCH}: fwd+bwd ${parts[0]?.toFixed(3)} grad ${parts[1]?.toFixed(3)} adam ${parts[2]?.toFixed(3)} ms, wall ${wall.toFixed(3)} ms, ${(BATCH / total / 1000).toFixed(2)} M samples/s`)
+  }
+
+  // Accuracy: train from the same initial weights, then evaluate on a held-out set in the same format.
+  device.queue.writeBuffer(master, 0, init)
+  device.queue.writeBuffer(moment1, 0, new Float32Array(W4 * 4))
+  device.queue.writeBuffer(moment2, 0, new Float32Array(W4 * 4))
+  step = 0
+  setUniform(0, 0, 0)
+  { const encoder = device.createCommandEncoder(); pass(encoder, adam, adamGroup, Math.ceil(W4 / 64)); device.queue.submit([encoder.finish()]) }
+  const curve = []
+  const evaluateNow = async () => {
+    const count = 1 << 16
+    setUniform(0xabcdef, count, 0)
+    const encoder = device.createCommandEncoder()
+    pass(encoder, evaluate, group, count / 64)
+    device.queue.submit([encoder.finish()])
+    const data = new Float32Array(await readBuffer(result, count * 32))
+    let mse = 0, relative = 0, bad = 0, mean = [0, 0, 0], variance = 0
+    for (let i = 0; i < count; i++) for (let c = 0; c < 3; c++) mean[c] += data[i * 8 + 4 + c] / count
+    for (let i = 0; i < count; i++) for (let c = 0; c < 3; c++) variance += (data[i * 8 + 4 + c] - mean[c]) ** 2
+    for (let i = 0; i < count; i++) for (let c = 0; c < 3; c++) {
+      const p = data[i * 8 + c], t = data[i * 8 + 4 + c]
+      if (!Number.isFinite(p)) { bad++; continue }
+      mse += (p - t) ** 2
+      relative += (p - t) ** 2 / (t * t + 0.01)
+    }
+    return { targetVariance: variance / (count * 3), mse: mse / (count * 3), relativeMse: relative / (count * 3), nonFinite: bad }
+  }
+  for (let i = 0; i < TRAIN_STEPS; i++) {
+    step++
+    const lr = LR * (i > TRAIN_STEPS * 0.7 ? 0.3 : 1)
+    setUniform(5000 + step, 0, lr)
+    const encoder = device.createCommandEncoder()
+    trainStep(encoder, false)
+    device.queue.submit([encoder.finish()])
+    if (i % 250 === 249) { const e = await evaluateNow(); curve.push({ step: i + 1, ...e }) }
+  }
+  run.accuracy = await evaluateNow()
+  run.curve = curve
+  say(kind, `hidden ${hidden}`, `after ${TRAIN_STEPS} steps: mse ${run.accuracy.mse.toExponential(3)} relMse ${run.accuracy.relativeMse.toExponential(3)} nonFinite ${run.accuracy.nonFinite}`)
+  for (const b of [uniform, weights, master, moment1, moment2, acts, deltas, partial, result]) b.destroy()
+  return run
+}
+
+try {
+  const kinds = ['f32', ...(device.features.has('shader-f16') ? ['f16', 'f16s'] : [])]
+  for (const hidden of HIDDEN_LIST) for (const kind of kinds) out.runs.push(await bench(kind, hidden))
+  window.__result = out
+} catch (error) {
+  say('FAILED', error.stack ?? error)
+  out.error = String(error.stack ?? error)
+  window.__result = out
+}
+</script>

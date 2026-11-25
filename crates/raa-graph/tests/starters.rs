@@ -221,6 +221,7 @@ fn starters_are_named_from_their_files_in_file_stem_order() {
             ("debug", "Debug"),
             ("full-gi", "Full GI"),
             ("full-gi-stages", "Full GI stages"),
+            ("nrc-gi", "NRC GI"),
             ("pre-spherical-gi", "Pre-spherical GI"),
             (
                 "pre-spherical-gi-fitted",

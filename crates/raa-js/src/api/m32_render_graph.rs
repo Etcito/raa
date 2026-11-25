@@ -152,6 +152,7 @@ pub(crate) mod web {
         crate::mesh_trace::install_for_graph(ctx);
         crate::spherical_gi::install_for_graph(ctx)?;
         crate::ddgi_gi::install_for_graph(ctx)?;
+        crate::nrc_gi::install_for_graph(ctx)?;
         ctx.features.insert(RenderGraphState {
             executor: GraphExecutor::new(),
             catalog: Catalog::build(),
@@ -216,6 +217,7 @@ pub(crate) mod web {
             gi: st.features.get::<GiHandle>().cloned(),
             spherical: st.features.get::<raa_sdf_trace::mesh::SphericalGiHandle>().cloned(),
             ddgi: st.features.get::<raa_sdf_trace::mesh::DdgiHandle>().cloned(),
+            nrc: st.features.get::<raa_sdf_trace::mesh::NrcHandle>().cloned(),
             taa: st.features.get::<TaaHandle>().cloned(),
             sky: st.features.get::<raa_sky::SkyHandle>().cloned(),
         };
