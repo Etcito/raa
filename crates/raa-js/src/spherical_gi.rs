@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 15] = [
+const OPTIONS: [&str; 16] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
@@ -39,6 +39,7 @@ const OPTIONS: [&str; 15] = [
     "probeCache",
     "skySamples",
     "lightSamples",
+    "parallaxRange",
     "autoRange",
 ];
 
@@ -130,6 +131,13 @@ fn read_patch(
                 } else {
                     settings.burst_ms = ms as f32;
                 }
+            }
+            "parallaxRange" => {
+                let range = number()?;
+                if !(0.0..=10000.0).contains(&range) {
+                    return Err(invalid(&name, "expected metres from 0 to 10000"));
+                }
+                settings.parallax_range = range as f32;
             }
             "autoRange" => {
                 settings.scheduler.auto_range = value
@@ -225,6 +233,7 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
     put(&result, "probeCache", settings.scheduler.cache_cells.into());
     put(&result, "skySamples", settings.sky_samples.into());
     put(&result, "lightSamples", settings.light_samples.into());
+    put(&result, "parallaxRange", settings.parallax_range.into());
     put(&result, "autoRange", settings.scheduler.auto_range.into());
     result.into()
 }

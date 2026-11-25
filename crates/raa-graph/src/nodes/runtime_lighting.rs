@@ -137,6 +137,14 @@ impl NodeFamily for RuntimeLighting {
                 Rebuild::None,
             ),
             (
+                "parallaxRange",
+                "Parallax patch range",
+                ParamKind::Number,
+                Some((0.0, 10000.0)),
+                &[][..],
+                Rebuild::None,
+            ),
+            (
                 "autoRange",
                 "Outer radius from scene bounds",
                 ParamKind::Bool,

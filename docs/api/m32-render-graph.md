@@ -125,6 +125,8 @@ not a graph is set.
   from the scene bounds (quarter-octave steps, grow at once, shrink below 1/sqrt(2)); `zMax` is then
   only the initial radius. `probeCache` keeps that many extra published probes for reuse after a
   recenter; `skySamples` and `lightSamples` set the sky rays and the stratified local lights per hit.
+  `parallaxRange` (metres, 0 = off) switches receivers beyond it from the 24 parallax patches to
+  the probe's six-face irradiance, blended over the next half of that distance (a cheaper far field).
   Node presence enables capture. Set `zMax` above `clipStart`. The `spherical_gi` frozen graph
   uses the same pass and handles.
 - Probes float in free space: each occupied cell captures from its centre pushed away from

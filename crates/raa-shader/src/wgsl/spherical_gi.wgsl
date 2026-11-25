@@ -5,7 +5,8 @@
 // raa_spherical_data at its own read-only binding.
 //
 // Header rows: 0 anchor xyz + intensity; 1 angular n, shells, table mask, debug;
-// 2 clipStart, zMax, frame, channel mask; 3 x = table row of the centre probe (0 none);
+// 2 clipStart, zMax, frame, channel mask; 3 x = table row of the centre probe (0 none),
+// y = parallax range (f32 metres, 0 = always parallax patches);
 // 4.. shell inner, centre, outer. Entry rows: key, slot, first publication frame,
 // light hash; probe xyz + spacing; reserved xyz + published.
 
@@ -169,6 +170,23 @@ fn raa_spherical_probe_irradiance(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f
         }
     }
     return e * 0.31830988;
+}
+
+// Far-field irradiance / pi of one probe from its six world-axis face averages (the
+// legacy rows, channel-masked): each face's mean radiance weighted by its cosine
+// form factor, 0.554 d^2 for the facing part plus 0.1115 (1 - d^2) with d = n.axis.
+// The weights sum to 1 for any unit n, so uniform radiance L gives exactly L.
+fn raa_spherical_probe_cube(entry: u32, mask: u32, n: vec3<f32>) -> vec3<f32> {
+    let slot = raa_spherical_slot(entry, mask);
+    let channels = raa_spherical_data[2].w;
+    var e = vec3<f32>(0.0);
+    for (var face = 0u; face < 6u; face++) {
+        let axis = face / 2u;
+        let d = select(n.x, select(n.y, n.z, axis == 2u), axis != 0u) * select(1.0, -1.0, (face & 1u) != 0u);
+        let w = 0.554 * max(d, 0.0) * max(d, 0.0) + 0.1115 * (1.0 - d * d);
+        e += w * raa_spherical_channel_sum(slot + 3u + 3u * face, channels);
+    }
+    return e;
 }
 
 struct RaaSphericalCoordinate {
@@ -377,9 +395,24 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
     let a = top.w0 - top.w2;
     let b = top.w1 - top.w2;
     if a <= 1e-7 { return vec4<f32>(0.0); }
-    var sum = a * raa_spherical_probe_irradiance(top.e0, mask, p, normal);
-    if b > 1e-7 {
-        sum += b * raa_spherical_probe_irradiance(top.e1, mask, p, normal);
+    // Far receivers use the six-face irradiance (no parallax), blended in over
+    // [range, 1.5 range] from the anchor; only that band pays for both.
+    let range = bitcast<f32>(raa_spherical_data[3].y);
+    let far = select(0.0, smoothstep(range, 1.5 * range, cell.radius), range > 0.0);
+    var sum = vec3<f32>(0.0);
+    if far < 1.0 {
+        var near = a * raa_spherical_probe_irradiance(top.e0, mask, p, normal);
+        if b > 1e-7 {
+            near += b * raa_spherical_probe_irradiance(top.e1, mask, p, normal);
+        }
+        sum += (1.0 - far) * near;
+    }
+    if far > 0.0 {
+        var cube = a * raa_spherical_probe_cube(top.e0, mask, normal);
+        if b > 1e-7 {
+            cube += b * raa_spherical_probe_cube(top.e1, mask, normal);
+        }
+        sum += far * cube;
     }
     // Coverage ignores visibility so an occluded receiver still uses the probes
     // rather than the legacy ambient; it fades out over the outer half of the last shell.

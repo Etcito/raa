@@ -21,6 +21,7 @@ pub(crate) const SPHERICAL_KEYS: &[&str] = &[
     "probeCache",
     "skySamples",
     "lightSamples",
+    "parallaxRange",
     "autoRange",
     "enabled",
 ];
@@ -48,6 +49,7 @@ pub(crate) fn spherical_get(settings: SphericalGiSettings, key: &str) -> Option<
         "probeCache" => ParamValue::Int(i64::from(settings.scheduler.cache_cells)),
         "skySamples" => ParamValue::Int(i64::from(settings.sky_samples)),
         "lightSamples" => ParamValue::Int(i64::from(settings.light_samples)),
+        "parallaxRange" => ParamValue::Number(f64::from(settings.parallax_range)),
         "autoRange" => ParamValue::Bool(settings.scheduler.auto_range),
         "debug" => ParamValue::Enum(
             DEBUG
@@ -105,6 +107,9 @@ pub(crate) fn spherical_set(
         }
         ("lightSamples", ParamValue::Int(value)) if (0..=64).contains(value) => {
             settings.light_samples = *value as u32;
+        }
+        ("parallaxRange", ParamValue::Number(value)) if (0.0..=10000.0).contains(value) => {
+            settings.parallax_range = *value as f32;
         }
         ("autoRange", ParamValue::Bool(value)) => settings.scheduler.auto_range = *value,
         ("debug", ParamValue::Enum(value)) => {

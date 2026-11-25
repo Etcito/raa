@@ -341,6 +341,12 @@ export interface SphericalGiSettings {
   /** Integer from 0 to 64: local lights sampled per captured hit (stratified); 0 = every light. Defaults to 0. */
   lightSamples: number;
   /**
+   * Metres from the grid anchor beyond which receivers read each probe's six-face irradiance
+   * (no parallax) instead of its 24 parallax patches, blended over the next half of that
+   * distance; 0 always evaluates the patches. Defaults to 0.
+   */
+  parallaxRange: number;
+  /**
    * Derive zMax from the scene: the farthest corner of the geometry bounds from the grid
    * anchor, quantised to quarter octaves, grown at once and shrunk only below 1/sqrt(2) of the
    * current radius; shells are re-derived from [clipStart, outer radius] and probes rekeyed.

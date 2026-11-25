@@ -65,6 +65,10 @@ pub struct SphericalGiSettings {
     /// Local lights sampled per hit texel, stratified with weight count / samples;
     /// 0 evaluates every light (one shadow ray each). The sun is always one shadow ray.
     pub light_samples: u32,
+    /// Receivers farther than this from the grid anchor (metres) read each probe's
+    /// six-face irradiance instead of its 24 parallax patches, blended over the next
+    /// half of that distance; 0 always evaluates the patches.
+    pub parallax_range: f32,
     pub intensity: f32,
     pub debug: SphericalGiDebug,
     /// Bit 0 selects sky, bit 1 sun and bit 2 other.
@@ -81,6 +85,7 @@ impl Default for SphericalGiSettings {
             burst_ms: 0.0,
             sky_samples: 1,
             light_samples: 0,
+            parallax_range: 0.0,
             intensity: 1.0,
             debug: SphericalGiDebug::Off,
             channels: 7,
@@ -99,11 +104,13 @@ impl SphericalGiSettings {
             || !(0.0..=MAX_CAPTURE_MS).contains(&self.burst_ms)
             || self.sky_samples > MAX_CAPTURE_SAMPLES
             || self.light_samples > MAX_CAPTURE_SAMPLES
+            || !self.parallax_range.is_finite()
+            || !(0.0..=1.0e4).contains(&self.parallax_range)
         {
             return Err(RaaError::FrameGraph {
                 code: "gi.spherical.invalid_settings",
                 message: format!(
-                    "expected intensity in [0, 16], channel mask in [0, 7], face budgets in [0, {MAX_FACES_PER_BUDGET}], capture times in [0, {MAX_CAPTURE_MS}] ms and sample counts in [0, {MAX_CAPTURE_SAMPLES}]"
+                    "expected intensity in [0, 16], channel mask in [0, 7], face budgets in [0, {MAX_FACES_PER_BUDGET}], capture times in [0, {MAX_CAPTURE_MS}] ms, sample counts in [0, {MAX_CAPTURE_SAMPLES}] and parallaxRange in [0, 10000] m"
                 ),
             });
         }
@@ -758,6 +765,7 @@ impl SphericalGpu {
             frame,
             settings.channels,
         ];
+        rows[3][1] = settings.parallax_range.to_bits();
         for index in 0..grid.shell_count() {
             let shell = grid.radial_shell(index).expect("validated radial shell");
             rows[4 + usize::from(index)] =
