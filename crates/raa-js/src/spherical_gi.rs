@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 18] = [
+const OPTIONS: [&str; 19] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
