@@ -131,6 +131,15 @@ impl NodeFamily for Nrc {
                 Rebuild::None,
             ),
             param(
+                "lossEpsilon",
+                "Relative loss epsilon",
+                ParamKind::Number,
+                number(d.loss_epsilon),
+                Some((1e-8, 1.0)),
+                Some(0.0001),
+                Rebuild::None,
+            ),
+            param(
                 "train",
                 "Train online",
                 ParamKind::Bool,
@@ -256,6 +265,7 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> NrcSettin
             }
             ("learningRate", ParamValue::Number(x)) => s.learning_rate = *x as f32,
             ("ema", ParamValue::Number(x)) => s.ema = *x as f32,
+            ("lossEpsilon", ParamValue::Number(x)) => s.loss_epsilon = *x as f32,
             ("train", ParamValue::Bool(b)) => s.train = *b,
             ("interleave", ParamValue::Bool(b)) => s.interleave = *b,
             ("scale", ParamValue::Enum(name)) => {
