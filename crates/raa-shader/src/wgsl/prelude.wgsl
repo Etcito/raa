@@ -449,7 +449,9 @@ fn raa_texture_grad(id: u32, uv: vec2<f32>, duv_dx: vec2<f32>, duv_dy: vec2<f32>
     let major2 = max(lx, ly);
     let minor2 = min(lx, ly);
     let rho2 = max(minor2, major2 / (RAA_ATLAS_MAX_ANISO * RAA_ATLAS_MAX_ANISO));
-    let lod = clamp(0.5 * log2(max(rho2, 1e-12)), 0.0, levels - 1.0);
+    // reserved2[0].x: negative mip bias while a jittered frame renders below the display size
+    // (temporal upscaling), so material textures keep the display resolution's detail.
+    let lod = clamp(0.5 * log2(max(rho2, 1e-12)) + raa_frame.reserved2[0].x, 0.0, levels - 1.0);
     let axis = select(duv_dy, duv_dx, lx >= ly) * e;
     let inset = 0.5 * exp2(ceil(lod)) / atlas;
     let lo = r.xy + inset;
