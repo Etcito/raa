@@ -1440,8 +1440,10 @@ impl CostModel {
         // The ceiling always fits one minimal batch: with a fixed cost above four
         // targets (a slow first measurement) the credit could otherwise never pay for
         // a batch, no capture would run and the model would never be re-measured.
-        let minimal = a + b * f64::from(MIN_CLOCK_FACES);
-        self.credit = (self.credit + target_ms).min((4.0 * target_ms).max(minimal));
+        // The ceiling pays for one fixed-size batch (and a margin, so that rounding
+        // in the division below cannot land one face short of the minimum).
+        let batch = a + b * f64::from(fixed.max(MIN_CLOCK_FACES)) + 1e-6;
+        self.credit = (self.credit + target_ms).min((4.0 * target_ms).max(batch));
         if pending == 0 {
             return 0;
         }
@@ -1790,6 +1792,16 @@ mod tests {
         assert!(a > 4.0 * 0.75);
         let issued: u32 = (0..32).map(|_| model.faces(0.75, 96, 7000)).sum();
         assert!(issued >= MIN_CLOCK_FACES, "issued {issued}");
+        // A latency-bound fixed cost just above the cap with a tiny per-face cost: the
+        // ceiling lands exactly on a minimal batch, where rounding must not starve it.
+        for (a, b) in [(3.5, 0.002), (3.0001, 1e-5), (6.0, 0.1)] {
+            let mut model = CostModel::default();
+            for n in [24u32, 144, 400] {
+                model.observe(n, a + b * f64::from(n));
+            }
+            let issued: u32 = (0..64).map(|_| model.faces(0.75, 144, 7000)).sum();
+            assert!(issued >= MIN_CLOCK_FACES, "a {a} b {b}: issued {issued}");
+        }
     }
 
     #[test]
