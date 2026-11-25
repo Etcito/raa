@@ -81,6 +81,9 @@ const FLAG_RELOCATE: u32 = 1;
 const FLAG_CLASSIFY: u32 = 2;
 const FLAG_BOUNCE: u32 = 4;
 const FLAG_SKY_TRANSFER: u32 = 8;
+/// Header flags (row 4.w) read by the lookup: screen AO on the DDGI term, legacy far fade.
+const FLAG_SCREEN_AO: u32 = 1 << 16;
+const FLAG_FAR_AMBIENT: u32 = 1 << 17;
 
 /// What a lighting change makes the probes trace again.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -108,12 +111,40 @@ pub enum DdgiDebug {
     Resolve = 3,
 }
 
+/// What a surface gets where the finer cascades do not cover it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DdgiFar {
+    /// Beyond the last cascade the lookup clamps to that cascade's border probes, and the
+    /// estimate of whatever usable probes cover a point is renormalized: forward never falls back
+    /// to the flat ambient term while any probe is usable.
+    #[default]
+    Clamp = 0,
+    /// The behaviour before cascades: confidence fades over the outer half cell of the last
+    /// cascade and with the probe coverage, the rest is the flat ambient term (comparison only).
+    Ambient = 1,
+}
+
+/// Most cascades (cascade k has spacing `spacing * 2^k`).
+pub const DDGI_MAX_CASCADES: u32 = 3;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DdgiSettings {
     pub enabled: bool,
     pub counts: [u32; 3],
     /// Probe spacing in metres.
     pub spacing: f32,
+    /// Nested volumes, 1 to 3: cascade 0 is `counts` at `spacing`; cascade k >= 1 is
+    /// `cascade_counts` at `spacing * 2^k`, each camera-centred, scrolled and kept inside the
+    /// scene bounds independently. A surface takes the finest cascade that covers it, blended
+    /// into the next one over a band of 1.5 cells where a cascade ends inside the scene.
+    pub cascades: u32,
+    pub cascade_counts: [u32; 3],
+    pub far: DdgiFar,
+    /// Multiply the DDGI irradiance by the screen-space AO (GTAO) as the ambient term it
+    /// replaces is, not by the material AO alone: probes 1.5 m apart carry no small-scale
+    /// occlusion.
+    pub screen_ao: bool,
     pub rays_per_probe: u32,
     pub hysteresis: f32,
     /// Most probes updated per frame outside a burst, as a fraction of the volume.
@@ -146,6 +177,12 @@ impl Default for DdgiSettings {
             // 36 x 18 x 24 m: an Intel Sponza sized interior with little scrolling.
             counts: [24, 12, 16],
             spacing: 1.5,
+            // 48 x 24 x 36 m at 3 m: Intel Sponza's whole bounds (36 x 20 x 24 m) whatever the
+            // camera, for 1/3 of cascade 0's probes.
+            cascades: 2,
+            cascade_counts: [16, 8, 12],
+            far: DdgiFar::Clamp,
+            screen_ao: true,
             rays_per_probe: 64,
             hysteresis: 0.97,
             update_fraction: 0.25,
@@ -166,12 +203,41 @@ impl Default for DdgiSettings {
 }
 
 impl DdgiSettings {
+    /// Probes of every cascade.
     pub fn probe_count(&self) -> u32 {
-        self.counts.iter().product()
+        self.cascade_layouts().iter().map(|c| c.probes).sum()
+    }
+
+    /// The cascades in slot order.
+    pub(crate) fn cascade_layouts(&self) -> Vec<CascadeLayout> {
+        let mut offset = 0;
+        (0..self.cascades.clamp(1, DDGI_MAX_CASCADES))
+            .map(|k| {
+                let counts = if k == 0 {
+                    self.counts
+                } else {
+                    self.cascade_counts
+                };
+                let probes = counts.iter().product::<u32>();
+                let layout = CascadeLayout {
+                    counts,
+                    spacing: self.spacing * (1u32 << k) as f32,
+                    offset,
+                    probes,
+                };
+                offset += probes;
+                layout
+            })
+            .collect()
     }
 
     pub fn validate(self) -> Result<Self, RaaError> {
         let counts_ok = self.counts.iter().all(|&n| (2..=MAX_AXIS).contains(&n))
+            && self
+                .cascade_counts
+                .iter()
+                .all(|&n| (2..=MAX_AXIS).contains(&n))
+            && (1..=DDGI_MAX_CASCADES).contains(&self.cascades)
             && self.probe_count() <= MAX_PROBES;
         let ok = counts_ok
             && self.spacing.is_finite()
@@ -190,7 +256,7 @@ impl DdgiSettings {
             return Err(RaaError::FrameGraph {
                 code: "gi.ddgi.invalid_settings",
                 message: format!(
-                    "expected probe counts in [2, {MAX_AXIS}] with at most {MAX_PROBES} probes, spacing in [0.05, 100] m, \
+                    "expected 1 to {DDGI_MAX_CASCADES} cascades, probe counts in [2, {MAX_AXIS}] with at most {MAX_PROBES} probes in all, spacing in [0.05, 100] m, \
                      16-256 rays, hysteresis in [0, 0.995], update fraction in (0, 1], budgets in [0.05, 20] ms, intensity in [0, 16] and biases in [0, 1]"
                 ),
             });
@@ -221,6 +287,9 @@ pub struct DdgiStats {
     pub update_frames: u64,
     pub recycled: u64,
     pub base: [i32; 3],
+    /// Grid origin of each cascade (unused entries zero) and the cascade count.
+    pub cascade_bases: [[i32; 3]; 3],
+    pub cascades: u32,
     pub gpu_bytes: u64,
     /// World bounds of the traced geometry the volume is kept inside.
     pub scene_bounds: Option<([f32; 3], [f32; 3])>,
@@ -251,7 +320,7 @@ pub struct DdgiState {
 impl DdgiState {
     pub fn configure(&mut self, settings: DdgiSettings) -> Result<(), RaaError> {
         let settings = settings.validate()?;
-        if settings.counts != self.settings.counts || settings.spacing != self.settings.spacing {
+        if settings.cascade_layouts() != self.settings.cascade_layouts() {
             self.revision = self.revision.wrapping_add(1);
         }
         self.settings = settings;
@@ -320,6 +389,42 @@ fn volume_base(
             centred.clamp(lo, hi - n + 1)
         }
     })
+}
+
+/// One cascade of the volume: its grid, spacing and slot range in the shared probe buffer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CascadeLayout {
+    pub counts: [u32; 3],
+    pub spacing: f32,
+    /// First slot of the cascade.
+    pub offset: u32,
+    pub probes: u32,
+}
+
+/// Sides of a volume at `base` that reach the padded scene bounds (bit 2i: the low side of axis
+/// i, bit 2i + 1: its high side): no geometry lies beyond, so the lookup neither fades nor blends
+/// into the next cascade there. Without bounds every side is open.
+fn closed_sides(
+    base: [i32; 3],
+    counts: [u32; 3],
+    spacing: f32,
+    bounds: Option<([f32; 3], [f32; 3])>,
+) -> u32 {
+    let mut mask = 0;
+    for i in 0..3 {
+        let Some((min, max)) = bounds.filter(|(min, max)| min[i] <= max[i]) else {
+            continue;
+        };
+        let lo = (min[i] / spacing).floor() as i32 - 1;
+        let hi = (max[i] / spacing).ceil() as i32 + 1;
+        if base[i] <= lo {
+            mask |= 1 << (2 * i);
+        }
+        if base[i] + counts[i] as i32 - 1 >= hi {
+            mask |= 2 << (2 * i);
+        }
+    }
+    mask
 }
 
 struct Staged {
@@ -620,10 +725,10 @@ impl DdgiPass {
                 if edits > 0 {
                     // A probe sees lit surfaces beyond the light's own bound: two cells of margin,
                     // the rest comes from the masks (and from grown masks afterwards).
-                    let margin = 2.0 * settings.spacing;
                     let masks = track.masks.as_ref();
                     let mut slots = Vec::new();
-                    self.schedule.for_each_probe(settings.spacing, |slot, p| {
+                    self.schedule.for_each_probe(|slot, p, spacing| {
+                        let margin = 2.0 * spacing;
                         let mut moved = false;
                         let mut hit = false;
                         for change in &changes {
@@ -759,6 +864,7 @@ impl FeaturePass for DdgiPass {
             return Ok(());
         };
         let probes = settings.probe_count();
+        let cascades = settings.cascade_layouts();
         // One row per resolve texel inside the forward's one storage binding.
         let resolve_size = (
             ctx.size.0.div_ceil(RESOLVE_SCALE),
@@ -770,11 +876,11 @@ impl FeaturePass for DdgiPass {
         let fits = 16 * rows <= u64::from(ctx.gpu.limits().max_storage_buffer_binding_size);
         let screen = fits.then_some(resolve_size);
         if self.gpu.as_ref().is_none_or(|gpu| {
-            gpu.counts != settings.counts || gpu.revision != revision || gpu.screen != screen
+            gpu.cascades != cascades || gpu.revision != revision || gpu.screen != screen
         }) {
             // A resize restarts the volume: the screen rows share the probe buffer.
-            self.gpu = Some(DdgiGpu::new(ctx.gpu, settings.counts, revision, screen));
-            self.schedule.reset(settings.counts);
+            self.gpu = Some(DdgiGpu::new(ctx.gpu, cascades.clone(), revision, screen));
+            self.schedule.reset(&cascades);
             self.lighting = LightingTrack {
                 readback: Some(MaskReadback::new(ctx.gpu, probes)),
                 ..LightingTrack::default()
@@ -802,8 +908,16 @@ impl FeaturePass for DdgiPass {
         let triangles = mesh.geometry.count();
         let traceable = triangles > 0 && mesh.frame.is_some() && mesh.texture_atlas.is_some();
         drop(mesh);
-        let base = volume_base(camera.eye, settings.counts, settings.spacing, bounds);
-        let recycled = self.schedule.scroll(base);
+        let bases: Vec<[i32; 3]> = cascades
+            .iter()
+            .map(|c| volume_base(camera.eye, c.counts, c.spacing, bounds))
+            .collect();
+        let closed: Vec<u32> = cascades
+            .iter()
+            .zip(&bases)
+            .map(|(c, &base)| closed_sides(base, c.counts, c.spacing, bounds))
+            .collect();
+        let recycled = self.schedule.scroll(&bases, &closed);
         let (invalidated, light_edits, edit_probes) =
             self.track_lighting(settings, &camera, sky_diffuse, ctx.lighting);
         let floor = MIN_BATCH.min(probes);
@@ -836,7 +950,6 @@ impl FeaturePass for DdgiPass {
         let mut jobs = Vec::with_capacity(burst as usize);
         let (visibility, bursting, refreshed) = self.schedule.plan(
             Some(&camera),
-            settings.spacing,
             converge_age,
             budget,
             burst,
@@ -849,13 +962,19 @@ impl FeaturePass for DdgiPass {
         let rotation = self.random_rotation();
         let gpu = self.gpu.as_mut().expect("DDGI pool");
         let mut flags = settings.debug as u32 * 256;
+        if settings.screen_ao {
+            flags |= FLAG_SCREEN_AO;
+        }
+        if settings.far == DdgiFar::Ambient {
+            flags |= FLAG_FAR_AMBIENT;
+        }
         if settings.classification {
             flags |= FLAG_CLASSIFY;
         }
         if settings.relocation {
             flags |= FLAG_RELOCATE;
         }
-        gpu.write_header(ctx.gpu, base, flags, settings);
+        gpu.write_header(ctx.gpu, &bases, &closed, flags, settings);
         let resolve = gpu.screen;
         ctx.lighting
             .set_spherical_gi(Some((gpu.probes.clone(), gpu.probes.clone())));
@@ -863,10 +982,9 @@ impl FeaturePass for DdgiPass {
         if !traceable {
             return Ok(());
         }
-        let extent = settings
-            .counts
+        let extent = cascades
             .iter()
-            .map(|&n| n as f32 * settings.spacing)
+            .flat_map(|c| c.counts.map(|n| n as f32 * c.spacing))
             .fold(0.0, f32::max);
         let mut update_flags = flags & (FLAG_CLASSIFY | FLAG_RELOCATE);
         if settings.bounce {
@@ -1022,7 +1140,7 @@ impl FeaturePass for DdgiPass {
             pass.dispatch_workgroups(1, 1, 1);
             pass.set_pipeline(&gpu.relight);
             pass.set_bind_group(0, &relight, &[]);
-            pass.dispatch_workgroups(gpu.counts.iter().product(), 1, 1);
+            pass.dispatch_workgroups(gpu.probes(), 1, 1);
         }
         let jobs = (staged.jobs.len() / 2) as u32;
         if jobs > 0 {
@@ -1070,7 +1188,7 @@ impl FeaturePass for DdgiPass {
         if staged.read_masks
             && let Some(readback) = self.lighting.readback.as_mut()
         {
-            let rows = layout(gpu.counts.iter().product());
+            let rows = layout(gpu.probes());
             readback.copy(ctx.encoder, &gpu.probes, 16 * rows.meta);
         }
         Ok(())
@@ -1106,7 +1224,16 @@ impl FeaturePass for DdgiPass {
             scene_bounds: staged.bounds,
             update_frames: previous.update_frames + 1,
             recycled: previous.recycled + u64::from(staged.recycled),
-            base: self.schedule.base.unwrap_or_default(),
+            base: self
+                .schedule
+                .bases
+                .as_ref()
+                .and_then(|b| b.first().copied())
+                .unwrap_or_default(),
+            cascade_bases: self.schedule.bases.as_ref().map_or([[0; 3]; 3], |b| {
+                std::array::from_fn(|k| b.get(k).copied().unwrap_or_default())
+            }),
+            cascades: self.schedule.bases.as_ref().map_or(0, |b| b.len() as u32),
             gpu_bytes,
         });
     }
@@ -1156,7 +1283,7 @@ pub(crate) fn layout(probes: u32) -> DdgiLayout {
 }
 
 struct DdgiGpu {
-    counts: [u32; 3],
+    cascades: Vec<CascadeLayout>,
     revision: u64,
     screen: Option<(u32, u32)>,
     update: wgpu::ComputePipeline,
@@ -1171,7 +1298,12 @@ struct DdgiGpu {
 }
 
 impl DdgiGpu {
-    fn new(gpu: &GpuContext, counts: [u32; 3], revision: u64, screen: Option<(u32, u32)>) -> Self {
+    fn new(
+        gpu: &GpuContext,
+        cascades: Vec<CascadeLayout>,
+        revision: u64,
+        screen: Option<(u32, u32)>,
+    ) -> Self {
         let device = gpu.device();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(DDGI_GI_NAME),
@@ -1192,9 +1324,10 @@ impl DdgiGpu {
         let relight = pipeline("gi.ddgi.relight", "ddgi_relight");
         let sky = pipeline("gi.ddgi.sky", "ddgi_sky_project");
         let pixels = screen.map_or(0, |(w, h)| u64::from(w) * u64::from(h));
-        let rows = layout(counts.iter().product()).rows + pixels + SCRATCH_ROWS;
+        let probes = cascades.iter().map(|c| c.probes).sum();
+        let rows = layout(probes).rows + pixels + SCRATCH_ROWS;
         Self {
-            counts,
+            cascades,
             revision,
             screen,
             update,
@@ -1242,6 +1375,10 @@ impl DdgiGpu {
         }
     }
 
+    fn probes(&self) -> u32 {
+        self.cascades.iter().map(|c| c.probes).sum()
+    }
+
     fn bytes(&self) -> u64 {
         self.probes.size() + self.params.size() + self.options.size() + self.jobs.size()
     }
@@ -1249,13 +1386,15 @@ impl DdgiGpu {
     fn write_header(
         &mut self,
         gpu: &GpuContext,
-        base: [i32; 3],
+        bases: &[[i32; 3]],
+        closed: &[u32],
         flags: u32,
         settings: DdgiSettings,
     ) {
-        let probes = settings.probe_count();
+        let probes = self.probes();
         let rows = layout(probes);
         let spacing = settings.spacing;
+        let base = bases[0];
         let mut header = Vec::with_capacity(16 * CPU_HEADER_ROWS as usize);
         push_u32(&mut header, [0; 4]);
         push_u32(&mut header, [0; 4]);
@@ -1265,7 +1404,7 @@ impl DdgiGpu {
             &mut header,
             [base[0] as u32, base[1] as u32, base[2] as u32, flags],
         );
-        let [x, y, z] = settings.counts;
+        let [x, y, z] = self.cascades[0].counts;
         push_u32(&mut header, [x, y, z, probes]);
         push_f32(
             &mut header,
@@ -1286,8 +1425,17 @@ impl DdgiGpu {
             ],
         );
         let pixels = self.screen.map_or(0, |(w, h)| u64::from(w) * u64::from(h));
-        // Distance moments saturate at one and a half probe diagonals.
-        push_f32(&mut header, [1.5 * 3f32.sqrt() * spacing, 0.0, 0.0, 0.0]);
+        // Distance moments saturate at one and a half probe diagonals; cascade count, closed
+        // sides of cascade 0.
+        push_u32(
+            &mut header,
+            [
+                (1.5 * 3f32.sqrt() * spacing).to_bits(),
+                self.cascades.len() as u32,
+                closed[0],
+                0,
+            ],
+        );
         // Screen resolve rows: first row, width, height, pixels per texel side (0 = off).
         let (width, height) = self.screen.unwrap_or((0, 0));
         push_u32(
@@ -1313,6 +1461,19 @@ impl DdgiGpu {
                 0,
             ],
         );
+        // Rows 11 + 2(k - 1), 12 + 2(k - 1): cascade k >= 1, base and first slot | closed sides
+        // << 16, then counts and spacing.
+        for (k, c) in self.cascades.iter().enumerate().skip(1) {
+            let b = bases[k];
+            push_u32(
+                &mut header,
+                [b[0] as u32, b[1] as u32, b[2] as u32, c.offset | (closed[k] << 16)],
+            );
+            push_u32(
+                &mut header,
+                [c.counts[0], c.counts[1], c.counts[2], c.spacing.to_bits()],
+            );
+        }
         header.resize(16 * CPU_HEADER_ROWS as usize, 0);
         if header != self.header {
             gpu.queue().write_buffer(&self.probes, 0, &header);
@@ -1378,6 +1539,34 @@ mod tests {
         assert_eq!(b[0] + 23, (14.0f32 / 1.3).ceil() as i32 + 1);
         // no geometry: camera-centred
         assert_eq!(volume_base([0.0; 3], [4, 4, 4], 1.0, None), [-2, -2, -2]);
+    }
+
+    #[test]
+    fn cascades_share_one_slot_space_and_close_at_the_scene_bounds() {
+        let settings = DdgiSettings::default();
+        let cascades = settings.cascade_layouts();
+        assert_eq!(cascades.len(), 2);
+        assert_eq!(cascades[1].offset, 24 * 12 * 16);
+        assert_eq!(cascades[1].spacing, 3.0);
+        assert_eq!(settings.probe_count(), 24 * 12 * 16 + 16 * 8 * 12);
+        assert!(settings.probe_count() < 1 << 16, "a job carries a 16-bit slot");
+        // Intel Sponza's measured bounds: the coarse cascade spans x and z whole (both sides
+        // closed); cascade 0 at the V1 camera stops 3.5 m short of the far end of the nave (+x
+        // open) while its -x side is clamped to the bounds (closed).
+        let bounds = Some(([-16.25, -1.13, -9.40], [20.0, 18.76, 14.36]));
+        let eye = [-8.8, 1.6, -0.86];
+        let b0 = volume_base(eye, cascades[0].counts, 1.5, bounds);
+        let m0 = closed_sides(b0, cascades[0].counts, 1.5, bounds);
+        assert_eq!(m0 & 3, 1, "cascade 0: -x closed, +x open ({b0:?})");
+        let b1 = volume_base(eye, cascades[1].counts, 3.0, bounds);
+        let m1 = closed_sides(b1, cascades[1].counts, 3.0, bounds);
+        assert_eq!(m1 & 0b110011, 0b110011, "cascade 1 spans x and z ({b1:?})");
+        assert_eq!(closed_sides([0; 3], [4; 3], 1.0, None), 0);
+        let mut bad = DdgiSettings::default();
+        bad.cascades = 4;
+        assert!(bad.validate().is_err());
+        bad.cascades = 1;
+        assert_eq!(bad.validate().unwrap().probe_count(), 24 * 12 * 16);
     }
 
     #[test]

@@ -221,8 +221,9 @@ fn ddgi_ray_direction(i: u32, count: u32) -> vec3<f32> {
 }
 
 fn ddgi_slot_coord(v: RaaDdgiVolume, slot: u32) -> vec3<i32> {
-    let s = vec3<u32>(slot % v.counts.x, (slot / v.counts.x) % v.counts.y,
-        slot / (v.counts.x * v.counts.y));
+    let local = slot - v.offset;
+    let s = vec3<u32>(local % v.counts.x, (local / v.counts.x) % v.counts.y,
+        local / (v.counts.x * v.counts.y));
     let n = vec3<i32>(v.counts);
     // The unique coordinate of the current volume that maps to this slot.
     let shift = ((vec3<i32>(s) - v.base) % n + n) % n;
@@ -245,90 +246,67 @@ fn ddgi_border_source(xy: vec2<u32>, n: u32) -> vec2<u32> {
     return s - 1u;
 }
 
-// The volume's groups at a ray hit, each as irradiance / pi: the eight-probe weights of
-// `raa_ddgi_sample` (trilinear, smooth backface, Chebyshev), blended linearly so the groups stay
-// separable, with one texel per probe picked in proportion to its bilinear weight (unbiased; the
-// probe hysteresis averages it).
+// The volume's groups at a ray hit, each as irradiance / pi: the cascaded eight-probe weights of
+// `raa_ddgi_sample` (`raa_ddgi_corners`), blended linearly so the groups stay separable, with one
+// texel per probe picked in proportion to its bilinear weight (unbiased; the probe hysteresis
+// averages it). Default far mode: renormalized over the usable probes; legacy: faded.
 fn ddgi_bounce(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, groups: u32,
                seed: ptr<function, u32>) -> DdgiTexel {
     var out: DdgiTexel;
-    let v = raa_ddgi_volume();
-    if any(v.counts < vec3<u32>(2u)) || v.spacing <= 0.0 { return out; }
-    let biased = p + n * v.normal_bias + view_dir * v.view_bias;
-    let local = biased / v.spacing - vec3<f32>(v.base);
-    let last = vec3<f32>(v.counts) - 1.0;
-    let inside = min(local, last - local);
-    let edge = saturate(2.0 * min(min(inside.x, inside.y), inside.z));
-    if edge <= 0.0 { return out; }
-    let cell = clamp(vec3<i32>(floor(local)), vec3<i32>(0), vec3<i32>(v.counts) - 2);
-    let alpha = clamp(local - vec3<f32>(cell), vec3<f32>(0.0), vec3<f32>(1.0));
+    let v0 = raa_ddgi_volume();
+    let clamp_far = (v0.flags & RAA_DDGI_FAR_AMBIENT) == 0u;
+    let cascades = raa_ddgi_cascades();
     let tap = raa_ddgi_tap(n, f32(RAA_DDGI_IRR));
     let group_row = ddgi_group_row();
-    var total = 0.0;
-    var coverage = 0.0;
-    for (var i = 0u; i < 8u; i++) {
-        let corner = vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
-        let g = v.base + cell + vec3<i32>(corner);
-        let slot = raa_ddgi_slot(v, g);
-        let record = raa_ddgi_word(v.meta_row + RAA_DDGI_META_ROWS * slot);
-        if any(bitcast<vec3<i32>>(record.xyz) != g) || (record.w & RAA_DDGI_VALID) == 0u
-            || (record.w & RAA_DDGI_INACTIVE) != 0u {
-            continue;
+    var weight_sum = 0.0;
+    var remaining = 1.0;
+    for (var k = 0u; k < cascades; k++) {
+        let v = raa_ddgi_volume_at(k);
+        let c = raa_ddgi_corners(v, p, n, view_dir, k + 1u == cascades, clamp_far);
+        let confidence = raa_ddgi_confidence(c);
+        if confidence <= 0.0 { continue; }
+        let share = remaining * confidence;
+        for (var i = 0u; i < 8u; i++) {
+            if c.weight[i] <= 0.0 { continue; }
+            let weight = share * c.weight[i] / c.total;
+            let xy = vec2<u32>(select(tap.i0.x, tap.i1.x, random(seed) < tap.f.x),
+                select(tap.i0.y, tap.i1.y, random(seed) < tap.f.y));
+            let interior = ddgi_border_source(xy, RAA_DDGI_IRR);
+            let row = group_row
+                + (c.slot[i] * RAA_DDGI_IRR * RAA_DDGI_IRR + interior.y * RAA_DDGI_IRR + interior.x)
+                * DDGI_GROUP_ROWS;
+            let r1 = ddgi_probes[row + 1u];
+            let direct = ddgi_direct_unpack(ddgi_probes[row], r1.x);
+            out.direct.sun += weight * direct.sun;
+            out.direct.residual += weight * direct.residual;
+            out.direct.other += weight * direct.other;
+            if (groups & DDGI_GEOMETRY) != 0u {
+                out.transfer[0] += weight * unpack2x16float(r1.y);
+                out.transfer[1] += weight * unpack2x16float(r1.z);
+                out.transfer[2] += weight * unpack2x16float(r1.w);
+                let r2 = ddgi_probes[row + 2u];
+                let r3 = ddgi_probes[row + 3u];
+                let r4 = ddgi_probes[row + 4u];
+                out.transfer[3] += weight * unpack2x16float(r2.x);
+                out.transfer[4] += weight * unpack2x16float(r2.y);
+                out.transfer[5] += weight * unpack2x16float(r2.z);
+                out.transfer[6] += weight * unpack2x16float(r2.w);
+                out.transfer[7] += weight * unpack2x16float(r3.x);
+                out.transfer[8] += weight * unpack2x16float(r3.y);
+                out.transfer[9] += weight * unpack2x16float(r3.z);
+                out.transfer[10] += weight * unpack2x16float(r3.w);
+                out.transfer[11] += weight * unpack2x16float(r4.x);
+                out.transfer[12] += weight * unpack2x16float(r4.y);
+                out.transfer[13] += weight * unpack2x16float(r4.z);
+            }
         }
-        let offset = bitcast<vec3<f32>>(raa_ddgi_word(v.meta_row + RAA_DDGI_META_ROWS * slot + 1u).xyz);
-        let probe = vec3<f32>(g) * v.spacing + offset;
-        let tri = mix(1.0 - alpha, alpha, vec3<f32>(corner));
-        let trilinear = tri.x * tri.y * tri.z;
-        let to_probe = normalize(probe - p);
-        var weight = 0.5 * (dot(to_probe, n) + 1.0);
-        weight = weight * weight + 0.2;
-        let from_probe = biased - probe;
-        let distance = length(from_probe);
-        let moments = raa_ddgi_depth(v, slot, from_probe / max(distance, 1e-4));
-        if distance > moments.x {
-            let variance = abs(moments.x * moments.x - moments.y);
-            let gap = distance - moments.x;
-            var visible = variance / max(variance + gap * gap, 1e-8);
-            visible = visible * visible * visible;
-            weight *= max(0.05, visible);
-        }
-        weight = max(weight, 1e-6);
-        if weight < 0.2 { weight *= weight * weight / 0.04; }
-        weight *= trilinear;
-        let xy = vec2<u32>(select(tap.i0.x, tap.i1.x, random(seed) < tap.f.x),
-            select(tap.i0.y, tap.i1.y, random(seed) < tap.f.y));
-        let interior = ddgi_border_source(xy, RAA_DDGI_IRR);
-        let row = group_row
-            + (slot * RAA_DDGI_IRR * RAA_DDGI_IRR + interior.y * RAA_DDGI_IRR + interior.x) * DDGI_GROUP_ROWS;
-        let r1 = ddgi_probes[row + 1u];
-        let direct = ddgi_direct_unpack(ddgi_probes[row], r1.x);
-        out.direct.sun += weight * direct.sun;
-        out.direct.residual += weight * direct.residual;
-        out.direct.other += weight * direct.other;
-        if (groups & DDGI_GEOMETRY) != 0u {
-            out.transfer[0] += weight * unpack2x16float(r1.y);
-            out.transfer[1] += weight * unpack2x16float(r1.z);
-            out.transfer[2] += weight * unpack2x16float(r1.w);
-            let r2 = ddgi_probes[row + 2u];
-            let r3 = ddgi_probes[row + 3u];
-            let r4 = ddgi_probes[row + 4u];
-            out.transfer[3] += weight * unpack2x16float(r2.x);
-            out.transfer[4] += weight * unpack2x16float(r2.y);
-            out.transfer[5] += weight * unpack2x16float(r2.z);
-            out.transfer[6] += weight * unpack2x16float(r2.w);
-            out.transfer[7] += weight * unpack2x16float(r3.x);
-            out.transfer[8] += weight * unpack2x16float(r3.y);
-            out.transfer[9] += weight * unpack2x16float(r3.z);
-            out.transfer[10] += weight * unpack2x16float(r3.w);
-            out.transfer[11] += weight * unpack2x16float(r4.x);
-            out.transfer[12] += weight * unpack2x16float(r4.y);
-            out.transfer[13] += weight * unpack2x16float(r4.z);
-        }
-        total += weight;
-        coverage += trilinear;
+        weight_sum += share;
+        remaining -= share;
+        if remaining <= 1e-3 { break; }
     }
-    if total <= 0.0 { return DdgiTexel(); }
-    let scale = v.intensity * edge * saturate(4.0 * coverage) / total;
+    if weight_sum <= 0.0 { return DdgiTexel(); }
+    // Legacy keeps the faded confidence (the weights already carry it).
+    let scale = v0.intensity * select(1.0, 1.0 / weight_sum, clamp_far);
     out.direct.sun *= scale;
     out.direct.residual *= scale;
     out.direct.other *= scale;
@@ -521,7 +499,9 @@ fn ddgi_hysteresis(age: u32, fresh: bool, change: f32) -> f32 {
 @compute @workgroup_size(64, 1, 1)
 fn ddgi_update(@builtin(local_invocation_index) lid: u32,
                @builtin(workgroup_id) group: vec3<u32>) {
-    let v = raa_ddgi_volume();
+    // The cascade of the job's slot: its grid, spacing, biases and distance cap.
+    let v = raa_ddgi_volume_at(raa_ddgi_cascade_of(ddgi_jobs[2u * group.x] & 0xffffu));
+    let spacing_scale = v.spacing / max(raa_ddgi_volume().spacing, 1e-6);
     let rays = min(ddgi_params.counts.x, DDGI_MAX_RAYS);
     if lid == 0u {
         let job = ddgi_jobs[2u * group.x];
@@ -609,7 +589,7 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
             let inside = backface_fraction > ddgi_params.extra.y;
             let flags = ddgi_params.counts.w;
             if (flags & DDGI_RELOCATE) != 0u {
-                let min_front = ddgi_params.tuning.w;
+                let min_front = ddgi_params.tuning.w * spacing_scale;
                 var candidate = offset;
                 if inside {
                     candidate = offset + back_dir * (back_distance + 0.5 * min_front);

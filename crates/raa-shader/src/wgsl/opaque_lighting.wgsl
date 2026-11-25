@@ -49,6 +49,13 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
             raa_frame.camera_pos.xyz);
         spherical_debug = ddgi.debug;
         c.spherical_diffuse = ddgi.diffuse;
+        if raa_ddgi_screen_ao() {
+            // Probes 1.5 m apart carry no small-scale occlusion: the DDGI term takes the screen
+            // AO like the ambient term it replaces. c.ao = min(material, screen) and the blend
+            // multiplies by the material AO, so scale by their ratio.
+            c.spherical_diffuse = vec4<f32>(ddgi.diffuse.rgb * (c.ao / max(s.ao, 1e-4)),
+                ddgi.diffuse.w);
+        }
     } else if !capture && !unlit && raa_feature_enabled(RAA_NRC_GI_FEATURE)
         && !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
         // Neural radiance cache: indirect irradiance / pi resolved per pixel in the GI screen

@@ -8,7 +8,8 @@ mod pass;
 pub mod spherical;
 mod spherical_gpu;
 pub use ddgi::{
-    DDGI_FRAME_FEATURE, DDGI_GI_NAME, DdgiDebug, DdgiFeature, DdgiHandle, DdgiInvalidation,
+    DDGI_FRAME_FEATURE, DDGI_GI_NAME, DDGI_MAX_CASCADES, DdgiDebug, DdgiFar, DdgiFeature, DdgiHandle,
+    DdgiInvalidation,
     DdgiSettings, DdgiStats, DdgiView, DdgiVisibility,
 };
 pub use geometry::MeshInput;
