@@ -471,6 +471,7 @@ impl GraphExecutor {
                 extension.reorder(plan, h)?;
             }
         }
+        let inherit_vg = !graph_owns_virtual_geometry(plan);
         for feature in &self.scratch {
             let applied_values = values_for(applied, feature);
             if let Some(observed) = read_values(h, feature) {
@@ -520,7 +521,6 @@ impl GraphExecutor {
                 self.plan = Some(plan);
                 self.doc = doc;
                 self.no_graph = Some(no_graph);
-        let inherit_vg = !graph_owns_virtual_geometry(plan);
                 self.applied = Some(snapshot(h));
                 self.applied_descs = AppliedDescs::capture(h);
                 self.frame = None;
@@ -617,6 +617,14 @@ pub fn settings_targets(
     })
 }
 
+fn virtual_geometry_enabled(settings: &SettingsSnapshot) -> bool {
+    values_for(settings, &FeatureId::Vg).is_some_and(|values| {
+        values
+            .iter()
+            .any(|(key, value)| key == "enabled" && *value == ParamValue::Bool(true))
+    })
+}
+
 /// The features whose applied values differ from the observed ones, in S53 rank order. The pipeline
 /// comes first when its passes or order differ.
 pub fn external_changes(applied: &SettingsSnapshot, observed: &SettingsSnapshot) -> Vec<FeatureId> {
@@ -664,14 +672,6 @@ fn snapshot(h: &FeatureHandles<'_>) -> SettingsSnapshot {
 #[derive(Default)]
 struct Progress {
     pipeline: bool,
-fn virtual_geometry_enabled(settings: &SettingsSnapshot) -> bool {
-    values_for(settings, &FeatureId::Vg).is_some_and(|values| {
-        values
-            .iter()
-            .any(|(key, value)| key == "enabled" && *value == ParamValue::Bool(true))
-    })
-}
-
     features: Vec<FeatureId>,
     extensions: usize,
 }
@@ -710,6 +710,7 @@ fn apply_pipeline(
     plan: &GraphPlan,
     h: &FeatureHandles<'_>,
     progress: &mut Progress,
+    virtual_geometry: bool,
 ) -> Result<(), Vec<Issue>> {
     let installed = h.pipeline.borrow().passes();
     let instructions = pipeline_with_virtual_geometry(plan, catalog, &installed, virtual_geometry);
@@ -757,7 +758,6 @@ fn rollback(
     extensions: &mut [Box<dyn ExecExtension>],
     previous: Option<&GraphPlan>,
     before: &SettingsSnapshot,
-    virtual_geometry: bool,
     progress: &Progress,
     h: &mut FeatureHandles<'_>,
 ) {
