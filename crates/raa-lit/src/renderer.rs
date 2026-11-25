@@ -567,6 +567,148 @@ fn bake_pipeline(
     })
 }
 
+/// A vertex buffer over `bytes` for a source-draw submission (the M7 reference geometry
+/// streams share the M6 bake's private GPU path).
+pub(crate) fn source_vertex_buffer(gpu: &GpuContext, label: &str, bytes: &[u8]) -> wgpu::Buffer {
+    bake_buffer(
+        gpu,
+        &format!("raa.lit.source.{label}"),
+        bytes,
+        wgpu::BufferUsages::VERTEX,
+    )
+}
+
+/// Colour formats of the M7 reference targets, in location order: world normal XYZ and
+/// coverage W (Rgba16Float), standard-Z depth X (Rgba32Float) and linear unlit albedo RGB
+/// and coverage A (Rgba8Unorm).
+pub(crate) const REFERENCE_TARGET_FORMATS: [wgpu::TextureFormat; 3] = [
+    wgpu::TextureFormat::Rgba16Float,
+    wgpu::TextureFormat::Rgba32Float,
+    wgpu::TextureFormat::Rgba8Unorm,
+];
+
+/// The reusable source-draw submission state of the M6 billboard bake and the M7 reference
+/// renderer: a private frame uniform, the material, extras, instance and previous buffers,
+/// the bake's compacted instance id stream and a group-0 bind group over the renderer's
+/// atlas and material data. It never touches the prepared frame's camera or records.
+pub(crate) struct SourceDrawBuffers {
+    pub(crate) frame: wgpu::Buffer,
+    pub(crate) ids: wgpu::Buffer,
+    pub(crate) bind: wgpu::BindGroup,
+}
+
+impl SourceDrawBuffers {
+    pub(crate) fn new(
+        gpu: &GpuContext,
+        handle: &LitHandle,
+        material_bytes: &[u8],
+        instance_bytes: &[u8],
+        extra_bytes: &[u8],
+        id_bytes: &[u8],
+    ) -> Self {
+        let frame = bake_buffer(
+            gpu,
+            "raa.lit.source.frame",
+            &[0u8; FRAME_GPU_SIZE],
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let materials = bake_buffer(
+            gpu,
+            "raa.lit.source.materials",
+            material_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let extras = bake_buffer(
+            gpu,
+            "raa.lit.source.extras",
+            extra_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let instances = bake_buffer(
+            gpu,
+            "raa.lit.source.instances",
+            instance_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let previous = bake_buffer(
+            gpu,
+            "raa.lit.source.previous",
+            &vec![0u8; instance_bytes.len() / INSTANCE_GPU_SIZE * 64],
+            wgpu::BufferUsages::STORAGE,
+        );
+        let ids = bake_buffer(
+            gpu,
+            "raa.lit.source.ids",
+            id_bytes,
+            wgpu::BufferUsages::VERTEX,
+        );
+        let bind =
+            handle.bake_frame_bind_group(gpu, [&frame, &materials, &extras, &instances, &previous]);
+        SourceDrawBuffers { frame, ids, bind }
+    }
+}
+
+/// The M7 reference pipeline for one (material function, double-sided) pair: the reference
+/// shader of `compose_foliage_reference`, group 0 and the standard lit vertex buffers, the
+/// three reference colour targets and a Depth32Float attachment with Less.
+pub(crate) fn reference_pipeline(
+    gpu: &GpuContext,
+    module: &wgpu::ShaderModule,
+    frame_layout: &wgpu::BindGroupLayout,
+    double_sided: bool,
+) -> wgpu::RenderPipeline {
+    let device = gpu.device();
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("raa.lit.foliage_reference.layout"),
+        bind_group_layouts: &[Some(frame_layout)],
+        immediate_size: 0,
+    });
+    let buffers = crate::handle::bake_vertex_buffer_layouts();
+    let targets = REFERENCE_TARGET_FORMATS.map(|format| {
+        Some(wgpu::ColorTargetState {
+            format,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("raa.lit.foliage_reference.pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &buffers,
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: (!double_sided).then_some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: BAKE_DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &targets,
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 impl LitRenderer {
     /// A renderer drawing through `pipeline`: validates `opts` (`render.invalid_msaa`),
     /// creates the group-0 buffers sized from it, installs the default slot providers
@@ -868,52 +1010,13 @@ impl LitRenderer {
             extra_bytes.extend_from_slice(&extra);
             id_bytes.extend_from_slice(&(i as u32).to_le_bytes());
         }
-        let previous_bytes = vec![0u8; sources.len() * 64];
-        let frame_buffer = bake_buffer(
+        let buffers = SourceDrawBuffers::new(
             gpu,
-            "raa.lit.billboard.frame",
-            &[0u8; FRAME_GPU_SIZE],
-            wgpu::BufferUsages::UNIFORM,
-        );
-        let material_buffer = bake_buffer(
-            gpu,
-            "raa.lit.billboard.materials",
+            &handle,
             &material_bytes,
-            wgpu::BufferUsages::STORAGE,
-        );
-        let extras_buffer = bake_buffer(
-            gpu,
-            "raa.lit.billboard.extras",
-            &extra_bytes,
-            wgpu::BufferUsages::STORAGE,
-        );
-        let instances_buffer = bake_buffer(
-            gpu,
-            "raa.lit.billboard.instances",
             &instance_bytes,
-            wgpu::BufferUsages::STORAGE,
-        );
-        let previous_buffer = bake_buffer(
-            gpu,
-            "raa.lit.billboard.previous",
-            &previous_bytes,
-            wgpu::BufferUsages::STORAGE,
-        );
-        let ids_buffer = bake_buffer(
-            gpu,
-            "raa.lit.billboard.ids",
+            &extra_bytes,
             &id_bytes,
-            wgpu::BufferUsages::VERTEX,
-        );
-        let frame_bind = handle.bake_frame_bind_group(
-            gpu,
-            [
-                &frame_buffer,
-                &material_buffer,
-                &extras_buffer,
-                &instances_buffer,
-                &previous_buffer,
-            ],
         );
         let lighting = {
             let pipeline = self.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
@@ -942,7 +1045,7 @@ impl LitRenderer {
                         ..FrameParams::default()
                     },
                 )?;
-                gpu.queue().write_buffer(&frame_buffer, 0, &frame_bytes);
+                gpu.queue().write_buffer(&buffers.frame, 0, &frame_bytes);
                 {
                     let a = targets.attachments();
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -964,7 +1067,7 @@ impl LitRenderer {
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
-                    pass.set_bind_group(0, &frame_bind, &[]);
+                    pass.set_bind_group(0, &buffers.bind, &[]);
                     pass.set_bind_group(1, &lighting, &[]);
                     for (i, src) in sources.iter().enumerate() {
                         let (fn_id, double_sided) = material_classes[src.material as usize];
@@ -972,7 +1075,7 @@ impl LitRenderer {
                             .get(&(fn_id.0, double_sided))
                             .expect("every material class built its pipeline");
                         pass.set_pipeline(pipeline);
-                        let count = handle.bake_bind_mesh(&mut pass, src.mesh, &ids_buffer)?;
+                        let count = handle.bake_bind_mesh(&mut pass, src.mesh, &buffers.ids)?;
                         pass.draw_indexed(0..count, 0, i as u32..i as u32 + 1);
                     }
                 }
