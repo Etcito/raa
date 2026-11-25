@@ -1491,9 +1491,21 @@ impl Engine {
                 }
             };
             let resources = pipeline.resources();
-            let texture = resources.get(producer, port).ok_or_else(|| {
-                invalid(format!("missing mesh lighting capture tap {producer}.{port}"))
-            })?;
+            // Under a render graph the path reference is a `mesh.reference` node whose entry
+            // carries the node id: its tap stands in for the legacy trace pass.
+            let graph_reference = || {
+                resources
+                    .entries()
+                    .into_iter()
+                    .find(|(pass, tap, _)| pass.starts_with("mesh.reference") && tap == port)
+                    .and_then(|(pass, tap, _)| resources.get(&pass, &tap))
+            };
+            let texture = resources
+                .get(producer, port)
+                .or_else(|| traced.then(graph_reference).flatten())
+                .ok_or_else(|| {
+                    invalid(format!("missing mesh lighting capture tap {producer}.{port}"))
+                })?;
             let combined = if traced {
                 None
             } else {
