@@ -324,6 +324,19 @@ struct ForwardTargets {
     depth: wgpu::TextureView,
 }
 
+/// The targets are destroyed explicitly when replaced (resize) or dropped: wgpu's WebGPU
+/// backend does not destroy a dropped texture, so without this every resize kept the
+/// previous MSAA colour and depth (about 240 MB at 3440 x 1440) until a JS garbage
+/// collection. Work already submitted still completes (GPUTexture.destroy semantics).
+impl Drop for ForwardTargets {
+    fn drop(&mut self) {
+        if let Some(color) = &self.color {
+            color.texture().destroy();
+        }
+        self.depth.texture().destroy();
+    }
+}
+
 /// A render attachment texture of `size` and `samples`, returned as its default view.
 fn attachment(
     gpu: &GpuContext,
@@ -500,7 +513,9 @@ impl FeaturePass for ForwardPass {
             .then(|| attachment(gpu, "raa.lit.forward.color", size, HDR_FORMAT, self.msaa));
         let depth = attachment(gpu, "raa.lit.forward.depth", size, DEPTH_FORMAT, self.msaa);
         self.targets = Some(ForwardTargets { color, depth });
-        self.combined_lighting = None;
+        if let Some(combined) = self.combined_lighting.take() {
+            combined.texture().destroy();
+        }
     }
 
     /// Prepares the enabled contributors in order.
@@ -557,7 +572,9 @@ impl FeaturePass for ForwardPass {
                 .publish(FORWARD_NAME, "combined-lighting", combined, desc);
             self.record_camera(ctx, own, hdr.dst(), &preview, None)?;
         } else {
-            self.combined_lighting = None;
+            if let Some(combined) = self.combined_lighting.take() {
+                combined.texture().destroy();
+            }
             self.record_camera(ctx, own, hdr.dst(), &frame, reflection.as_deref())?;
         }
         hdr.swap();
