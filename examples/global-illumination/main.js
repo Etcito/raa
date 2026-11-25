@@ -2,6 +2,7 @@ import { createGalleryAoControls } from './lib/gallery-ao.js';
 import { mountLightingNotice } from './lib/gallery-lighting.js';
 import { syncSphericalControls } from './lib/gallery-spherical.js';
 import { captureGallerySequence, captureGallerySrReplay, verifyGalleryReflection } from './lib/gallery-sequence.js';
+import { captureGalleryGridDiffuse } from './lib/gallery-grid-diffuse.js';
 import { measureGalleryRayBudget } from './lib/gallery-ray-budget.js';
 import { measureGallerySrTiming } from './lib/gallery-sr-timing.js';
 import { applyGalleryNeural, syncNeuralControls } from './lib/gallery-neural.js';
@@ -142,7 +143,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
       return captureAreaPilot({ target, canvas, raa: lib.raa }, input?.args ?? input);
     });
     for (const [op, action] of [['gallery-path-capture', captureGalleryPath],
-      ['gallery-path-measure', measureGalleryPath], ['gallery-path-diffuse', measureGalleryDiffuse],
+      ['gallery-grid-diffuse', captureGalleryGridDiffuse], ['gallery-path-measure', measureGalleryPath], ['gallery-path-diffuse', measureGalleryDiffuse],
       ['gallery-panel-noise', measureGalleryPanelNoise], ['gallery-spherical', measureGallerySpherical],
       ['gallery-sequence', captureGallerySequence], ['gallery-sr-replay', captureGallerySrReplay], ['gallery-sr-timing', measureGallerySrTiming], ['gallery-ray-budget', measureGalleryRayBudget], ['gallery-mirror', measureGalleryMirror], ['gallery-reflection-model', verifyGalleryReflection]]) {
       target.nmcGpu.ops[op] = input => exclusively(() => {

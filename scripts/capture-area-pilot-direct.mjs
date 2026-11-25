@@ -20,6 +20,7 @@ const raySelection = rayBudget ? /^(area|reflection):(joint-(?:development|final
 const srReplay = op === 'gallery-sr-replay';
 const sequence = op === 'gallery-sequence' || srReplay;
 const srTiming = op === 'gallery-sr-timing';
+const gridDiffuse = op === 'gallery-grid-diffuse';
 const jointTrajectory = sequence && comparison.startsWith('joint-') ? comparison : undefined;
 const predictionDataset = op === 'prediction' && comparison === 'dataset';
 const predictionLearned = op === 'prediction' && comparison === 'learned';
@@ -33,9 +34,35 @@ if (rayBudget && (!headful || !raySelection)) {
 }
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
     || flags.some(flag => flag !== '--headful')
-    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-sr-replay', 'gallery-sr-timing', 'gallery-reflection-model', 'gallery-ray-budget', 'gallery-mirror'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-sr-replay|gallery-sr-timing|gallery-reflection-model|gallery-ray-budget|gallery-mirror] [baseline|fixed|live|live-ui|train|test|both|reflection|joint-train-a|joint-train-b|joint-train-c|joint-development|joint-final-a|joint-final-b|sr|sr-reflection|joint|dataset|learned|coverage|sharp|priority] [--headful]');
+    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-grid-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-sr-replay', 'gallery-sr-timing', 'gallery-reflection-model', 'gallery-ray-budget', 'gallery-mirror'].includes(op)) {
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-grid-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-sr-replay|gallery-sr-timing|gallery-reflection-model|gallery-ray-budget|gallery-mirror] [baseline|fixed|live|live-ui|train|test|both|reflection|joint-train-a|joint-train-b|joint-train-c|joint-development|joint-final-a|joint-final-b|sr|sr-reflection|joint|dataset|learned|coverage|sharp|priority] [--headful]');
 }
+let gridArgs;
+if (gridDiffuse) {
+  if (!headful) throw new Error('Grid diffuse capture requires --headful');
+  const input = path.resolve(comparison);
+  const { scene, mode, stride, captureRows, size, checkpointDirectory } = JSON.parse(await readFile(input, 'utf8'));
+  gridArgs = { scene, mode, stride, captureRows, size };
+  if (scene !== 'cornell' || mode === 'learned') {
+    if (typeof checkpointDirectory !== 'string') throw new Error('Reserved replay requires a recorded checkpoint directory');
+    const root = path.resolve(path.dirname(input), checkpointDirectory);
+    const [weights, manifestBytes, freezeText] = await Promise.all([
+      readFile(path.join(root, 'weights.fp32le')), readFile(path.join(root, 'manifest.json')), readFile(path.join(root, 'freeze.json'), 'utf8'),
+    ]);
+    const manifest = JSON.parse(manifestBytes);
+    const freeze = JSON.parse(freezeText);
+    const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+    const checkpointSha256 = sha(weights);
+    if (weights.length !== 324 || freeze.weightsSha256 !== checkpointSha256
+        || manifest.weights.sha256 !== checkpointSha256 || freeze.manifestSha256 !== sha(manifestBytes)
+        || !Number.isFinite(Date.parse(freeze.frozenAtUtc)) || Date.parse(freeze.frozenAtUtc) > Date.now()) {
+      throw new Error('Reserved capture does not match its recorded checkpoint freeze');
+    }
+    console.log(`Frozen checkpoint before reserved replay ${checkpointSha256} at ${freeze.frozenAtUtc}`);
+    Object.assign(gridArgs, { checkpointSha256, checkpointBase64: mode === 'learned' ? weights.toString('base64') : undefined });
+  }
+}
+
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
 const receipt = JSON.parse(receiptBytes);
@@ -73,7 +100,7 @@ try {
     }
   }
   browser = spawn(chrome, [
-    ...(headful ? ['--disable-background-timer-throttling', '--disable-renderer-backgrounding'] : ['--headless=new']),
+    ...(headful ? ['--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] : ['--headless=new']),
     '--do-not-de-elevate', '--enable-logging=stderr', '--enable-unsafe-webgpu', '--enable-webgpu-developer-features', '--disable-software-rasterizer',
     '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     'about:blank',
@@ -137,6 +164,7 @@ try {
   };
   await send('Runtime.enable');
   await send('Page.navigate', { url });
+  if (headful) await send('Page.bringToFront');
   let ready;
   for (let attempt = 0; attempt < 100; attempt++) {
     ready = await evalPage(`typeof window.nmcGpu?.ops?.[${JSON.stringify(op)}] === 'function'`);
@@ -169,6 +197,7 @@ try {
       ...(mirror && { baseline: comparison === 'baseline', coverageOnly: comparison === 'coverage', sharpOnly: comparison === 'sharp', priorityOnly: comparison === 'priority' }),
       ...(srTiming && { modelHeads: comparison === 'fixed' ? 'sr' : comparison }), ...(sequence && { split: jointTrajectory || ['fixed', 'reflection'].includes(comparison) ? 'both' : comparison, reflection: comparison === 'reflection', trajectory: jointTrajectory }), ...(predictionDataset && { dataset: true }), ...(predictionLearned && { learned: true }),
       ...(raySelection && { head: raySelection[1], trajectory: raySelection[2], budget: Number(raySelection[3] || 0) }),
+      ...gridArgs,
     })});
     const files = await Promise.all(result.files.map(async ({ name, blob, base64 }) => {
       if (base64) return { name, base64 };
@@ -185,7 +214,7 @@ try {
   if (spherical && receipt.files.includes('lib/gallery-temporal-fit/manifest.json')) {
     ui.neural = await evalPage(`import('/lib/gallery-neural.js').then(module => module.verifyGalleryNeuralUi())`, 60000);
   }
-  if ((spherical || mirror || sequence || srTiming || rayBudget || predictionDataset || predictionLearned || op === 'gallery-reflection-model') && browserErrors.length) throw new Error(browserErrors.join('\n'));
+  if ((spherical || mirror || sequence || srTiming || rayBudget || gridDiffuse || predictionDataset || predictionLearned || op === 'gallery-reflection-model') && browserErrors.length) throw new Error(browserErrors.join('\n'));
   const userAgent = await evalPage('navigator.userAgent');
   if (headful && /HeadlessChrome/.test(userAgent)) throw new Error('Expected a windowed Windows Chrome session');
   const windows = { browser: version.Browser, mode: headful ? 'windowed' : 'headless',
@@ -249,12 +278,12 @@ try {
         row.sha256 = createHash('sha256').update(bytes).digest('hex');
         await writeFile(path.join(output, row.file), bytes, { flag: 'wx' });
       }
-    } else if (sequence || predictionDataset || (rayBudget && data.developmentPlanes)) {
-      for (const clip of data.sequences ?? [data.developmentPlanes]) {
+    } else if (sequence || predictionDataset || gridDiffuse || (rayBudget && data.developmentPlanes)) {
+      for (const clip of data.sequences ?? (gridDiffuse ? [{ frames: data.frames }] : [data.developmentPlanes])) {
         for (const frame of clip.frames) {
-          for (const record of Object.values(frame.planes)) {
+          for (const record of Object.values(frame.planes ?? {})) {
             const bytes = files.get(record.file);
-            if (!/^[a-z0-9-]+\.bin$/.test(record.file) || record.dtype !== 'f32le' || !bytes
+            if (!/^[a-z0-9-]+\.bin$/.test(record.file) || record.dtype !== (gridDiffuse ? 'u32le' : 'f32le') || !bytes
                 || bytes.length !== record.byteLength || bytes.length !== record.shape.reduce((a, b) => a * b, 4)
                 || createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
               throw new Error(`Sequence plane length or hash mismatch: ${record.file}`);
@@ -277,7 +306,7 @@ try {
       ...(gallery ? data.source : {}), revision: receipt.inputs.revision,
       receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'), url,
     };
-    const manifest = path.join(output, op === 'prediction' && !predictionDataset ? (predictionLearned ? 'learned-prediction.json' : 'prediction.json') : capture || sequence || predictionDataset ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
+    const manifest = path.join(output, op === 'prediction' && !predictionDataset ? (predictionLearned ? 'learned-prediction.json' : 'prediction.json') : capture || sequence || predictionDataset || gridDiffuse ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
       : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : mirror ? 'mirror.json' : op === 'gallery-reflection-model' ? 'reflection-model.json' : srTiming ? 'sr-timing.json' : rayBudget ? 'ray-budget.json' : 'measurement.json');
     await writeFile(manifest, JSON.stringify({ ...data, source, windows, ...(ui && { ui }) }, null, 2) + '\n', { flag: 'wx' });
     console.log(manifest);
