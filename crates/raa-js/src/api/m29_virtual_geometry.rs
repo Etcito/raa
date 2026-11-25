@@ -644,6 +644,38 @@ mod web {
             self.with_state(|_, st| instance_js(st, instance))
         }
 
+        /// `VirtualGeometryPoolTraffic`: what the virtualized-geometry pool handed the GPU queue
+        /// since the engine started (geometry, instance and attribute-texture bytes, buffer
+        /// reallocations, in-place/relocated replacements, compactions) and the current CPU
+        /// stream sizes, as a fresh object of numbers.
+        #[wasm_bindgen(js_name = virtualGeometryPoolTraffic)]
+        pub fn virtual_geometry_pool_traffic(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| {
+                let t = vg_handle(st)?.pool_traffic();
+                let out = Object::new();
+                for (key, value) in [
+                    ("geometryBytes", t.geometry_bytes),
+                    ("instanceBytes", t.instance_bytes),
+                    ("attributeBytes", t.attribute_bytes),
+                    ("updates", t.updates),
+                    ("reallocations", t.reallocations),
+                    ("attributeRebuilds", t.attribute_rebuilds),
+                    ("inPlace", t.in_place),
+                    ("relocations", t.relocations),
+                    ("compactions", t.compactions),
+                    ("residentBytes", t.resident_bytes),
+                    ("deadBytes", t.dead_bytes),
+                ] {
+                    let _ = Reflect::set(
+                        &out,
+                        &JsValue::from_str(key),
+                        &JsValue::from_f64(value as f64),
+                    );
+                }
+                Ok(out.into())
+            })
+        }
+
         /// The `VirtualGeometryStats` of the latest published readback, as a fresh object.
         #[wasm_bindgen(js_name = virtualGeometryStats)]
         pub fn virtual_geometry_stats(&self) -> Result<JsValue, JsValue> {

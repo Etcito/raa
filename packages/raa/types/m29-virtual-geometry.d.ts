@@ -85,6 +85,26 @@ export interface InstanceVirtualGeometry {
 }
 
 /**
+ * Upload counters of the virtualized-geometry pool since the engine started, returned by
+ * {@link Engine.virtualGeometryPoolTraffic}: what the CPU handed the GPU queue. Newly ready
+ * sections are appended, so `geometryBytes` grows by the new sections only; a reallocation or a
+ * compaction rewrites whole streams.
+ */
+export interface VirtualGeometryPoolTraffic {
+  geometryBytes: number;
+  instanceBytes: number;
+  attributeBytes: number;
+  updates: number;
+  reallocations: number;
+  attributeRebuilds: number;
+  inPlace: number;
+  relocations: number;
+  compactions: number;
+  residentBytes: number;
+  deadBytes: number;
+}
+
+/**
  * Counters of virtualized geometry, returned by {@link Engine.virtualGeometryStats}. The record
  * is fresh. The counters come from the last published readback, never from a GPU fence.
  */
@@ -154,6 +174,8 @@ export interface Engine {
   instanceVirtualGeometry(instance: number): InstanceVirtualGeometry;
   /** The latest published counters, a fresh {@link VirtualGeometryStats}. */
   virtualGeometryStats(): VirtualGeometryStats;
+  /** The pool upload counters, a fresh {@link VirtualGeometryPoolTraffic}. */
+  virtualGeometryPoolTraffic(): VirtualGeometryPoolTraffic;
   /**
    * The shading attributes of section `ordinal` of the mesh's cluster store: `colors` rgba (4
    * floats) and `uvs` (2 floats) per cluster vertex, handed to the material of a virtualized

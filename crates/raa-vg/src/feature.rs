@@ -563,6 +563,15 @@ impl VgHandle {
         }
     }
 
+    /// The pool upload counters of the frame state's scene (bytes handed to the queue).
+    pub fn pool_traffic(&self) -> crate::scene::VgPoolTraffic {
+        self.shared
+            .vg
+            .try_borrow()
+            .map(|state| state.scene.traffic())
+            .unwrap_or_default()
+    }
+
     /// Every vg buffer and texture the frame state owns; 0 means none exists (P3-Q8).
     pub fn allocated_bytes(&self) -> u64 {
         self.shared
