@@ -19,6 +19,8 @@ mod mesh_trace;
 #[cfg(target_arch = "wasm32")]
 mod spherical_gi;
 #[cfg(target_arch = "wasm32")]
+mod nrc_gi;
+#[cfg(target_arch = "wasm32")]
 mod training_capture;
 
 #[cfg(target_arch = "wasm32")]

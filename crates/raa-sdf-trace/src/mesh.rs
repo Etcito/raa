@@ -2,10 +2,14 @@
 
 mod geometry;
 mod hybrid;
+mod nrc;
 mod pass;
 pub mod spherical;
 mod spherical_gpu;
 pub use geometry::MeshInput;
+pub use nrc::{
+    NRC_FRAME_FEATURE, NRC_GI_NAME, NrcFeature, NrcHandle, NrcSettings, NrcState, NrcStats,
+};
 use hybrid::PathCapture;
 pub use hybrid::PathMode;
 pub use pass::{GraphMeshTrace, MESH_TRACE_NAME, MeshTraceFeature, MeshTraceHandle};
@@ -279,6 +283,7 @@ pub struct MeshTraceScene {
     geometry: Geometry,
     gpu_geometry: Option<pass::GeometryBuffers>,
     spherical_active: bool,
+    nrc_active: bool,
     graph_reports: BTreeMap<String, Rc<RefCell<TraceReport>>>,
     materials: Vec<MeshTraceMaterial>,
     material_bytes: Vec<u8>,
@@ -428,6 +433,11 @@ impl MeshTraceScene {
         self.release_gpu_geometry_if_idle();
     }
 
+    fn set_nrc_active(&mut self, active: bool) {
+        self.nrc_active = active;
+        self.release_gpu_geometry_if_idle();
+    }
+
     /// Whether a legacy or graph trace is configured for this scene.
     pub fn active(&self) -> bool {
         self.needs_trace_geometry(true)
@@ -440,7 +450,7 @@ impl MeshTraceScene {
     }
 
     fn release_gpu_geometry_if_idle(&mut self) {
-        if !self.spherical_active && !self.active() {
+        if !self.spherical_active && !self.nrc_active && !self.active() {
             self.gpu_geometry = None;
         }
     }

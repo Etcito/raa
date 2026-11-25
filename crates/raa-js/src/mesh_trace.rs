@@ -90,7 +90,15 @@ pub(crate) fn prepare(
             }
         }
     }
-    if !active && !spherical {
+    let mut nrc = false;
+    if let Some(cache) = st.features.get::<raa_sdf_trace::mesh::NrcHandle>() {
+        let mut cache = cache.borrow_mut();
+        if cache.active() {
+            nrc = view == 0;
+            cache.set_view(view);
+        }
+    }
+    if !active && !spherical && !nrc {
         return Ok(());
     }
     let lit = st.lit.handle();

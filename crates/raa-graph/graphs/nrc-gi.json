@@ -1,0 +1,209 @@
+{
+  "format": "raa.render-graph",
+  "version": 1,
+  "name": "NRC GI",
+  "nodes": [
+    {
+      "id": "skyAtmosphere",
+      "type": "pass.sky.atmosphere"
+    },
+    {
+      "id": "skyCloudLighting",
+      "type": "pass.sky.cloud-lighting"
+    },
+    {
+      "id": "skyEnv",
+      "type": "pass.sky.env"
+    },
+    {
+      "id": "skin",
+      "type": "pass.skin"
+    },
+    {
+      "id": "shadowCsm",
+      "type": "pass.shadow.csm"
+    },
+    {
+      "id": "prepass",
+      "type": "pass.prepass"
+    },
+    {
+      "id": "lightTiles",
+      "type": "pass.light.tiles"
+    },
+    {
+      "id": "ao",
+      "type": "pass.ao.gtao",
+      "params": {
+        "indirectDiffuse": true
+      }
+    },
+    {
+      "id": "areaShadow",
+      "type": "pass.gi.area-shadow",
+      "params": {
+        "tier": "hero",
+        "heroCount": 2
+      }
+    },
+    {
+      "id": "nrc",
+      "type": "neural.radiance-cache",
+      "params": {
+        "hiddenLayers": 3,
+        "trainSamples": "16384",
+        "scale": "quarter",
+        "bounces": 1
+      }
+    },
+    {
+      "id": "skyCloudScreen",
+      "type": "pass.sky.cloud-screen"
+    },
+    {
+      "id": "forward",
+      "type": "pass.forward",
+      "params": {
+        "mode": "ltc",
+        "lightingOutput": "combined"
+      }
+    },
+    {
+      "id": "skyBackground",
+      "type": "pass.sky.background"
+    },
+    {
+      "id": "mirrorHiz",
+      "type": "ssr.hiz"
+    },
+    {
+      "id": "mirrorScreen",
+      "type": "ssr.trace",
+      "params": {
+        "maxRoughness": 1
+      }
+    },
+    {
+      "id": "meshReflection",
+      "type": "mesh.reflection"
+    },
+    {
+      "id": "tonemap",
+      "type": "pass.tonemap"
+    },
+    {
+      "id": "out",
+      "type": "output.display"
+    }
+  ],
+  "links": [
+    {
+      "from": "prepass.depth",
+      "to": "lightTiles.depth"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "ao.depth"
+    },
+    {
+      "from": "prepass.normal",
+      "to": "ao.normal"
+    },
+    {
+      "from": "shadowCsm.shadowMap",
+      "to": "forward.shadowMap"
+    },
+    {
+      "from": "lightTiles.lightTiles",
+      "to": "forward.lightTiles"
+    },
+    {
+      "from": "ao.ao",
+      "to": "forward.ao"
+    },
+    {
+      "from": "meshReflection.color",
+      "to": "tonemap.color"
+    },
+    {
+      "from": "tonemap.color",
+      "to": "out.color"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "skyCloudScreen.depth"
+    },
+    {
+      "from": "skyCloudLighting.cloudTransmittance",
+      "to": "forward.cloudTransmittance"
+    },
+    {
+      "from": "skyEnv.envSpecular",
+      "to": "forward.envSpecular"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "areaShadow.depth"
+    },
+    {
+      "from": "prepass.normal",
+      "to": "areaShadow.normal"
+    },
+    {
+      "from": "prepass.motion",
+      "to": "areaShadow.motion"
+    },
+    {
+      "from": "areaShadow.areaShadow",
+      "to": "forward.areaShadow"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "mirrorHiz.depth"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "mirrorScreen.depth"
+    },
+    {
+      "from": "prepass.normal",
+      "to": "mirrorScreen.normal"
+    },
+    {
+      "from": "mirrorHiz.hiz",
+      "to": "mirrorScreen.hiz"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "meshReflection.depth"
+    },
+    {
+      "from": "prepass.normal",
+      "to": "meshReflection.normal"
+    },
+    {
+      "from": "prepass.material",
+      "to": "meshReflection.material"
+    },
+    {
+      "from": "prepass.motion",
+      "to": "meshReflection.motion"
+    },
+    {
+      "from": "mirrorScreen.trace",
+      "to": "meshReflection.screenTrace"
+    },
+    {
+      "from": "mirrorHiz.hiz",
+      "to": "meshReflection.hiz"
+    },
+    {
+      "from": "forward.color",
+      "to": "meshReflection.screenColor"
+    },
+    {
+      "from": "forward.color",
+      "to": "meshReflection.color"
+    }
+  ]
+}
