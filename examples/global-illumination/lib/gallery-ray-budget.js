@@ -15,12 +15,40 @@ const timedPasses = {
   area: ['area.trace#trace', 'area.mask#mask', 'forward', 'ssr.replace#replace'],
 };
 
-function route(base, head, budget, model) {
+// Denoiser arms: `denoise` inserts denoise.sigma (area pairs) or denoise.relax (SSR incident)
+// between the producer and its consumer; `analytic` uses the existing area.temporal +
+// area.spatial chain (area) or the same a-trous filter without history (reflection).
+function denoiseRoute(graph, head, mode, params = {}) {
+  if (head === 'area' && mode === 'analytic') {
+    graph.nodes.push({ id: 'areaTemporal', type: 'area.temporal', params: { temporalAlpha: 0.1, depthTolerance: 0.05 } },
+      { id: 'areaSpatial', type: 'area.spatial', params: { spatialStride: 2, normalPower: 8 } });
+    graph.links = graph.links.filter(link => link.to !== 'mask.src');
+    graph.links.push({ from: 'trace.raw', to: 'areaTemporal.raw' }, { from: 'trace.linearDepth', to: 'areaTemporal.linearDepth' },
+      { from: 'areaTemporal.filtered', to: 'areaTemporal.history', history: true },
+      { from: 'areaTemporal.depth', to: 'areaTemporal.depthHistory', history: true },
+      { from: 'areaTemporal.filtered', to: 'areaSpatial.src' }, { from: 'areaTemporal.depth', to: 'areaSpatial.linearDepth' },
+      { from: 'areaSpatial.mask', to: 'mask.src' });
+    return graph;
+  }
+  const [id, type, src, dst] = head === 'area'
+    ? ['areaDenoise', 'denoise.sigma', 'trace.raw', 'mask.src']
+    : ['reflectionDenoise', 'denoise.relax', 'incident.incident', 'replace.incident'];
+  graph.nodes.push({ id, type, params: mode === 'analytic' ? { ...params, historyFrames: 0 } : params });
+  graph.links = graph.links.filter(link => link.to !== dst);
+  graph.links.push({ from: src, to: id + '.signal' }, { from: id + '.signal', to: dst });
+  if (head === 'reflection') {
+    graph.links.push({ from: 'ssrTrace.hitMeta', to: id + '.hitMeta' }, { from: 'ssrTrace.trace', to: id + '.trace' });
+  }
+  return graph;
+}
+
+function route(base, head, budget, model, denoise) {
   const graph = structuredClone(base);
   if (budget) {
     const target = graph.nodes.find(node => node.id === (head === 'area' ? 'trace' : 'incident'));
     target.params = head === 'area' ? { samplesPerPixel: budget } : { extraRays: budget };
   }
+  if (denoise) denoiseRoute(graph, head, denoise.mode, denoise.params);
   if (model) {
     const [id, type, key, src, dst] = head === 'area'
       ? ['areaModel', 'neural.area-reconstruction', 'pairs', 'trace.raw', 'mask.src']
@@ -59,6 +87,41 @@ async function reflectionLabels(id, replay) {
     counts, jitterPx,
   })));
   return { source: manifest.source.buildId, replayHash, frames };
+}
+
+// Temporal stability: RMSE of the frame-to-frame change of the output minus the change of the
+// reference at the same pixel lane ((o_t - o_{t-1}) - (r_t - r_{t-1})), over lanes valid in both.
+function temporalTerm(rows, i, lanes) {
+  if (i === 0) return { temporalSquared: 0, temporalLanes: 0 };
+  let temporalSquared = 0, temporalLanes = 0;
+  const now = lanes(rows[i]), before = lanes(rows[i - 1]);
+  for (const [key, [o, r]] of now) {
+    const old = before.get(key);
+    if (!old) continue;
+    temporalSquared += ((o - old[0]) - (r - old[1])) ** 2;
+    temporalLanes++;
+  }
+  return { temporalSquared, temporalLanes };
+}
+
+function areaLanes({ pairs, reference }) {
+  const out = new Map();
+  for (let k = 0; k < pairs.length; k += 2) {
+    if (reference[k + 1] <= 1e-8) continue;
+    out.set(k, [areaVisibility(pairs[k], pairs[k + 1]), reference[k] / reference[k + 1]]);
+  }
+  return out;
+}
+
+function reflectionLanes({ frame, label }) {
+  const out = new Map();
+  const { meta, incident } = frame;
+  for (let p = 0; p < pixels; p++) {
+    const k = p * 4;
+    if (!(meta[k] === 1 && meta[k + 1] > 0.5 && incident[k + 3] > 0)) continue;
+    for (let c = 0; c < 3; c++) out.set(3 * p + c, [incident[k + c], label.target[3 * p + c]]);
+  }
+  return out;
 }
 
 function reflectionScore(frame, baseline, label) {
@@ -137,13 +200,15 @@ function summarize(frames, samples, head) {
     const lanes = sum(rows, 'lanes');
     if (!lanes) throw new Error('Replay has no valid comparison lanes');
     const rmse = Math.sqrt(sum(rows, 'squared') / lanes);
+    const temporalLanes = sum(rows, 'temporalLanes');
+    const temporalRmse = temporalLanes ? Math.sqrt(sum(rows, 'temporalSquared') / temporalLanes) : null;
     if (head === 'reflection') {
-      return { lanes, rmse, logRmse: Math.sqrt(sum(rows, 'logSquared') / lanes),
+      return { lanes, rmse, temporalRmse, temporalLanes, logRmse: Math.sqrt(sum(rows, 'logSquared') / lanes),
         offscreen: sum(rows, 'offscreen'), changed: sum(rows, 'changed') };
     }
     const commonLanes = sum(rows, 'commonLanes');
     const s = sum(rows, 's'), u = sum(rows, 'u'), referenceS = sum(rows, 'referenceS'), referenceU = sum(rows, 'referenceU');
-    return { lanes, rmse, commonLanes, commonRmse: Math.sqrt(sum(rows, 'commonSquared') / commonLanes),
+    return { lanes, rmse, temporalRmse, temporalLanes, commonLanes, commonRmse: Math.sqrt(sum(rows, 'commonSquared') / commonLanes),
       weightedVisibleRmse: Math.sqrt(sum(rows, 'visibleWeightedSquared') / lanes),
       weightRmse: Math.sqrt(sum(rows, 'weightSquared') / lanes),
       outputOnEmptyTeacher: sum(rows, 'outputOnEmpty'), missingOutput: sum(rows, 'missingOutput'),
@@ -201,7 +266,9 @@ async function areaLabels(context, graph, tape) {
 async function measureCase(context, graph, tape, head, settings) {
   const { target, raa, canvas } = context;
   const student = await createGalleryReplay(target, raa, canvas, size, tape.heldout, false,
-    route(graph, head, settings.budget), head === 'area');
+    route(graph, head, settings.budget, undefined, settings.denoise), head === 'area');
+  const timed = [...timedPasses[head],
+    ...(head === 'area' && settings.denoise?.mode === 'analytic' ? ['area.temporal#areaTemporal', 'area.spatial#areaSpatial'] : [])];
   const { engine } = student;
   try {
     let model;
@@ -225,7 +292,7 @@ async function measureCase(context, graph, tape, head, settings) {
       const gpu = engine.passGpuTimings();
       const first = frames[0]?.frameId ?? timing.frameIndex;
       if (gpu.frame >= first && gpu.frame <= timing.frameIndex && gpu.passes) {
-        const passes = Object.fromEntries(timedPasses[head].map(name => [name,
+        const passes = Object.fromEntries(timed.map(name => [name,
           gpu.passes.find(pass => pass.pass === name)?.ms]));
         if (Object.values(passes).every(Number.isFinite)) {
           samples.set(gpu.frame, { frame: gpu.frame, passes,
@@ -242,14 +309,27 @@ async function measureCase(context, graph, tape, head, settings) {
         guides = { guide: signals.guide, hdr: signals.hdr, depth: signals.depth, motion: signals.motion };
       }
       if (head === 'area' && !taps.areaMask) throw new Error('The area mask did not publish its forward input');
+      const denoised = settings.denoise && !(head === 'area' && settings.denoise.mode === 'analytic');
+      if (denoised && !taps[head === 'area' ? 'areaDenoised' : 'reflectionDenoised']) {
+        throw new Error('The ' + head + ' denoiser did not publish its output');
+      }
+      // Analytic area filtering ends in a packed visibility mask: score it as pairs (v, 1).
+      const maskPairs = () => {
+        const mask = decodeGalleryTap(taps.areaMask, pixels * 4, true), out = new Float32Array(pixels * 4);
+        for (let p = 0; p < pixels; p++) {
+          for (let slot = 0; slot < 2; slot++) out.set([mask[p * 4 + slot], 1], p * 4 + slot * 2);
+        }
+        return out;
+      };
       frames.push({ frameId: timing.frameIndex, event: pose.event, guides,
-        ...(head === 'area' ? { pairs: decodeGalleryTap(
-          settings.learned ? taps.areaReconstruction : taps.areaPairs, pixels * 4, true),
+        ...(head === 'area' ? { pairs: settings.denoise?.mode === 'analytic' ? maskPairs() : decodeGalleryTap(
+          settings.learned ? taps.areaReconstruction : denoised ? taps.areaDenoised : taps.areaPairs, pixels * 4, true),
           ...(settings.learned && { rawPairs: decodeGalleryTap(taps.areaPairs, pixels * 4, true),
             mask: decodeGalleryTap(taps.areaMask, pixels * 4, true) }) }
           : { trace: decodeGalleryTap(taps.reflectionTrace, pixels * 4, true),
             meta: decodeGalleryTap(taps.reflectionMeta, pixels * 4, false),
-            incident: decodeGalleryTap(settings.learned ? taps.reflectionReconstruction : taps.reflectionIncident, pixels * 4, false) }),
+            incident: decodeGalleryTap(settings.learned ? taps.reflectionReconstruction
+              : denoised ? taps.reflectionDenoised : taps.reflectionIncident, pixels * 4, false) }),
       });
     }
     return { frames, samples: [...samples.values()], facts: student.facts, weights: model?.manifest.weightsSha256 };
@@ -258,7 +338,7 @@ async function measureCase(context, graph, tape, head, settings) {
   }
 }
 
-export async function measureGalleryRayBudget(context, { buildId, head, trajectory, budget } = {}) {
+export async function measureGalleryRayBudget(context, { buildId, head, trajectory, budget, denoiseArms = false, denoiseParams = {} } = {}) {
   if (!buildId || !/Windows.+ Chrome\//.test(context.target.navigator.userAgent) || !Object.hasOwn(budgetSteps, head)) {
     throw new Error('Ray-budget replay requires a pinned Windows Chrome build and a known head');
   }
@@ -280,6 +360,11 @@ export async function measureGalleryRayBudget(context, { buildId, head, trajecto
   for (const settings of [
     { name: 'baseline', budget: 0 }, { name: 'learned', learned: true },
     ...(development && !fixedBudget ? budgetSteps[head] : [budget]).map(budget => ({ name: 'extra-rays', budget })),
+    ...(denoiseArms ? [
+      { name: 'denoised', denoise: { mode: 'nrd', params: denoiseParams } },
+      { name: 'analytic', denoise: { mode: 'analytic', params: denoiseParams } },
+      { name: 'denoised-rays', budget: development && !fixedBudget ? undefined : budget, denoise: { mode: 'nrd', params: denoiseParams } },
+    ].filter(arm => arm.name !== 'denoised-rays' || arm.budget) : []),
   ]) {
     const run = settings.name === 'baseline' ? baseline : await measureCase(context, graph, tape, head, settings);
     weights ??= run.weights;
@@ -301,10 +386,13 @@ export async function measureGalleryRayBudget(context, { buildId, head, trajecto
         }
       }
     }
+    const stability = run.frames.map((frame, i) => head === 'area'
+      ? { pairs: frame.pairs, reference: label.frames[i].target } : { frame, label: label.frames[i] });
     const frames = run.frames.map((frame, i) => ({ frame: frame.frameId, event: frame.event,
       ...(head === 'area' ? areaScore(frame.pairs, label.frames[i].target, baseline.frames[i].pairs)
-        : reflectionScore(frame, baseline.frames[i], label.frames[i])) }));
-    if (developmentFrames) {
+        : reflectionScore(frame, baseline.frames[i], label.frames[i])),
+      ...temporalTerm(stability, i, head === 'area' ? areaLanes : reflectionLanes) }));
+    if (developmentFrames && !settings.denoise) {
       for (const [i, { planes, id }] of developmentFrames.entries()) {
         const frame = run.frames[i];
         const name = settings.learned ? 'areaReconstruction' : settings.budget ? 'areaExtraPairs' : 'areaPairs';
@@ -324,7 +412,7 @@ export async function measureGalleryRayBudget(context, { buildId, head, trajecto
   }
   const learned = results[1];
   const byDistance = (a, b) => Math.abs(a.timing.p50 - learned.timing.p50) - Math.abs(b.timing.p50 - learned.timing.p50);
-  const closest = results.slice(2).toSorted(byDistance)[0];
+  const closest = results.slice(2).filter(result => result.name === 'extra-rays').toSorted(byDistance)[0];
   const relativeTimeDifference = (closest.timing.p50 - learned.timing.p50) / learned.timing.p50;
   if (head === 'reflection' && !(learned.overall.changed > 0 && learned.overall.offscreen > 0)) {
     throw new Error('Replay did not exercise learned radiance and offscreen rejection');

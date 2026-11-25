@@ -10,6 +10,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const [chromeArg, pageArg, outputArg, mode = 'area-pilot', comparison = 'fixed', ...flags] = process.argv.slice(2);
 const headful = flags.includes('--headful');
+// Denoiser arms of the ray-budget replay: --denoise [--denoise-params=<json>].
+const denoiseArms = flags.includes('--denoise');
+const denoiseParams = JSON.parse(flags.find(flag => flag.startsWith('--denoise-params='))?.slice(17) ?? '{}');
 const op = mode === '--prediction' ? 'prediction' : mode;
 const capture = op === 'area-pilot' || op === 'gallery-path-capture';
 const gallery = op.startsWith('gallery-');
@@ -33,7 +36,7 @@ if (rayBudget && (!headful || !raySelection)) {
   throw new Error('Ray budget needs --headful and <area|reflection>:<joint-development|joint-final-a|joint-final-b>[:final budget]');
 }
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
-    || flags.some(flag => flag !== '--headful')
+    || flags.some(flag => flag !== '--headful' && flag !== '--denoise' && !flag.startsWith('--denoise-params='))
     || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-grid-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-sr-replay', 'gallery-sr-timing', 'gallery-reflection-model', 'gallery-ray-budget', 'gallery-mirror'].includes(op)) {
   throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-grid-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-sr-replay|gallery-sr-timing|gallery-reflection-model|gallery-ray-budget|gallery-mirror] [baseline|fixed|live|live-ui|train|test|both|reflection|joint-train-a|joint-train-b|joint-train-c|joint-development|joint-final-a|joint-final-b|sr|sr-reflection|joint|dataset|learned|coverage|sharp|priority] [--headful]');
 }
@@ -196,7 +199,7 @@ try {
       buildId: receipt.buildId, remainingMs: 280000, requireFixed: comparison !== 'baseline',
       ...(mirror && { baseline: comparison === 'baseline', coverageOnly: comparison === 'coverage', sharpOnly: comparison === 'sharp', priorityOnly: comparison === 'priority' }),
       ...(srTiming && { modelHeads: comparison === 'fixed' ? 'sr' : comparison }), ...(sequence && { split: jointTrajectory || ['fixed', 'reflection'].includes(comparison) ? 'both' : comparison, reflection: comparison === 'reflection', trajectory: jointTrajectory }), ...(predictionDataset && { dataset: true }), ...(predictionLearned && { learned: true }),
-      ...(raySelection && { head: raySelection[1], trajectory: raySelection[2], budget: Number(raySelection[3] || 0) }),
+      ...(raySelection && { head: raySelection[1], trajectory: raySelection[2], budget: Number(raySelection[3] || 0), denoiseArms, denoiseParams }),
       ...gridArgs,
     })});
     const files = await Promise.all(result.files.map(async ({ name, blob, base64 }) => {
