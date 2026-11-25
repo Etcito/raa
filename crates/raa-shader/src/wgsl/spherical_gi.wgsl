@@ -528,10 +528,13 @@ fn raa_spherical_shell_cells(shell: u32, r: f32) -> f32 {
     return f32(shell) + (r - bounds.x) / max(bounds.z - bounds.x, 1e-6);
 }
 
-// Kernel radius in cells. Probes stay within 1/3 cell of their cell centre, so every probe
-// within 1.15 cells of p lies in the 3x3x3 cell block around p's cell: a probe leaves the
-// block only at zero weight and the result does not depend on where cell edges are.
-const RAA_SPHERICAL_FRONT_KERNEL: f32 = 1.15;
+// Kernel radius in cells. The block is the 4x4x4 cells whose centres bracket p (two on each
+// side per axis); probes stay within 1/3 cell of their cell centre, so every probe within
+// 1.6 cells of p lies in the block: a probe leaves it only at zero weight and the result
+// does not depend on where cell edges are. Measured (sphS): a 3x3x3 block with 1.15 cells
+// left 1-3 probes in front and drew hard bright bands (one dominant probe's visibility
+// step) on the V1 arches; 1.35 cells leaked more on V3 (bright parapet).
+const RAA_SPHERICAL_FRONT_KERNEL: f32 = 1.6;
 
 struct RaaSphericalFront {
     sum: vec3<f32>,
@@ -569,9 +572,12 @@ fn raa_spherical_front_add(acc: ptr<function, RaaSphericalFront>, entry: u32, ke
 
 // Normal-side lookup (user sketch user-sketch-sphere-cells.jpg, experiment): the grid only
 // places the probes. p uses the probes on the side its normal faces, dot(probe - p, n) > 0
-// (smooth ramp), weighted by a compact kernel of their distance in cells (1 - x^2)^2,
-// x = distance / 1.15 cells, times Chebyshev visibility and fade/validity. No trilinear
-// corners, no cell boundary: the weights are continuous in p and n. Normalisation is
+// (ramp over the first 30 degrees above the tangent plane), weighted by a compact kernel of
+// their distance in cells (1 - x^2)^2, x = distance / 1.6 cells, times Chebyshev visibility
+// and fade/validity. No trilinear corners, no cell boundary: the weights are continuous in
+// p and n. Validity comes from the capture only (no inside/outside classification here, so
+// probes left inside geometry with a near clip count once the capture keeps them). It
+// evaluates ~2x the probes of the corner lookup (gi.spherical ~1.6-1.8 vs ~0.8 ms). Normalisation is
 // capped at 1 / (0.05 x the front mass) so a receiver whose front probes are all occluded
 // darkens smoothly; where no published probe is in front at all (not captured yet, or
 // none within the kernel) the corner lookup takes over continuously.
@@ -585,16 +591,13 @@ fn raa_spherical_diffuse_front(p: vec3<f32>, normal: vec3<f32>,
     let anchor = bitcast<vec4<f32>>(raa_spherical_data[0]).xyz;
     let cells = f32(grid.x);
     let at = vec3<f32>(cell.angular, raa_spherical_shell_cells(cell.shell, cell.radius));
-    // EVAL (parallaxRange 9001): 4x4x4 block, kernel 1.6 cells; 9002: kernel 1.35.
-    let eval_mode = bitcast<f32>(raa_spherical_data[3].y);
-    let wide = eval_mode > 9000.5;
-    let span = select(3, 4, wide);
-    let kernel = select(RAA_SPHERICAL_FRONT_KERNEL, select(1.6, 1.35, eval_mode > 9001.5), wide);
-    let first = vec3<i32>(floor(at - select(0.0, 0.5, wide))) - 1;
+    let span = 4;
+    let kernel = RAA_SPHERICAL_FRONT_KERNEL;
+    let first = vec3<i32>(floor(at - 0.5)) - 1;
     let base = vec2<i32>(min(first.xy, vec2<i32>(i32(grid.x) - 2)));
     let reach = 1.0 / (kernel * kernel);
     var acc = RaaSphericalFront();
-    // The centre probe (a sphere of radius clipStart): Euclidean kernel over 1.15 x the
+    // The centre probe (a sphere of radius clipStart): Euclidean kernel over 1.6 x the
     // radius of shell 0's centre.
     if cell.shell <= 2u {
         let c0 = bitcast<f32>(raa_spherical_data[4u].y) * kernel;
