@@ -168,7 +168,8 @@ fn raa_spherical_support_gates(entry: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f
 // the parallax range is then effectively infinite (patches everywhere). Bit 0: normal
 // offset of the lookup point (0.3 x smallest spacing), bit 1: normal + view offset, bit 2:
 // sharp backface weight, bit 3: bilinear Chebyshev moments, bit 4: continuous ring,
-// bit 5: sky misses separated from the hits in the moments.
+// bit 5: sky misses separated from the hits in the moments, bit 6: floored sum only on
+// lost trilinear coverage, bit 7: normalisation capped at 1 / (0.05 x coverage).
 fn raa_spherical_variant() -> u32 {
     let range = bitcast<f32>(raa_spherical_data[3].y);
     return select(0u, u32(range - 9000.0), range >= 9000.0);
@@ -609,9 +610,19 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
     }
     // Low coverage: the floored corners, then the centre probe and the shell's 3x3 ring,
     // faded in continuously as the trilinear coverage drops below 0.5.
-    let corners = select(vec3<f32>(0.0), sum / max(total, 1e-12), total > 0.0);
+    // Bit 7: no amplification beyond 1 / 0.05 of the published coverage: where every corner
+    // is behind the surface or occluded, normalising would hand the whole weight to the
+    // least occluded (often a leaking) probe; capped, such a receiver darkens instead.
+    let norm = select(total, max(total, 0.05 * coverage), (variant & 128u) != 0u);
+    let corners = select(vec3<f32>(0.0), sum / max(norm, 1e-12), total > 0.0);
     let floor_value = select(vec3<f32>(0.0), floor_sum / max(floor_total, 1e-12), floor_total > 0.0);
-    let main_weight = smoothstep(0.0, select(0.02, 1e-6, sharp), total);
+    // Bit 6: the floored (non-trilinear, so cell-edged) sum only takes over where the
+    // published corners lose their trilinear coverage, not where low facing x visibility
+    // makes the supported total small (that drew hard-edged rectangles near walls).
+    var main_weight = smoothstep(0.0, select(0.02, 1e-6, sharp), total);
+    if (variant & 64u) != 0u {
+        main_weight = select(0.0, smoothstep(0.0, 0.02, coverage), total > 1e-12);
+    }
     sum = mix(floor_value, corners, main_weight);
     total = select(0.0, 1.0, total > 0.0 || floor_total > 0.0);
     let ring = 1.0 - smoothstep(0.25, 0.5, coverage);
