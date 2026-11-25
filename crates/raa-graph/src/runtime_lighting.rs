@@ -16,6 +16,8 @@ pub(crate) const SPHERICAL_KEYS: &[&str] = &[
     "debug",
     "maxProbes",
     "captureFaces",
+    "captureMs",
+    "burstMs",
     "enabled",
 ];
 
@@ -37,6 +39,8 @@ pub(crate) fn spherical_get(settings: SphericalGiSettings, key: &str) -> Option<
         "channelMask" => ParamValue::Int(i64::from(settings.channels)),
         "maxProbes" => ParamValue::Int(i64::from(settings.scheduler.max_cells)),
         "captureFaces" => ParamValue::Int(i64::from(settings.budget.near)),
+        "captureMs" => ParamValue::Number(f64::from(settings.capture_ms)),
+        "burstMs" => ParamValue::Number(f64::from(settings.burst_ms)),
         "debug" => ParamValue::Enum(
             DEBUG
                 .iter()
@@ -78,6 +82,12 @@ pub(crate) fn spherical_set(
         ("captureFaces", ParamValue::Int(value)) if (1..=1024).contains(value) => {
             settings.budget.near = *value as u32;
             settings.budget.far = (*value as u32).div_ceil(2);
+        }
+        ("captureMs", ParamValue::Number(value)) if (0.0..=50.0).contains(value) => {
+            settings.capture_ms = *value as f32;
+        }
+        ("burstMs", ParamValue::Number(value)) if (0.0..=50.0).contains(value) => {
+            settings.burst_ms = *value as f32;
         }
         ("debug", ParamValue::Enum(value)) => {
             settings.debug = DEBUG

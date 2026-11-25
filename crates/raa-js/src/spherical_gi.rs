@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 9] = [
+const OPTIONS: [&str; 11] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
@@ -34,6 +34,8 @@ const OPTIONS: [&str; 9] = [
     "channelMask",
     "maxProbes",
     "captureFaces",
+    "captureMs",
+    "burstMs",
 ];
 
 fn invalid(key: &str, reason: &str) -> RaaError {
@@ -114,6 +116,17 @@ fn read_patch(
                 settings.budget.near = faces as u32;
                 settings.budget.far = (faces as u32).div_ceil(2);
             }
+            "captureMs" | "burstMs" => {
+                let ms = number()?;
+                if !(0.0..=50.0).contains(&ms) {
+                    return Err(invalid(&name, "expected milliseconds from 0 to 50"));
+                }
+                if name == "captureMs" {
+                    settings.capture_ms = ms as f32;
+                } else {
+                    settings.burst_ms = ms as f32;
+                }
+            }
             "debug" => {
                 settings.debug = match value.as_string().as_deref() {
                     Some("off") => SphericalGiDebug::Off,
@@ -183,6 +196,8 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
     put(&result, "channelMask", settings.channels.into());
     put(&result, "maxProbes", settings.scheduler.max_cells.into());
     put(&result, "captureFaces", settings.budget.near.into());
+    put(&result, "captureMs", settings.capture_ms.into());
+    put(&result, "burstMs", settings.burst_ms.into());
     result.into()
 }
 
@@ -264,6 +279,13 @@ impl Engine {
                 ("gpuBytes", stats.gpu_bytes as f64),
                 ("capturedFaces", stats.captured_faces as f64),
                 ("captureFrames", stats.capture_frames as f64),
+                ("visibleCells", scheduler.visible_cells as f64),
+                (
+                    "visiblePublishedCells",
+                    scheduler.visible_published_cells as f64,
+                ),
+                ("faceBudget", stats.face_budget as f64),
+                ("captureGpuMs", f64::from(stats.capture_gpu_ms)),
             ] {
                 put(&result, name, value.into());
             }
@@ -273,6 +295,12 @@ impl Engine {
                 format!("{:016x}", stats.light_revision).into(),
             );
             put(&result, "origin", number_array(stats.origin).into());
+            put(&result, "burst", stats.burst.into());
+            put(
+                &result,
+                "discoveryPending",
+                scheduler.discovery_pending.into(),
+            );
             let shell = Object::new();
             put(&shell, "inner", stats.last_shell.inner.into());
             put(&shell, "center", stats.last_shell.center.into());

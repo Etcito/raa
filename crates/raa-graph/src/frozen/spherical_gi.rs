@@ -375,7 +375,15 @@ pub fn plan() -> crate::plan::GraphPlan {
                     ),
                     (
                         "captureFaces".to_string(),
-                        crate::catalog::ParamValue::Int(48),
+                        crate::catalog::ParamValue::Int(96),
+                    ),
+                    (
+                        "captureMs".to_string(),
+                        crate::catalog::ParamValue::Number(0.75),
+                    ),
+                    (
+                        "burstMs".to_string(),
+                        crate::catalog::ParamValue::Number(4.0),
                     ),
                 ],
                 inputs: vec![],

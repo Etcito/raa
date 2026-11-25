@@ -317,8 +317,19 @@ export interface SphericalGiSettings {
   channelMask: number;
   /** Integer from 16 to 4096: resident free-space probes, the centre probe included. Defaults to 1024. */
   maxProbes: number;
-  /** Integer from 1 to 1024: near-shell cube faces captured per frame; far shells get half. Defaults to 24. */
+  /**
+   * Integer from 1 to 1024: fixed budget of near-shell cube faces captured per frame; far
+   * shells get half. Used when captureMs is 0 or the device has no timestamp queries, and as
+   * the first burst batch before a GPU timing exists. Defaults to 24.
+   */
   captureFaces: number;
+  /**
+   * Steady-state capture target in GPU milliseconds per frame, from 0 to 50. Non-zero switches
+   * to the GPU-time budget: faces are issued from one pool, most visible first. Defaults to 0.
+   */
+  captureMs: number;
+  /** Capture target while visible probes are missing (after open or a camera move), 0 to 50. Defaults to 0 (= captureMs). */
+  burstMs: number;
 }
 
 export interface SphericalGiStats {
@@ -345,6 +356,16 @@ export interface SphericalGiStats {
   /** Total faces recorded since the active grid was allocated. */
   capturedFaces: number;
   captureFrames: number;
+  /** Resident probes in the view cone (with the centre probe), and how many are published. */
+  visibleCells: number;
+  visiblePublishedCells: number;
+  /** Discovery still has candidate cells to examine. */
+  discoveryPending: boolean;
+  /** Capture ran the burst target this frame (visible probes missing or undiscovered). */
+  burst: boolean;
+  /** Faces issued by the latest frame, and the latest measured capture GPU time (0 before a sample). */
+  faceBudget: number;
+  captureGpuMs: number;
   /** Revision of the global lighting inputs, encoded as hexadecimal. */
   lightRevision: string;
   /** World-space grid anchor retained across sub-threshold camera movement. */

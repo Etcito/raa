@@ -120,6 +120,19 @@ pub struct SchedulerStats {
     /// Cumulative cells with ready or in-flight work cleared by lighting changes.
     pub light_invalidated_cells: u64,
     pub light_invalidated_faces: u64,
+    /// Resident cells in the view cone (and the centre probe), and how many of them
+    /// have been published at least once.
+    pub visible_cells: u32,
+    pub visible_published_cells: u32,
+    /// Discovery, reprojection or a dirty rescan still has candidate cells to examine.
+    pub discovery_pending: bool,
+}
+
+impl SchedulerStats {
+    /// Visible probes are missing or not yet discovered: capture should burst.
+    pub fn visible_missing(&self) -> bool {
+        self.discovery_pending || self.visible_published_cells < self.visible_cells
+    }
 }
 
 struct Entry {
@@ -136,12 +149,17 @@ impl Entry {
         serial: &mut u64,
         jobs: &mut Vec<FaceJob>,
     ) {
-        let p = &mut self.progress;
+        let p = &self.progress;
         let budget = if p.key.is_center() || p.key.shell < near_shells {
             &mut budget.near
         } else {
             &mut budget.far
         };
+        self.take_faces(budget, serial, jobs);
+    }
+
+    fn take_faces(&mut self, budget: &mut u32, serial: &mut u64, jobs: &mut Vec<FaceJob>) {
+        let p = &mut self.progress;
         for face in CubeFace::ALL {
             let bit = 1 << face as u8;
             if *budget == 0 {
@@ -710,8 +728,8 @@ impl SphericalScheduler {
         }
         budget.near -= allowance.near - reflected.near;
         budget.far -= allowance.far - reflected.far;
-        for key in self.resident_order.values() {
-            self.cells.get_mut(key).expect("resident cell").take_jobs(
+        for key in self.capture_order() {
+            self.cells.get_mut(&key).expect("resident cell").take_jobs(
                 &mut budget,
                 self.config.near_shells,
                 &mut self.serial,
@@ -727,6 +745,57 @@ impl SphericalScheduler {
             );
         }
         jobs
+    }
+
+    /// Emit up to `faces` jobs from one shared pool, in capture priority order and
+    /// regardless of the near/far band split (used by the GPU-time budget).
+    pub fn take_jobs_shared(&mut self, mut faces: u32) -> Vec<FaceJob> {
+        let mut jobs = Vec::new();
+        let mut order = Vec::with_capacity(self.cells.len());
+        if self.cells.contains_key(&CellKey::CENTER) {
+            order.push(CellKey::CENTER);
+        }
+        order.extend(self.capture_order());
+        order.extend(self.reflected_cells.iter().copied());
+        for key in order {
+            if faces == 0 {
+                break;
+            }
+            self.cells.get_mut(&key).expect("resident cell").take_faces(
+                &mut faces,
+                &mut self.serial,
+                &mut jobs,
+            );
+        }
+        jobs
+    }
+
+    /// Resident cells (not the centre, not reflected) with faces left to capture,
+    /// most pleasant first: never-published probes before refreshes of published
+    /// ones, then inside the view, periphery, behind; then nearer shells, then
+    /// closeness to the view centre.
+    fn capture_order(&self) -> Vec<CellKey> {
+        let mut order: Vec<_> = self
+            .resident_order
+            .values()
+            .filter_map(|&key| {
+                let p = &self.cells[&key].progress;
+                ((p.ready_faces | p.in_flight_faces) != ALL_FACES)
+                    .then(|| ((p.published, self.capture_rank(key)), key))
+            })
+            .collect();
+        order.sort_unstable();
+        order.into_iter().map(|(_, key)| key).collect()
+    }
+
+    fn capture_rank(&self, key: CellKey) -> (u8, u16, u32) {
+        if key.is_center() {
+            return (0, 0, 0);
+        }
+        self.view_order.as_ref().map_or_else(
+            || (1, key.shell, self.grid.ordinal(key)),
+            |order| order.capture_rank(&self.grid, key),
+        )
     }
 
     /// Whether the job is still the active attempt for this face.
@@ -796,8 +865,16 @@ impl SphericalScheduler {
             light_invalidated_faces: self.light_invalidated_faces,
             ..SchedulerStats::default()
         };
+        stats.discovery_pending = !self.discovery.is_empty()
+            || !self.reprojected.is_empty()
+            || self.dirty.is_some()
+            || self.pending_dirty.is_some();
         for entry in self.cells.values() {
             let cell = entry.progress;
+            if self.capture_rank(cell.key).0 == 0 {
+                stats.visible_cells += 1;
+                stats.visible_published_cells += u32::from(cell.published);
+            }
             stats.lighting_metadata_ready_cells += u32::from(entry.lighting.is_known());
             stats.near_cells +=
                 u32::from(cell.key.is_center() || cell.key.shell < self.config.near_shells);

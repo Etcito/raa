@@ -56,7 +56,9 @@
         "zMax": 12,
         "channelMask": 7,
         "maxProbes": 2048,
-        "captureFaces": 48
+        "captureFaces": 96,
+        "captureMs": 0.75,
+        "burstMs": 4
       }
     },
     {

@@ -35,6 +35,7 @@ const PATCH_ROWS: usize = 3 * 4 * FACE_COUNT;
 const MOMENT_ROWS: usize = 16 * FACE_COUNT / 2;
 const SLOT_ROWS: usize = LEGACY_SLOT_ROWS + PATCH_ROWS + MOMENT_ROWS + 1;
 const MAX_FACES_PER_BUDGET: u32 = 4096;
+pub const MAX_CAPTURE_MS: f32 = 50.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
@@ -51,7 +52,13 @@ pub enum SphericalGiDebug {
 pub struct SphericalGiSettings {
     pub enabled: bool,
     pub scheduler: SphericalSchedulerConfig,
+    /// Fixed face budget, used when the GPU-time budget is off or timestamps are unavailable.
     pub budget: FaceBudget,
+    /// Steady-state capture target in GPU milliseconds per frame; 0 keeps the fixed budget.
+    pub capture_ms: f32,
+    /// Capture target while visible probes are missing or undiscovered (after open or
+    /// a camera move); 0 uses `capture_ms`.
+    pub burst_ms: f32,
     pub intensity: f32,
     pub debug: SphericalGiDebug,
     /// Bit 0 selects sky, bit 1 sun and bit 2 other.
@@ -64,6 +71,8 @@ impl Default for SphericalGiSettings {
             enabled: false,
             scheduler: SphericalSchedulerConfig::default(),
             budget: FaceBudget { near: 24, far: 12 },
+            capture_ms: 0.0,
+            burst_ms: 0.0,
             intensity: 1.0,
             debug: SphericalGiDebug::Off,
             channels: 7,
@@ -78,11 +87,13 @@ impl SphericalGiSettings {
             || self.channels > 7
             || self.budget.near > MAX_FACES_PER_BUDGET
             || self.budget.far > MAX_FACES_PER_BUDGET
+            || !(0.0..=MAX_CAPTURE_MS).contains(&self.capture_ms)
+            || !(0.0..=MAX_CAPTURE_MS).contains(&self.burst_ms)
         {
             return Err(RaaError::FrameGraph {
                 code: "gi.spherical.invalid_settings",
                 message: format!(
-                    "expected intensity in [0, 16], channel mask in [0, 7] and face budgets in [0, {MAX_FACES_PER_BUDGET}]"
+                    "expected intensity in [0, 16], channel mask in [0, 7], face budgets in [0, {MAX_FACES_PER_BUDGET}] and capture times in [0, {MAX_CAPTURE_MS}] ms"
                 ),
             });
         }
@@ -100,6 +111,11 @@ pub struct SphericalGiStats {
     pub light_revision: u64,
     pub origin: [f32; 3],
     pub last_shell: RadialShell,
+    /// Faces issued by the latest prepare, whether it ran the burst target, and the
+    /// latest measured capture GPU time (0 before the first timestamp sample).
+    pub face_budget: u32,
+    pub burst: bool,
+    pub capture_gpu_ms: f32,
 }
 
 /// Readback from one fully submitted, current cubemap.
@@ -401,8 +417,25 @@ impl FeaturePass for SphericalPass {
         gpu.update_lookup(ctx.gpu, scheduler, settings, ctx.frame as u32);
         ctx.lighting
             .set_spherical_gi(Some((gpu.lookup.clone(), gpu.faces.clone())));
+        let burst = scheduler.stats().visible_missing();
+        let target = if burst && settings.burst_ms > 0.0 {
+            settings.burst_ms
+        } else {
+            settings.capture_ms
+        };
+        let jobs = match gpu.clock.as_mut().filter(|_| target > 0.0) {
+            Some(clock) => {
+                clock.poll();
+                let fixed = settings.budget.near + settings.budget.far;
+                let pending = scheduler.stats().pending_faces;
+                scheduler.take_jobs_shared(clock.faces(target, fixed, pending))
+            }
+            None => scheduler.take_jobs(settings.budget),
+        };
+        gpu.face_budget = jobs.len() as u32;
+        gpu.burst = burst;
         self.staged = Staged {
-            jobs: scheduler.take_jobs(settings.budget),
+            jobs,
             light_ids,
             feedback: None,
             grid_revision,
@@ -523,6 +556,9 @@ impl FeaturePass for SphericalPass {
             light_revision: staged.light_revision,
             origin,
             last_shell,
+            face_budget: gpu.face_budget,
+            burst: gpu.burst,
+            capture_gpu_ms: gpu.clock.as_ref().map_or(0.0, |clock| clock.last_ms as f32),
         });
     }
 }
@@ -591,6 +627,10 @@ struct SphericalGpu {
     /// or relit so the shading fade-in happens once per probe.
     ready_at: Vec<Option<u32>>,
     face_masks: Vec<u8>,
+    /// GPU-time budget: timestamps around the capture work, when the device has them.
+    clock: Option<CaptureClock>,
+    face_budget: u32,
+    burst: bool,
 }
 
 impl SphericalGpu {
@@ -652,6 +692,12 @@ impl SphericalGpu {
             work_bytes: Vec::new(),
             ready_at: vec![None; slots],
             face_masks: vec![0; slots],
+            clock: gpu
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY)
+                .then(|| CaptureClock::new(gpu)),
+            face_budget: 0,
+            burst: false,
         }
     }
 
@@ -817,6 +863,19 @@ impl SphericalGpu {
         let queue = ctx.gpu.queue();
         queue.write_buffer(&self.options, 0, &options);
         queue.write_buffer(&self.work, 0, &self.work_bytes);
+        // Time the whole capture (capture, project, bins) of one frame when no sample is pending.
+        let clock = self
+            .clock
+            .as_ref()
+            .filter(|clock| clock.pending.is_none() && !jobs.is_empty());
+        let last_pass = if projected == 0 { 0 } else { 2 };
+        let stamps = |pass: usize| {
+            clock.map(|clock| wgpu::ComputePassTimestampWrites {
+                query_set: &clock.queries,
+                beginning_of_pass_write_index: (pass == 0).then_some(0),
+                end_of_pass_write_index: (pass == last_pass).then_some(1),
+            })
+        };
         if !jobs.is_empty() {
             let capture_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("gi.spherical.capture"),
@@ -843,19 +902,38 @@ impl SphericalGpu {
                 .encoder
                 .begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("gi.spherical.capture"),
-                    ..Default::default()
+                    timestamp_writes: stamps(0),
                 });
             pass.set_pipeline(&self.capture);
             pass.set_bind_group(0, &capture_group, &[]);
             pass.dispatch_workgroups(1, 1, jobs.len() as u32);
         }
-        if projected == 0 {
-            return;
+        if projected > 0 {
+            self.record_projection(ctx, projected, &stamps);
         }
-        for (pipeline, label, groups) in [
+        if clock.is_some() {
+            let faces = jobs.len() as u32;
+            self.clock
+                .as_mut()
+                .expect("capture clock")
+                .resolve(ctx.encoder, faces);
+        }
+    }
+
+    fn record_projection<'q>(
+        &self,
+        ctx: &mut RecordCtx<'_>,
+        projected: u32,
+        stamps: &dyn Fn(usize) -> Option<wgpu::ComputePassTimestampWrites<'q>>,
+    ) {
+        let device = ctx.gpu.device();
+        for (index, (pipeline, label, groups)) in [
             (&self.project, "gi.spherical.project", 1 + FACE_COUNT as u32),
             (&self.bins, "gi.spherical.bins", FACE_COUNT as u32),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(label),
                 layout: &pipeline.get_bind_group_layout(0),
@@ -870,7 +948,7 @@ impl SphericalGpu {
                 .encoder
                 .begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(label),
-                    ..Default::default()
+                    timestamp_writes: stamps(index + 1),
                 });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &group, &[]);
@@ -985,6 +1063,112 @@ impl SphericalGpu {
             buffer: readback,
             result,
         }
+    }
+}
+
+/// GPU-time face budget. Two timestamps bracket one frame's capture work; the
+/// measured cost per face (an average, so it falls as batches fill the GPU) sizes
+/// the next batches for the target time. Growth is bounded per sample so a stale
+/// estimate cannot issue a frame-long spike.
+struct CaptureClock {
+    queries: wgpu::QuerySet,
+    resolve: Buffer,
+    readback: Buffer,
+    ms_per_tick: f64,
+    pending: Option<(u32, Receiver<Option<f64>>)>,
+    ms_per_face: Option<f64>,
+    last_ms: f64,
+    last_faces: u32,
+}
+
+const MIN_CLOCK_FACES: u32 = 6;
+
+impl CaptureClock {
+    fn new(gpu: &GpuContext) -> Self {
+        let device = gpu.device();
+        let size = 2 * u64::from(wgpu::QUERY_SIZE);
+        Self {
+            queries: device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("gi.spherical.clock"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 2,
+            }),
+            resolve: buffer(
+                device,
+                "gi.spherical.clock",
+                size,
+                Usage::QUERY_RESOLVE | Usage::COPY_SRC,
+            ),
+            readback: buffer(
+                device,
+                "gi.spherical.clock-readback",
+                size,
+                Usage::MAP_READ | Usage::COPY_DST,
+            ),
+            ms_per_tick: f64::from(gpu.queue().get_timestamp_period()) / 1e6,
+            pending: None,
+            ms_per_face: None,
+            last_ms: 0.0,
+            last_faces: 0,
+        }
+    }
+
+    /// Faces for this frame: target / measured cost, at most twice the last batch
+    /// (or the fixed budget before the first sample), and never more than pending.
+    fn faces(&mut self, target_ms: f32, fixed: u32, pending: u32) -> u32 {
+        let faces = match self.ms_per_face {
+            Some(cost) => {
+                let wanted = (f64::from(target_ms) / cost.max(1e-4)).floor() as u32;
+                wanted.min(2 * self.last_faces.max(fixed / 2).max(MIN_CLOCK_FACES))
+            }
+            None => fixed,
+        };
+        let faces = faces.clamp(MIN_CLOCK_FACES, MAX_FACES_PER_BUDGET);
+        if pending > 0 {
+            self.last_faces = faces.min(pending.max(MIN_CLOCK_FACES));
+        }
+        faces
+    }
+
+    fn poll(&mut self) {
+        let Some((faces, result)) = &self.pending else {
+            return;
+        };
+        let ms = match result.try_recv() {
+            Ok(ms) => ms,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        };
+        let faces = *faces;
+        self.pending = None;
+        if let Some(ms) = ms.filter(|ms| ms.is_finite() && *ms > 0.0) {
+            self.last_ms = ms;
+            let cost = ms / f64::from(faces.max(1));
+            self.ms_per_face = Some(self.ms_per_face.map_or(cost, |old| 0.5 * (old + cost)));
+        }
+    }
+
+    fn resolve(&mut self, encoder: &mut wgpu::CommandEncoder, faces: u32) {
+        let bytes = 2 * u64::from(wgpu::QUERY_SIZE);
+        encoder.resolve_query_set(&self.queries, 0..2, &self.resolve, 0);
+        encoder.copy_buffer_to_buffer(&self.resolve, 0, &self.readback, 0, bytes);
+        let (send, result) = sync_channel(1);
+        let readback = self.readback.clone();
+        let ms_per_tick = self.ms_per_tick;
+        encoder.map_buffer_on_submit(&self.readback, wgpu::MapMode::Read, .., move |loaded| {
+            let ms = loaded.ok().and_then(|()| {
+                let ms = readback.get_mapped_range(..).ok().map(|data| {
+                    let tick = |i: usize| {
+                        u64::from_le_bytes(data[8 * i..8 * i + 8].try_into().expect("timestamp"))
+                    };
+                    tick(1).saturating_sub(tick(0)) as f64 * ms_per_tick
+                });
+                readback.unmap();
+                ms
+            });
+            let _ = send.send(ms);
+        });
+        self.pending = Some((faces, result));
     }
 }
 

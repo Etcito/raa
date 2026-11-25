@@ -8,7 +8,13 @@ pub(super) struct ViewOrder {
     half_fov_cos: f64,
     angular_order: Vec<u32>,
     angular_rank: Vec<u32>,
+    /// Capture class per column: 0 inside the view cone, 1 periphery, 2 behind.
+    class: Vec<u8>,
 }
+
+/// Columns within this many radians outside the view cone are periphery: a turn of
+/// the head brings them on screen before columns behind the camera.
+const PERIPHERY_MARGIN: f64 = 0.6;
 
 impl ViewOrder {
     pub(super) fn new(
@@ -35,13 +41,24 @@ impl ViewOrder {
         }
 
         let fov_sin = (1.0 - half_fov_cos * half_fov_cos).sqrt();
+        let periphery = (half_fov_cos.acos() + PERIPHERY_MARGIN).min(std::f64::consts::PI);
+        let (periphery_cos, periphery_sin) = (periphery.cos(), periphery.sin());
         let columns = grid.cells_per_shell();
+        let mut class = vec![2u8; columns as usize];
         let mut scores: Vec<_> = (0..columns)
             .map(|index| {
                 let (center, tile_cos) = grid.column_cap(grid.key(index));
                 let alignment = dot(forward, center);
                 let tile_sin = (1.0 - tile_cos * tile_cos).max(0.0).sqrt();
                 let visible = alignment >= half_fov_cos * tile_cos - fov_sin * tile_sin;
+                let near = alignment >= periphery_cos * tile_cos - periphery_sin * tile_sin;
+                class[index as usize] = if visible {
+                    0
+                } else if near {
+                    1
+                } else {
+                    2
+                };
                 (index, visible, alignment)
             })
             .collect();
@@ -60,7 +77,15 @@ impl ViewOrder {
             half_fov_cos,
             angular_order,
             angular_rank,
+            class,
         })
+    }
+
+    /// Capture priority of a cell: view class (inside, periphery, behind), then shell
+    /// (nearer shells cover more of the screen), then closeness to the view centre.
+    pub(super) fn capture_rank(&self, grid: &SphericalGrid, key: CellKey) -> (u8, u16, u32) {
+        let index = (grid.ordinal(key) % grid.cells_per_shell()) as usize;
+        (self.class[index], key.shell, self.angular_rank[index])
     }
 
     /// Shell-major order: every column of a nearer shell ranks before any farther

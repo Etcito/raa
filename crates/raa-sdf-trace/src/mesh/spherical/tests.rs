@@ -632,6 +632,51 @@ fn rotating_view_keeps_near_cells_behind_the_camera() {
     assert!(roomy.is_current(far_face));
 }
 
+#[test]
+fn shared_capture_pool_serves_visible_probes_first_then_periphery_then_behind() {
+    let mut scene = MeshTraceScene::default();
+    // Near triangles behind (+Z), to the side (+X) and a far one in view (-Z).
+    let visible = [[-0.1, -0.1, -5.0], [0.1, -0.1, -5.0], [0.0, 0.1, -5.0]];
+    let behind = [[-0.1, -0.1, 1.5], [0.1, -0.1, 1.5], [0.0, 0.1, 1.5]];
+    update_geometry(
+        &mut scene,
+        &[
+            triangle(1, &facing_x(1.5)),
+            triangle(2, &behind),
+            triangle(3, &visible),
+        ],
+    );
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    scheduler.set_view_priority([0.0, 0.0, -1.0], 0.87);
+    for _ in 0..4 {
+        scheduler.update(&scene, [0.0; 3], 0);
+    }
+    let stats = scheduler.stats();
+    assert_eq!(stats.cells, 3);
+    assert_eq!((stats.visible_cells, stats.visible_published_cells), (1, 0));
+    assert!(stats.visible_missing());
+
+    // One shared pool, regardless of bands: the far visible cell first, then the
+    // side cell (periphery), then the near cell behind the camera.
+    let jobs = scheduler.take_jobs_shared(13);
+    assert_eq!(jobs.len(), 13);
+    let order: Vec<_> = jobs.iter().map(|job| job.key).collect();
+    assert_eq!(order[0], key(2, CubeFace::NegZ));
+    assert_eq!(order[6], key(0, CubeFace::PosX));
+    assert_eq!(order[12], key(0, CubeFace::PosZ));
+    for job in jobs {
+        assert!(scheduler.complete(job));
+    }
+    let stats = scheduler.stats();
+    assert_eq!((stats.visible_cells, stats.visible_published_cells), (1, 1));
+
+    // A relight turns every published probe into a refresh: the never-published
+    // remainder of the behind cell still comes first.
+    scheduler.update(&scene, [0.0; 3], 1);
+    let jobs = scheduler.take_jobs_shared(6);
+    assert!(jobs.iter().all(|job| job.key == key(0, CubeFace::PosZ)));
+}
+
 fn center_config() -> SphericalSchedulerConfig {
     SphericalSchedulerConfig {
         center_probe: true,

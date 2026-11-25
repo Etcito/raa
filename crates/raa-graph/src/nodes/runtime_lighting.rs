@@ -96,6 +96,22 @@ impl NodeFamily for RuntimeLighting {
                 &[][..],
                 Rebuild::None,
             ),
+            (
+                "captureMs",
+                "Capture GPU ms per frame",
+                ParamKind::Number,
+                Some((0.0, 50.0)),
+                &[][..],
+                Rebuild::None,
+            ),
+            (
+                "burstMs",
+                "Burst capture GPU ms",
+                ParamKind::Number,
+                Some((0.0, 50.0)),
+                &[][..],
+                Rebuild::None,
+            ),
         ];
         vec![NodeTypeSpec {
             id: SPHERICAL_TYPE,
