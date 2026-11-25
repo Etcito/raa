@@ -19,6 +19,7 @@
 //! probes its new bound reaches). `DdgiInvalidation` selects that tracking, the naive
 //! "everything on any change" or none (periodic refresh only) for comparison.
 
+mod extras;
 mod lights;
 mod schedule;
 
@@ -32,8 +33,12 @@ use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx};
 use wgpu::{Buffer, BufferUsages as Usage};
 
+use self::extras::{Extras, TABLE_ROWS_PER_SLOT};
 use self::lights::{LightMask, MaskReadback};
-pub use self::schedule::{DdgiView, Visibility as DdgiVisibility};
+pub use self::schedule::{
+    DdgiView, PERIOD_BUCKETS as DDGI_PERIOD_BUCKETS, PERIOD_CLASSES as DDGI_PERIOD_CLASSES,
+    Visibility as DdgiVisibility,
+};
 use self::schedule::{GROUP_ALL, GROUP_OTHER, GROUP_SUN, Schedule};
 use super::MeshTraceHandle;
 use super::pass::{buffer, buffer_entry, image_entry};
@@ -75,7 +80,9 @@ const LATE_FRAMES: u32 = 240;
 const SUN_CONE_DEGREES: f32 = 2.5;
 const MAX_PROBES: u32 = 32_768;
 const MAX_AXIS: u32 = 128;
-const PARAMS_BYTES: u64 = 96;
+const PARAMS_BYTES: u64 = 112;
+/// Most surface probes (the pool after the cascades).
+const MAX_SURFACE_PROBES: u32 = 16_384;
 const OPTIONS_BYTES: u64 = 64;
 const FLAG_RELOCATE: u32 = 1;
 const FLAG_CLASSIFY: u32 = 2;
@@ -112,6 +119,9 @@ pub enum DdgiDebug {
     /// Weight per cascade (red: cascade 0, green: coarser), blue where inactive probes filled a
     /// hole; black where no probe was usable.
     Probes = 4,
+    /// Red where a surface probe would be requested, green the share the surface probes take,
+    /// blue the quality of the cascades' estimate.
+    Quality = 5,
 }
 
 /// What a surface gets where the finer cascades do not cover it.
@@ -126,6 +136,20 @@ pub enum DdgiFar {
     /// The behaviour before cascades: confidence fades over the outer half cell of the last
     /// cascade and with the probe coverage, the rest is the flat ambient term (comparison only).
     Ambient = 1,
+}
+
+/// How a probe that sits in or against geometry moves inside its cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DdgiRelocation {
+    /// Out through the nearest back face; away from a front face closer than the minimum
+    /// distance by the missing distance (the rule this volume started with).
+    #[default]
+    Nearest = 0,
+    /// The RTXGI SDK rule: out through the nearest back face; from a too-close front face
+    /// toward the FARTHEST front face (at most one unit) unless that leads back to the closest
+    /// one; back toward the grid position when nothing is close.
+    Rtxgi = 1,
 }
 
 /// Most cascades (cascade k has spacing `spacing * 2^k`).
@@ -161,7 +185,28 @@ pub struct DdgiSettings {
     pub normal_bias: f32,
     pub view_bias: f32,
     pub relocation: bool,
+    pub relocation_rule: DdgiRelocation,
+    /// Largest relocation offset per axis, as a fraction of the probe spacing (0.5 = the whole
+    /// cell of the probe).
+    pub relocation_limit: f32,
     pub classification: bool,
+    /// Surface probes: size of the pool of extra probes placed in front of badly served
+    /// surfaces (0 = off), see `extras`.
+    pub surface_probes: u32,
+    /// Lattice pitch of the surface probes (m): at most one per cell.
+    pub surface_spacing: f32,
+    /// Distance from the surface at which a surface probe is requested (m), shortened to half
+    /// the free distance along the normal.
+    pub surface_offset: f32,
+    /// A ray hit requests a surface probe when the lookup quality there (trilinear mass of the
+    /// probes in front of the surface, visible and within reach) is below this.
+    pub surface_need: f32,
+    /// Distance (m) beyond which a cascade probe no longer counts as serving a surface in the
+    /// quality above; 0 = any distance.
+    pub surface_reach: f32,
+    /// Surface probes are placed within this distance of the camera (m); when the pool is full
+    /// the nearest cells win.
+    pub surface_range: f32,
     /// Shade ray hits with the previous volume (infinite bounces over time).
     pub bounce: bool,
     /// Sky light as an SH transfer composed with the frame's sky (off: every escaped ray's sky
@@ -195,7 +240,15 @@ impl Default for DdgiSettings {
             normal_bias: 0.1,
             view_bias: 0.3,
             relocation: true,
+            relocation_rule: DdgiRelocation::Nearest,
+            relocation_limit: 0.45,
             classification: true,
+            surface_probes: 0,
+            surface_spacing: 0.75,
+            surface_offset: 0.5,
+            surface_need: 0.2,
+            surface_reach: 0.0,
+            surface_range: 40.0,
             bounce: true,
             sky_transfer: true,
             invalidation: DdgiInvalidation::Tracked,
@@ -241,7 +294,14 @@ impl DdgiSettings {
                 .iter()
                 .all(|&n| (2..=MAX_AXIS).contains(&n))
             && (1..=DDGI_MAX_CASCADES).contains(&self.cascades)
-            && self.probe_count() <= MAX_PROBES;
+            && self.probe_count() + self.surface_probes <= MAX_PROBES
+            && self.surface_probes <= MAX_SURFACE_PROBES
+            && (0.1..=0.5).contains(&self.relocation_limit)
+            && (0.1..=10.0).contains(&self.surface_spacing)
+            && (0.02..=10.0).contains(&self.surface_offset)
+            && (0.0..=1.0).contains(&self.surface_need)
+            && (0.0..=100.0).contains(&self.surface_reach)
+            && (1.0..=1000.0).contains(&self.surface_range);
         let ok = counts_ok
             && self.spacing.is_finite()
             && (0.05..=100.0).contains(&self.spacing)
@@ -307,6 +367,17 @@ pub struct DdgiStats {
     pub last_light_probes: u32,
     /// Whether the probes' light masks were read back at least once.
     pub light_masks: bool,
+    /// Surface probes: pool size, assigned, and totals since the volume started (assignments,
+    /// evictions, valid requests read back).
+    pub surface_pool: u32,
+    pub surface_live: u32,
+    pub surface_assigned: u64,
+    pub surface_evicted: u64,
+    pub surface_requests: u64,
+    /// Frames between two updates of the same probe, per class and power-of-two bucket.
+    pub periods: [[u64; DDGI_PERIOD_BUCKETS]; DDGI_PERIOD_CLASSES],
+    /// Rows of the probe buffer (16 bytes each): probe records, screen resolve, surface table.
+    pub rows: [u32; 3],
 }
 
 pub type DdgiHandle = Rc<RefCell<DdgiState>>;
@@ -318,12 +389,16 @@ pub struct DdgiState {
     pass_enabled: bool,
     revision: u64,
     stats: Option<DdgiStats>,
+    buffer: Option<Buffer>,
 }
 
 impl DdgiState {
     pub fn configure(&mut self, settings: DdgiSettings) -> Result<(), RaaError> {
         let settings = settings.validate()?;
-        if settings.cascade_layouts() != self.settings.cascade_layouts() {
+        if settings.cascade_layouts() != self.settings.cascade_layouts()
+            || settings.surface_probes != self.settings.surface_probes
+            || settings.surface_spacing != self.settings.surface_spacing
+        {
             self.revision = self.revision.wrapping_add(1);
         }
         self.settings = settings;
@@ -336,6 +411,11 @@ impl DdgiState {
 
     pub fn stats(&self) -> Option<DdgiStats> {
         self.stats
+    }
+
+    /// The probe buffer (diagnostic readbacks).
+    pub fn probe_buffer(&self) -> Option<Buffer> {
+        self.buffer.clone()
     }
 
     /// The bridge supplies the effective camera of each view before the frame.
@@ -354,6 +434,7 @@ impl DdgiFeature {
             mesh,
             gpu: None,
             schedule: Schedule::default(),
+            extras: None,
             staged: None,
             published: false,
             rng: 0x9e37_79b9_7f4a_7c15,
@@ -569,6 +650,7 @@ struct DdgiPass {
     mesh: MeshTraceHandle,
     gpu: Option<DdgiGpu>,
     schedule: Schedule,
+    extras: Option<Extras>,
     staged: Option<Staged>,
     published: bool,
     rng: u64,
@@ -841,9 +923,12 @@ impl FeaturePass for DdgiPass {
             self.gpu = None;
             self.staged = None;
             self.schedule = Schedule::default();
+            self.extras = None;
             self.timer = None;
             self.lighting = LightingTrack::default();
-            self.state.borrow_mut().stats = None;
+            let mut state = self.state.borrow_mut();
+            state.stats = None;
+            state.buffer = None;
         }
     }
 
@@ -866,7 +951,9 @@ impl FeaturePass for DdgiPass {
             self.unpublish(ctx.lighting);
             return Ok(());
         };
-        let probes = settings.probe_count();
+        let grid = settings.probe_count();
+        let extra_count = settings.surface_probes;
+        let probes = grid + extra_count;
         let cascades = settings.cascade_layouts();
         // One row per resolve texel inside the forward's one storage binding.
         let resolve_size = (
@@ -875,15 +962,25 @@ impl FeaturePass for DdgiPass {
         );
         let rows = layout(probes).rows
             + u64::from(resolve_size.0) * u64::from(resolve_size.1)
-            + SCRATCH_ROWS;
+            + SCRATCH_ROWS
+            + TABLE_ROWS_PER_SLOT * u64::from(extra_count);
         let fits = 16 * rows <= u64::from(ctx.gpu.limits().max_storage_buffer_binding_size);
         let screen = fits.then_some(resolve_size);
         if self.gpu.as_ref().is_none_or(|gpu| {
             gpu.cascades != cascades || gpu.revision != revision || gpu.screen != screen
         }) {
             // A resize restarts the volume: the screen rows share the probe buffer.
-            self.gpu = Some(DdgiGpu::new(ctx.gpu, cascades.clone(), revision, screen));
-            self.schedule.reset(&cascades);
+            self.gpu = Some(DdgiGpu::new(
+                ctx.gpu,
+                cascades.clone(),
+                revision,
+                screen,
+                extra_count,
+            ));
+            self.schedule
+                .reset(&cascades, extra_count, settings.surface_spacing);
+            self.extras = (extra_count > 0)
+                .then(|| Extras::new(ctx.gpu, extra_count, settings.surface_spacing));
             self.lighting = LightingTrack {
                 readback: Some(MaskReadback::new(ctx.gpu, probes)),
                 ..LightingTrack::default()
@@ -921,6 +1018,18 @@ impl FeaturePass for DdgiPass {
             .map(|(c, &base)| closed_sides(base, c.counts, c.spacing, bounds))
             .collect();
         let recycled = self.schedule.scroll(&bases, &closed);
+        // New surface probes from the requests read back.
+        if let (Some(extras), Some(gpu)) = (self.extras.as_mut(), self.gpu.as_ref()) {
+            for change in extras.poll(camera.eye, settings.surface_range) {
+                let bytes: Vec<u8> = change.row.iter().flat_map(|w| w.to_le_bytes()).collect();
+                ctx.gpu.queue().write_buffer(
+                    &gpu.probes,
+                    16 * (gpu.table_row() + u64::from(change.index)),
+                    &bytes,
+                );
+                self.schedule.set_extra(grid + change.index, change.position);
+            }
+        }
         let (invalidated, light_edits, edit_probes) =
             self.track_lighting(settings, &camera, sky_diffuse, ctx.lighting);
         let floor = MIN_BATCH.min(probes);
@@ -978,6 +1087,7 @@ impl FeaturePass for DdgiPass {
         ctx.lighting
             .set_spherical_gi(Some((gpu.probes.clone(), gpu.probes.clone())));
         self.published = true;
+        self.state.borrow_mut().buffer = Some(gpu.probes.clone());
         if !traceable {
             return Ok(());
         }
@@ -1022,6 +1132,15 @@ impl FeaturePass for DdgiPass {
                 0.25,
                 SUN_CONE_DEGREES.to_radians().cos(),
                 settings.light_threshold,
+            ],
+        );
+        push_f32(
+            &mut params,
+            [
+                settings.relocation_limit,
+                settings.relocation_rule as u32 as f32,
+                0.0,
+                0.0,
             ],
         );
         let mut options = Vec::with_capacity(OPTIONS_BYTES as usize);
@@ -1139,7 +1258,7 @@ impl FeaturePass for DdgiPass {
             pass.dispatch_workgroups(1, 1, 1);
             pass.set_pipeline(&gpu.relight);
             pass.set_bind_group(0, &relight, &[]);
-            pass.dispatch_workgroups(gpu.probes(), 1, 1);
+            pass.dispatch_workgroups(gpu.total(), 1, 1);
         }
         let jobs = (staged.jobs.len() / 2) as u32;
         if jobs > 0 {
@@ -1187,8 +1306,14 @@ impl FeaturePass for DdgiPass {
         if staged.read_masks
             && let Some(readback) = self.lighting.readback.as_mut()
         {
-            let rows = layout(gpu.probes());
+            let rows = layout(gpu.total());
             readback.copy(ctx.encoder, &gpu.probes, 16 * rows.meta);
+        }
+        if self.lighting.frame % 4 == 2
+            && let Some(extras) = self.extras.as_mut().filter(|e| e.idle())
+        {
+            let offset = 16 * (gpu.table_row() + u64::from(gpu.extras));
+            extras.copy(ctx.encoder, &gpu.probes, offset);
         }
         Ok(())
     }
@@ -1200,6 +1325,11 @@ impl FeaturePass for DdgiPass {
         let mut state = self.state.borrow_mut();
         let probes = state.settings.probe_count();
         let previous = state.stats.unwrap_or_default();
+        let extras = self.extras.as_ref();
+        let rows = self.gpu.as_ref().map_or([0; 3], |gpu| {
+            let rows = layout(gpu.total());
+            [rows.meta as u32, rows.rows as u32, gpu.table_row() as u32]
+        });
         let gpu_bytes = self.gpu.as_ref().map_or(0, DdgiGpu::bytes);
         let add = |total: [u64; 3], frame: [u32; 3]| {
             std::array::from_fn(|i| total[i] + u64::from(frame[i]))
@@ -1234,6 +1364,13 @@ impl FeaturePass for DdgiPass {
             }),
             cascades: self.schedule.bases.as_ref().map_or(0, |b| b.len() as u32),
             gpu_bytes,
+            surface_pool: extras.map_or(0, |e| e.count),
+            surface_live: extras.map_or(0, Extras::live),
+            surface_assigned: extras.map_or(0, |e| e.assigned_total),
+            surface_evicted: extras.map_or(0, |e| e.evicted_total),
+            surface_requests: extras.map_or(0, |e| e.requests_total),
+            periods: self.schedule.periods,
+            rows,
         });
     }
 }
@@ -1285,6 +1422,8 @@ struct DdgiGpu {
     cascades: Vec<CascadeLayout>,
     revision: u64,
     screen: Option<(u32, u32)>,
+    /// Surface-probe pool size (slots after the cascades).
+    extras: u32,
     update: wgpu::ComputePipeline,
     resolve: wgpu::ComputePipeline,
     relight: wgpu::ComputePipeline,
@@ -1302,6 +1441,7 @@ impl DdgiGpu {
         cascades: Vec<CascadeLayout>,
         revision: u64,
         screen: Option<(u32, u32)>,
+        extras: u32,
     ) -> Self {
         let device = gpu.device();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1323,12 +1463,16 @@ impl DdgiGpu {
         let relight = pipeline("gi.ddgi.relight", "ddgi_relight");
         let sky = pipeline("gi.ddgi.sky", "ddgi_sky_project");
         let pixels = screen.map_or(0, |(w, h)| u64::from(w) * u64::from(h));
-        let probes = cascades.iter().map(|c| c.probes).sum();
-        let rows = layout(probes).rows + pixels + SCRATCH_ROWS;
+        let probes = cascades.iter().map(|c| c.probes).sum::<u32>() + extras;
+        let rows = layout(probes).rows
+            + pixels
+            + SCRATCH_ROWS
+            + TABLE_ROWS_PER_SLOT * u64::from(extras);
         Self {
             cascades,
             revision,
             screen,
+            extras,
             update,
             resolve,
             relight,
@@ -1374,8 +1518,21 @@ impl DdgiGpu {
         }
     }
 
+    /// Probes of the cascades.
     fn probes(&self) -> u32 {
         self.cascades.iter().map(|c| c.probes).sum()
+    }
+
+    /// Every slot: the cascades, then the surface-probe pool.
+    fn total(&self) -> u32 {
+        self.probes() + self.extras
+    }
+
+    /// First row of the surface table: one assignment row per pool slot (cell, live | start
+    /// offset << 1), then two request rows per slot.
+    fn table_row(&self) -> u64 {
+        let pixels = self.screen.map_or(0, |(w, h)| u64::from(w) * u64::from(h));
+        layout(self.total()).rows + pixels + SCRATCH_ROWS
     }
 
     fn bytes(&self) -> u64 {
@@ -1391,14 +1548,16 @@ impl DdgiGpu {
         settings: DdgiSettings,
     ) {
         let probes = self.probes();
-        let rows = layout(probes);
+        let rows = layout(self.total());
+        let table_row = self.table_row() as u32;
         let spacing = settings.spacing;
         let base = bases[0];
         let mut header = Vec::with_capacity(16 * CPU_HEADER_ROWS as usize);
         push_u32(&mut header, [0; 4]);
         push_u32(&mut header, [0; 4]);
         push_u32(&mut header, [0; 4]);
-        push_u32(&mut header, [MAGIC, 1, 0, 0]);
+        // Magic, version, the reach of the lookup quality (m, 0 = any distance).
+        push_u32(&mut header, [MAGIC, 1, settings.surface_reach.to_bits(), 0]);
         push_u32(
             &mut header,
             [base[0] as u32, base[1] as u32, base[2] as u32, flags],
@@ -1420,7 +1579,7 @@ impl DdgiGpu {
                 rows.meta as u32,
                 rows.irradiance as u32,
                 rows.depth as u32,
-                0,
+                settings.surface_need.to_bits(),
             ],
         );
         let pixels = self.screen.map_or(0, |(w, h)| u64::from(w) * u64::from(h));
@@ -1432,7 +1591,7 @@ impl DdgiGpu {
                 (1.5 * 3f32.sqrt() * spacing).to_bits(),
                 self.cascades.len() as u32,
                 closed[0],
-                0,
+                settings.surface_range.to_bits(),
             ],
         );
         // Screen resolve rows: first row, width, height, pixels per texel side (0 = off).
@@ -1457,7 +1616,7 @@ impl DdgiGpu {
                 rows.groups as u32,
                 SKY_ROW as u32,
                 (rows.rows + pixels) as u32,
-                0,
+                settings.surface_offset.to_bits(),
             ],
         );
         // Rows 11 + 2(k - 1), 12 + 2(k - 1): cascade k >= 1, base and first slot | closed sides
@@ -1478,7 +1637,17 @@ impl DdgiGpu {
                 [c.counts[0], c.counts[1], c.counts[2], c.spacing.to_bits()],
             );
         }
-        header.resize(16 * CPU_HEADER_ROWS as usize, 0);
+        // Row 15: the surface-probe pool (table row, size, first slot, lattice pitch).
+        header.resize(16 * 15, 0);
+        push_u32(
+            &mut header,
+            [
+                table_row,
+                self.extras,
+                probes,
+                settings.surface_spacing.to_bits(),
+            ],
+        );
         if header != self.header {
             gpu.queue().write_buffer(&self.probes, 0, &header);
             self.header = header;
@@ -1604,6 +1773,7 @@ mod tests {
             mesh: MeshTraceHandle::default(),
             gpu: None,
             schedule: Schedule::default(),
+            extras: None,
             staged: None,
             published: false,
             rng: 12345,

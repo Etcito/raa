@@ -162,6 +162,98 @@ fn raa_ddgi_depth(v: RaaDdgiVolume, slot: u32, dir: vec3<f32>) -> vec2<f32> {
     return mix(mix(a, b, t.f.x), mix(c, d, t.f.x), t.f.y);
 }
 
+// Surface probes: a pool of extra probe slots after the cascades, on a sparse lattice (at most
+// one probe per cell, anywhere inside it), found through a table of one row per pool slot (cell
+// xyz, live | start offset << 1) with two hashed slot choices per cell. Header row 15: table row,
+// pool size, first slot, lattice pitch.
+struct RaaDdgiExtra {
+    table_row: u32,
+    count: u32,
+    first: u32,
+    spacing: f32,
+}
+
+fn raa_ddgi_extra() -> RaaDdgiExtra {
+    let r = raa_ddgi_word(15u);
+    return RaaDdgiExtra(r.x, r.y, r.z, bitcast<f32>(r.w));
+}
+
+const RAA_DDGI_NO_SLOT: u32 = 0xffffffffu;
+const RAA_DDGI_SECOND_CHOICE: u32 = 0x51ed270bu;
+
+// Cell hash (the CPU mirrors it: ddgi/extras.rs `hash`).
+fn raa_ddgi_hash(c: vec3<i32>, salt: u32) -> u32 {
+    let u = bitcast<vec3<u32>>(c);
+    var h = u.x * 0x9e3779b1u + salt;
+    h = (h ^ (h >> 15u)) * 0x85ebca77u + u.y * 0xc2b2ae3du;
+    h = (h ^ (h >> 13u)) * 0x27d4eb2fu + u.z * 0x165667b1u;
+    h = (h ^ (h >> 16u)) * 0x9e3779b1u;
+    return h ^ (h >> 15u);
+}
+
+// The slot of the surface probe of lattice cell `c`, or RAA_DDGI_NO_SLOT.
+fn raa_ddgi_extra_slot(e: RaaDdgiExtra, c: vec3<i32>) -> u32 {
+    for (var j = 0u; j < 2u; j++) {
+        let i = raa_ddgi_hash(c, j * RAA_DDGI_SECOND_CHOICE) % e.count;
+        let row = raa_ddgi_word(e.table_row + i);
+        if (row.w & 1u) != 0u && all(bitcast<vec3<i32>>(row.xyz) == c) { return e.first + i; }
+    }
+    return RAA_DDGI_NO_SLOT;
+}
+
+// The pool as a volume: same rows as the cascades, biases and distance cap at its own pitch.
+fn raa_ddgi_extra_volume(e: RaaDdgiExtra) -> RaaDdgiVolume {
+    var v = raa_ddgi_volume();
+    let scale = e.spacing / max(v.spacing, 1e-6);
+    v.base = vec3<i32>(0);
+    v.spacing = e.spacing;
+    v.normal_bias *= scale;
+    v.view_bias *= scale;
+    v.max_depth *= scale;
+    v.offset = e.first;
+    v.closed = 63u;
+    return v;
+}
+
+// Weight of one probe at `probe` for the surface point `p` (smooth backface x Chebyshev
+// visibility from `biased`, small weights crushed) and how well it serves that surface: 1 for a
+// probe in front of the surface, visible from it and within the quality reach (header row 3.z,
+// metres, 0 = any distance), falling to 0 behind it, hidden or out of reach.
+struct RaaDdgiProbeWeight {
+    weight: f32,
+    quality: f32,
+}
+
+fn raa_ddgi_probe_weight(v: RaaDdgiVolume, slot: u32, probe: vec3<f32>, p: vec3<f32>,
+                         n: vec3<f32>, biased: vec3<f32>, chebyshev: bool) -> RaaDdgiProbeWeight {
+    // Smooth backface: probes behind the surface fade without a hard cut.
+    let to_probe = probe - p;
+    let range = length(to_probe);
+    let facing = dot(to_probe / max(range, 1e-4), n);
+    var weight = 0.5 * (facing + 1.0);
+    weight = weight * weight + 0.2;
+    var visible = 1.0;
+    if chebyshev {
+        // Chebyshev visibility from the probe's mean distance and its square.
+        let from_probe = biased - probe;
+        let distance = length(from_probe);
+        let moments = raa_ddgi_depth(v, slot, from_probe / max(distance, 1e-4));
+        if distance > moments.x {
+            let variance = abs(moments.x * moments.x - moments.y);
+            let gap = distance - moments.x;
+            visible = variance / max(variance + gap * gap, 1e-8);
+            visible = visible * visible * visible;
+            weight *= max(0.05, visible);
+        }
+    }
+    weight = max(weight, 1e-6);
+    if weight < 0.2 { weight *= weight * weight / 0.04; }
+    let reach = bitcast<f32>(raa_ddgi_word(3u).z);
+    var near = 1.0;
+    if reach > 0.0 { near = saturate(2.0 - 2.0 * range / reach); }
+    return RaaDdgiProbeWeight(weight, saturate(2.0 * facing) * visible * near);
+}
+
 // The eight probes of one cascade around a surface point and their weights (trilinear, smooth
 // backface, Chebyshev visibility, small weights crushed), with the trilinear coverage of usable
 // probes and the cascade's own weight `band`:
@@ -182,6 +274,49 @@ struct RaaDdgiCorners {
     band: f32,
     // The weights come from inactive probes (no active probe was usable).
     filled: bool,
+    // Trilinear mass of the probes that serve the surface well (see raa_ddgi_probe_weight).
+    quality: f32,
+}
+
+// The surface probes of the eight lattice cells around a surface point: trilinear over the cell
+// centres (continuous: a cell's weight vanishes one pitch away from its centre whatever the
+// position of its probe inside the cell) x the weight of the probe where it really is.
+fn raa_ddgi_extra_corners(e: RaaDdgiExtra, v: RaaDdgiVolume, p: vec3<f32>, n: vec3<f32>,
+                          view_dir: vec3<f32>) -> RaaDdgiCorners {
+    var out: RaaDdgiCorners;
+    out.band = 1.0;
+    let biased = p + n * v.normal_bias + view_dir * v.view_bias;
+    let local = biased / v.spacing - 0.5;
+    let cell = vec3<i32>(floor(local));
+    let alpha = local - floor(local);
+    for (var i = 0u; i < 8u; i++) {
+        let corner = vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
+        let c = cell + vec3<i32>(corner);
+        let slot = raa_ddgi_extra_slot(e, c);
+        if slot == RAA_DDGI_NO_SLOT { continue; }
+        out.slot[i] = slot;
+        let record = raa_ddgi_word(v.meta_row + RAA_DDGI_META_ROWS * slot);
+        if any(bitcast<vec3<i32>>(record.xyz) != c) || (record.w & RAA_DDGI_VALID) == 0u
+            || (record.w & RAA_DDGI_INSIDE) != 0u {
+            continue;
+        }
+        let offset = bitcast<vec3<f32>>(raa_ddgi_word(v.meta_row + RAA_DDGI_META_ROWS * slot + 1u).xyz);
+        let probe = (vec3<f32>(c) + 0.5) * v.spacing + offset;
+        let tri = mix(1.0 - alpha, alpha, vec3<f32>(corner));
+        let trilinear = tri.x * tri.y * tri.z;
+        let w = raa_ddgi_probe_weight(v, slot, probe, p, n, biased, true);
+        out.weight[i] = w.weight * trilinear;
+        out.total += out.weight[i];
+        out.coverage += trilinear;
+        out.quality += trilinear * w.quality;
+    }
+    return out;
+}
+
+// Share of a lookup taken by the surface probes around it: full once their weights sum to half
+// a probe, fading continuously to the cascades where they thin out.
+fn raa_ddgi_extra_share(c: RaaDdgiCorners) -> f32 {
+    return saturate(2.0 * c.total);
 }
 
 fn raa_ddgi_corners(v: RaaDdgiVolume, p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>,
@@ -228,25 +363,8 @@ fn raa_ddgi_corners(v: RaaDdgiVolume, p: vec3<f32>, n: vec3<f32>, view_dir: vec3
         let probe = vec3<f32>(g) * v.spacing + offset;
         let tri = mix(1.0 - alpha, alpha, vec3<f32>(corner));
         let trilinear = tri.x * tri.y * tri.z;
-        // Smooth backface: probes behind the surface fade without a hard cut.
-        let to_probe = normalize(probe - p);
-        var weight = 0.5 * (dot(to_probe, n) + 1.0);
-        weight = weight * weight + 0.2;
-        if !outside {
-            // Chebyshev visibility from the probe's mean distance and its square.
-            let from_probe = biased - probe;
-            let distance = length(from_probe);
-            let moments = raa_ddgi_depth(v, slot, from_probe / max(distance, 1e-4));
-            if distance > moments.x {
-                let variance = abs(moments.x * moments.x - moments.y);
-                let gap = distance - moments.x;
-                var visible = variance / max(variance + gap * gap, 1e-8);
-                visible = visible * visible * visible;
-                weight *= max(0.05, visible);
-            }
-        }
-        weight = max(weight, 1e-6);
-        if weight < 0.2 { weight *= weight * weight / 0.04; }
+        let w = raa_ddgi_probe_weight(v, slot, probe, p, n, biased, !outside);
+        var weight = w.weight;
         weight *= trilinear;
         if inactive {
             // Kept negative until the end: used only if no active probe is.
@@ -258,6 +376,7 @@ fn raa_ddgi_corners(v: RaaDdgiVolume, p: vec3<f32>, n: vec3<f32>, view_dir: vec3
         out.weight[i] = weight;
         out.total += weight;
         out.coverage += trilinear;
+        out.quality += trilinear * w.quality;
     }
     let fill = out.total <= 0.0 && spare_total > 0.0;
     for (var i = 0u; i < 8u; i++) {
@@ -289,6 +408,9 @@ fn raa_ddgi_confidence(c: RaaDdgiCorners, clamp_far: bool) -> f32 {
 // Per-sample diagnostics of the last raa_ddgi_sample (debug "probes"): weight taken from
 // cascade 0, from the coarser cascades, and 1 where inactive probes filled a hole.
 var<private> raa_ddgi_diag: vec3<f32>;
+// Of the last lookup (raa_ddgi_sample, ddgi_bounce): quality of the cascades' estimate (see
+// raa_ddgi_probe_weight; 1 when no cascade was needed) and the share the surface probes took.
+var<private> raa_ddgi_quality: vec2<f32>;
 
 fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32> {
     raa_ddgi_diag = vec3<f32>(0.0);
@@ -298,11 +420,35 @@ fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32>
     var rgb = vec3<f32>(0.0);
     var weight = 0.0;
     var remaining = 1.0;
+    raa_ddgi_quality = vec2<f32>(0.0);
+    let e = raa_ddgi_extra();
+    if e.count > 0u {
+        let v = raa_ddgi_extra_volume(e);
+        let c = raa_ddgi_extra_corners(e, v, p, n, view_dir);
+        let share = raa_ddgi_extra_share(c);
+        if share > 0.0 {
+            var sum = vec3<f32>(0.0);
+            for (var i = 0u; i < 8u; i++) {
+                if c.weight[i] <= 0.0 { continue; }
+                sum += sqrt(max(raa_ddgi_irradiance(v, c.slot[i], n), vec3<f32>(0.0))) * c.weight[i];
+            }
+            let root = sum / c.total;
+            rgb += share * root * root;
+            weight += share;
+            remaining -= share;
+            raa_ddgi_quality.y = share;
+        }
+    }
+    var grid = 0.0;
+    var grid_quality = 0.0;
     for (var k = 0u; k < cascades; k++) {
+        if remaining <= 1e-3 { break; }
         let v = raa_ddgi_volume_at(k);
         let c = raa_ddgi_corners(v, p, n, view_dir, k + 1u == cascades, clamp_far);
         let confidence = raa_ddgi_confidence(c, clamp_far);
         if confidence <= 0.0 { continue; }
+        grid += remaining * confidence;
+        grid_quality += remaining * confidence * c.quality;
         var sum = vec3<f32>(0.0);
         for (var i = 0u; i < 8u; i++) {
             if c.weight[i] <= 0.0 { continue; }
@@ -316,8 +462,9 @@ fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32>
         rgb += share * root * root;
         weight += share;
         remaining -= share;
-        if remaining <= 1e-3 { break; }
     }
+    raa_ddgi_quality.x = select(1.0, grid_quality / max(grid, 1e-6), grid > 1e-3);
+    if grid <= 1e-3 && weight <= 0.0 { raa_ddgi_quality.x = 0.0; }
     if weight <= 0.0 { return vec4<f32>(0.0); }
     if clamp_far { return vec4<f32>(rgb / weight * v0.intensity, 1.0); }
     return vec4<f32>(rgb * v0.intensity / weight, weight);
@@ -377,7 +524,7 @@ fn raa_ddgi_evaluate(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, frag: vec2
     if !raa_ddgi_active() { return RaaSphericalResult(); }
     let sample = raa_ddgi_screen(p, frag, eye);
     let debug = (raa_ddgi_word(4u).w >> 8u) & 0xffu;
-    if debug == 1u || debug == 4u { return RaaSphericalResult(sample, vec4<f32>(sample.rgb, 1.0)); }
+    if debug == 1u || debug >= 4u { return RaaSphericalResult(sample, vec4<f32>(sample.rgb, 1.0)); }
     if debug == 2u {
         return RaaSphericalResult(sample, vec4<f32>(1.0 - sample.w, sample.w, 0.1, 1.0));
     }

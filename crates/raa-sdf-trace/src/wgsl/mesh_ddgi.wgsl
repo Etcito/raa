@@ -26,6 +26,8 @@ struct DdgiParams {
     // sky scale, backface fraction threshold, cos of the cone around the sun left out of the sky,
     // smallest light contribution (luma) recorded in a probe's light mask
     extra: vec4<f32>,
+    // relocation: largest offset per axis (fraction of the spacing), rule (0 nearest, 1 RTXGI)
+    place: vec4<f32>,
 }
 
 @group(0) @binding(27) var<storage, read_write> ddgi_probes: array<vec4<u32>>;
@@ -220,7 +222,26 @@ fn ddgi_ray_direction(i: u32, count: u32) -> vec3<f32> {
     return normalize(m[0].xyz * d.x + m[1].xyz * d.y + m[2].xyz * d.z);
 }
 
+// Whether `slot` is a surface probe (the pool after the cascades).
+fn ddgi_is_extra(slot: u32) -> bool {
+    let e = raa_ddgi_extra();
+    return e.count > 0u && slot >= e.first;
+}
+
+// The volume a slot belongs to: its cascade, or the surface-probe pool.
+fn ddgi_slot_volume(slot: u32) -> RaaDdgiVolume {
+    if ddgi_is_extra(slot) { return raa_ddgi_extra_volume(raa_ddgi_extra()); }
+    return raa_ddgi_volume_at(raa_ddgi_cascade_of(slot));
+}
+
+// The table row of a surface probe: its lattice cell, live | start offset << 1.
+fn ddgi_extra_row(slot: u32) -> vec4<u32> {
+    let e = raa_ddgi_extra();
+    return ddgi_probes[e.table_row + slot - e.first];
+}
+
 fn ddgi_slot_coord(v: RaaDdgiVolume, slot: u32) -> vec3<i32> {
+    if ddgi_is_extra(slot) { return bitcast<vec3<i32>>(ddgi_extra_row(slot).xyz); }
     let local = slot - v.offset;
     let s = vec3<u32>(local % v.counts.x, (local / v.counts.x) % v.counts.y,
         local / (v.counts.x * v.counts.y));
@@ -260,10 +281,30 @@ fn ddgi_bounce(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, groups: u32,
     let group_row = ddgi_group_row();
     var weight_sum = 0.0;
     var remaining = 1.0;
-    for (var k = 0u; k < cascades; k++) {
-        let v = raa_ddgi_volume_at(k);
-        let c = raa_ddgi_corners(v, p, n, view_dir, k + 1u == cascades, clamp_far);
-        let confidence = raa_ddgi_confidence(c, clamp_far);
+    var grid = 0.0;
+    var grid_quality = 0.0;
+    raa_ddgi_quality = vec2<f32>(0.0);
+    let extra = raa_ddgi_extra();
+    // Pass 0: the surface probes around the hit; then the cascades share what they leave.
+    for (var pass_index = 0u; pass_index <= cascades; pass_index++) {
+        if remaining <= 1e-3 { break; }
+        var v: RaaDdgiVolume;
+        var c: RaaDdgiCorners;
+        var confidence = 0.0;
+        if pass_index == 0u {
+            if extra.count == 0u { continue; }
+            v = raa_ddgi_extra_volume(extra);
+            c = raa_ddgi_extra_corners(extra, v, p, n, view_dir);
+            confidence = raa_ddgi_extra_share(c);
+            raa_ddgi_quality.y = confidence;
+        } else {
+            let k = pass_index - 1u;
+            v = raa_ddgi_volume_at(k);
+            c = raa_ddgi_corners(v, p, n, view_dir, k + 1u == cascades, clamp_far);
+            confidence = raa_ddgi_confidence(c, clamp_far);
+            grid += remaining * confidence;
+            grid_quality += remaining * confidence * c.quality;
+        }
         if confidence <= 0.0 { continue; }
         let share = remaining * confidence;
         for (var i = 0u; i < 8u; i++) {
@@ -302,8 +343,9 @@ fn ddgi_bounce(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, groups: u32,
         }
         weight_sum += share;
         remaining -= share;
-        if remaining <= 1e-3 { break; }
     }
+    raa_ddgi_quality.x = select(1.0, grid_quality / max(grid, 1e-6), grid > 1e-3);
+    if grid <= 1e-3 && weight_sum <= 0.0 { raa_ddgi_quality.x = 0.0; }
     if weight_sum <= 0.0 { return DdgiTexel(); }
     // Legacy keeps the faded confidence (the weights already carry it).
     let scale = v0.intensity * select(1.0, 1.0 / weight_sum, clamp_far);
@@ -314,6 +356,32 @@ fn ddgi_bounce(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, groups: u32,
         for (var j = 0u; j < 14u; j++) { out.transfer[j] *= scale; }
     }
     return out;
+}
+
+// Surface-probe request of a ray hit the volume serves badly: the point `offset` metres in front
+// of the hit (half the free distance along the normal when something is closer), written with a
+// check word into a request entry picked by the cell and the frame. The CPU reads the entries
+// back and assigns the cells (ddgi/extras.rs). Called right after the hit's `ddgi_bounce`.
+fn ddgi_request(p: vec3<f32>, ng: vec3<f32>) {
+    let e = raa_ddgi_extra();
+    if e.count == 0u { return; }
+    let need = bitcast<f32>(raa_ddgi_word(7u).w);
+    if raa_ddgi_quality.x >= need || raa_ddgi_quality.y >= 0.5 { return; }
+    if distance(p, frame.camera_pos.xyz) > bitcast<f32>(raa_ddgi_word(8u).w) { return; }
+    let offset = bitcast<f32>(raa_ddgi_word(10u).w);
+    let free = closest(Ray(p + ng * (2.0 * EPS), ng), 2.0 * offset, false);
+    var reach = offset;
+    if free.object != MISS { reach = min(offset, 0.5 * free.t); }
+    if reach < 0.03 { return; }
+    let local = (p + ng * reach) / e.spacing;
+    let cell = vec3<i32>(floor(local));
+    if raa_ddgi_extra_slot(e, cell) != RAA_DDGI_NO_SLOT { return; }
+    let f = vec3<u32>(clamp((local - floor(local)) * 1024.0, vec3<f32>(0.0), vec3<f32>(1023.0)));
+    let packed = f.x | (f.y << 10u) | (f.z << 20u);
+    let entry = raa_ddgi_hash(cell, ddgi_params.counts.z) % e.count;
+    let row = e.table_row + e.count + 2u * entry;
+    ddgi_probes[row] = vec4<u32>(bitcast<vec3<u32>>(cell), ddgi_params.counts.z);
+    ddgi_probes[row + 1u] = vec4<u32>(packed, raa_ddgi_hash(cell, packed), 1u, 0u);
 }
 
 struct DdgiShaded {
@@ -370,6 +438,7 @@ fn ddgi_shade(origin: vec3<f32>, direction: vec3<f32>, limit: f32, groups: u32,
     }
     if (ddgi_params.counts.w & DDGI_BOUNCE) != 0u {
         let bounce = ddgi_bounce(p, n, v, groups, seed);
+        ddgi_request(p, ng);
         let albedo = diffuse(material);
         if (groups & DDGI_SUN) != 0u {
             out.texel.direct.sun += albedo * bounce.direct.sun;
@@ -499,8 +568,12 @@ fn ddgi_hysteresis(age: u32, fresh: bool, change: f32) -> f32 {
 @compute @workgroup_size(64, 1, 1)
 fn ddgi_update(@builtin(local_invocation_index) lid: u32,
                @builtin(workgroup_id) group: vec3<u32>) {
-    // The cascade of the job's slot: its grid, spacing, biases and distance cap.
-    let v = raa_ddgi_volume_at(raa_ddgi_cascade_of(ddgi_jobs[2u * group.x] & 0xffffu));
+    // The cascade (or the surface-probe pool) of the job's slot: its grid, spacing, biases and
+    // distance cap.
+    let v = ddgi_slot_volume(ddgi_jobs[2u * group.x] & 0xffffu);
+    let is_extra = ddgi_is_extra(ddgi_jobs[2u * group.x] & 0xffffu);
+    // A surface probe sits at the centre of its lattice cell plus its offset.
+    let cell_centre = select(0.0, 0.5, is_extra);
     let spacing_scale = v.spacing / max(raa_ddgi_volume().spacing, 1e-6);
     let rays = min(ddgi_params.counts.x, DDGI_MAX_RAYS);
     if lid == 0u {
@@ -518,6 +591,17 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
         }
         let turn = (record.w >> 8u) & 0xffu;
         var run = 1u;
+        if is_extra {
+            let assigned = ddgi_extra_row(slot).w;
+            // A slot the table no longer assigns is not traced.
+            if (assigned & 1u) == 0u { run = 0u; }
+            if fresh {
+                // Starts at the requested point of its cell.
+                let f = vec3<f32>(vec3<u32>(assigned >> 1u, assigned >> 11u, assigned >> 21u) & vec3<u32>(1023u));
+                offset = (f / 1024.0 - 0.5) * v.spacing;
+                ddgi_probes[row + 1u] = vec4<u32>(bitcast<vec3<u32>>(offset), 0u);
+            }
+        }
         if !fresh && (record.w & RAA_DDGI_INACTIVE) != 0u && (turn & 7u) != 0u {
             run = 0u;
             ddgi_probes[row] = vec4<u32>(record.xyz, (record.w & 0xffu) | (((turn + 1u) & 0xffu) << 8u));
@@ -526,7 +610,7 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
         // A fresh probe has no group to keep.
         ddgi_job_groups = vec4<u32>(job_groups & 0xffu, (job_groups >> 8u) & 0xffu,
             select((job_groups >> 16u) & 7u, 7u, fresh), select((job_groups >> 24u) & 1u, 1u, fresh));
-        ddgi_origin = vec4<f32>(vec3<f32>(g) * v.spacing + offset, 0.0);
+        ddgi_origin = vec4<f32>((vec3<f32>(g) + cell_centre) * v.spacing + offset, 0.0);
     }
     let job = workgroupUniformLoad(&ddgi_job);
     let ages = workgroupUniformLoad(&ddgi_job_groups);
@@ -566,7 +650,11 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
         let row = v.meta_row + RAA_DDGI_META_ROWS * slot;
         if geometry {
             let g = ddgi_slot_coord(v, slot);
-            var offset = select(bitcast<vec3<f32>>(ddgi_probes[row + 1u].xyz), vec3<f32>(0.0), fresh);
+            // (A fresh surface probe already stored its start offset.)
+            var offset = select(bitcast<vec3<f32>>(ddgi_probes[row + 1u].xyz), vec3<f32>(0.0),
+                fresh && !is_extra);
+            var far_distance = 0.0;
+            var far_dir = vec3<f32>(0.0);
             var backfaces = 0u;
             var back_distance = DDGI_MISS;
             var back_dir = vec3<f32>(0.0);
@@ -581,6 +669,7 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
                     if -5.0 * d < back_distance { back_distance = -5.0 * d; back_dir = dir; }
                 } else if d < DDGI_MISS {
                     if d < front_distance { front_distance = d; front_dir = dir; }
+                    if d > far_distance { far_distance = d; far_dir = dir; }
                     let reach = abs(dir * d);
                     if all(reach <= vec3<f32>(v.spacing)) { near_surface = true; }
                 }
@@ -591,12 +680,27 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
             if (flags & DDGI_RELOCATE) != 0u {
                 let min_front = ddgi_params.tuning.w * spacing_scale;
                 var candidate = offset;
+                let rtxgi = ddgi_params.place.y > 0.5;
                 if inside {
                     candidate = offset + back_dir * (back_distance + 0.5 * min_front);
                 } else if front_distance < min_front {
-                    candidate = offset - front_dir * (min_front - front_distance);
+                    if !rtxgi {
+                        candidate = offset - front_dir * (min_front - front_distance);
+                    } else if dot(front_dir, far_dir) <= 0.0 {
+                        // RTXGI: toward the farthest front face, unless that way lies the closest.
+                        candidate = offset + far_dir * min(far_distance, min_front);
+                    }
+                } else if rtxgi {
+                    // RTXGI: nothing close, back toward the grid position.
+                    let margin = front_distance - min_front;
+                    let back = length(offset);
+                    if margin >= back {
+                        candidate = vec3<f32>(0.0);
+                    } else if back > 0.0 {
+                        candidate = offset - offset / back * margin;
+                    }
                 }
-                if all(abs(candidate) <= vec3<f32>(0.45 * v.spacing)) { offset = candidate; }
+                if all(abs(candidate) <= vec3<f32>(ddgi_params.place.x * v.spacing)) { offset = candidate; }
             }
             var state = RAA_DDGI_VALID;
             if (flags & DDGI_CLASSIFY) != 0u {
@@ -606,7 +710,9 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
             let record = ddgi_probes[row];
             let turn = select(((record.w >> 8u) + 1u) & 0xffu, 1u, fresh);
             ddgi_probes[row] = vec4<u32>(bitcast<vec3<u32>>(g), state | (turn << 8u));
-            ddgi_probes[row + 1u] = vec4<u32>(bitcast<vec3<u32>>(offset), 0u);
+            // Diagnostics of this update: back-face fraction, nearest front face (m).
+            ddgi_probes[row + 1u] = vec4<u32>(bitcast<vec3<u32>>(offset),
+                pack2x16float(vec2<f32>(backface_fraction, min(front_distance, 60000.0))));
         }
         if (groups & DDGI_OTHER) != 0u {
             var lo = vec4<u32>(atomicLoad(&ddgi_light_bits[0]), atomicLoad(&ddgi_light_bits[1]),
@@ -812,6 +918,13 @@ fn ddgi_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let to_eye = frame.camera_pos.xyz - p;
     let distance = length(to_eye);
     var sample = raa_ddgi_sample(p, n, to_eye / max(distance, 1e-6));
+    if ((raa_ddgi_word(4u).w >> 8u) & 0xffu) == 5u {
+        // Debug "quality": red = a surface probe would be requested here, green = share of the
+        // surface probes, blue = quality of the cascades' estimate.
+        let need = bitcast<f32>(raa_ddgi_word(7u).w);
+        sample = vec4<f32>(f32(raa_ddgi_quality.x < need && raa_ddgi_quality.y < 0.5),
+            raa_ddgi_quality.y, raa_ddgi_quality.x, 1.0);
+    }
     if ((raa_ddgi_word(4u).w >> 8u) & 0xffu) == 4u {
         // Debug "probes": red = cascade 0 weight, green = coarser cascades, blue = hole filled by
         // inactive probes; black = no usable probe (forward then takes the flat ambient term).

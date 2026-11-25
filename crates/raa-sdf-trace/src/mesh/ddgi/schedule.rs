@@ -65,7 +65,18 @@ pub struct Visibility {
     pub valid: u32,
     /// Of those, probes past the progressive phase (`converge_age` updates).
     pub converged: u32,
+    /// Scheduled probes outside the frustum (periphery and behind the camera), and those of
+    /// them that are converged.
+    pub hidden: u32,
+    pub hidden_converged: u32,
 }
+
+/// Classes of the refresh-period histogram: cascade 0 in the frustum, cascade 0 outside it,
+/// coarser cascades, surface probes.
+pub const PERIOD_CLASSES: usize = 4;
+/// Buckets of the refresh-period histogram: bucket b counts updates that came 2^b..2^(b+1)-1
+/// frames after the previous update of the same probe (the last bucket is open).
+pub const PERIOD_BUCKETS: usize = 12;
 
 #[derive(Default)]
 pub(super) struct Schedule {
@@ -85,6 +96,12 @@ pub(super) struct Schedule {
     last: Vec<u32>,
     frame: u32,
     keys: Vec<(u64, u32)>,
+    /// Surface probes: slots `extra_first..`, the world position of each assigned one.
+    extra_first: u32,
+    extras: Vec<Option<[f32; 3]>>,
+    extra_spacing: f32,
+    /// Frames between two updates of the same probe, per class (see `PERIOD_CLASSES`).
+    pub(super) periods: [[u64; PERIOD_BUCKETS]; PERIOD_CLASSES],
 }
 
 const CLASS_SHIFT: u32 = 40;
@@ -96,9 +113,13 @@ pub(super) const BAND_WIDTH: f32 = 1.5;
 const FULL_WEIGHT_CELLS: f32 = BAND_START + BAND_WIDTH + 0.5;
 
 impl Schedule {
-    pub(super) fn reset(&mut self, cascades: &[CascadeLayout]) {
-        let total = cascades.iter().map(|c| c.probes).sum::<u32>() as usize;
+    pub(super) fn reset(&mut self, cascades: &[CascadeLayout], extras: u32, extra_spacing: f32) {
+        let grid = cascades.iter().map(|c| c.probes).sum::<u32>();
+        let total = (grid + extras) as usize;
         *self = Self {
+            extra_first: grid,
+            extras: vec![None; extras as usize],
+            extra_spacing,
             cascades: cascades.to_vec(),
             closed: vec![0; cascades.len()],
             age: vec![0; total],
@@ -116,6 +137,21 @@ impl Schedule {
         let n = c.counts.map(|n| n as i32);
         let s: [u32; 3] = std::array::from_fn(|i| g[i].rem_euclid(n[i]) as u32);
         c.offset + s[0] + c.counts[0] * (s[1] + c.counts[1] * s[2])
+    }
+
+    /// Gives surface-probe slot `slot` a probe at `position` (fresh: every age restarts), or
+    /// frees it.
+    pub(super) fn set_extra(&mut self, slot: u32, position: Option<[f32; 3]>) {
+        let Some(entry) = self.extras.get_mut((slot - self.extra_first) as usize) else {
+            return;
+        };
+        *entry = position;
+        let slot = slot as usize;
+        self.age[slot] = 0;
+        self.age_sun[slot] = 0;
+        self.age_other[slot] = 0;
+        self.mask_reset[slot] = true;
+        self.last[slot] = self.frame;
     }
 
     /// Calls `visit(cascade, slot, g)` for every probe of every cascade.
@@ -239,6 +275,11 @@ impl Schedule {
             let s = self.cascades[k].spacing;
             visit(slot, g.map(|c| c as f32 * s), s);
         });
+        for (i, p) in self.extras.iter().enumerate() {
+            if let Some(p) = p {
+                visit(self.extra_first + i as u32, *p, self.extra_spacing);
+            }
+        }
     }
 
     fn effective_age(&self, slot: usize) -> u16 {
@@ -276,13 +317,9 @@ impl Schedule {
         let mut seen = Visibility::default();
         let mut keys = std::mem::take(&mut self.keys);
         keys.clear();
-        self.each(&bases, |k, slot, g| {
-            if !self.needed(&bases, k, g) {
-                return;
-            }
-            let spacing = self.cascades[k].spacing;
+        let mut hidden = Vec::new();
+        let mut key_of = |slot: u32, p: [f32; 3], spacing: f32| {
             let reach = 1.75 * spacing;
-            let p = g.map(|c| c as f32 * spacing);
             // 0 visible, 1 periphery, 2 elsewhere
             let zone = planes.map_or(0u64, |planes| {
                 let worst = planes
@@ -300,6 +337,8 @@ impl Schedule {
             let age = self.effective_age(slot as usize);
             if zone == 0 {
                 seen.visible += 1;
+            } else {
+                hidden.push(slot);
             }
             let d = (0..3).map(|i| (p[i] - eye[i]).powi(2)).sum::<f32>().sqrt();
             let near = ((d * 100.0) as u64).min((1 << 20) - 1);
@@ -312,7 +351,19 @@ impl Schedule {
                 (zone * 2 + 1, (u64::from(age) << 20) | near)
             };
             keys.push(((class << CLASS_SHIFT) | metric, slot));
+        };
+        self.each(&bases, |k, slot, g| {
+            if !self.needed(&bases, k, g) {
+                return;
+            }
+            let spacing = self.cascades[k].spacing;
+            key_of(slot, g.map(|c| c as f32 * spacing), spacing);
         });
+        for (i, p) in self.extras.iter().enumerate() {
+            if let Some(p) = p {
+                key_of(self.extra_first + i as u32, *p, self.extra_spacing);
+            }
+        }
         self.bases = Some(bases);
         self.keys = keys;
         let urgent = self.keys.iter().any(|&(key, _)| key >> CLASS_SHIFT <= 1);
@@ -321,7 +372,7 @@ impl Schedule {
             self.keys.select_nth_unstable(take - 1);
         }
         self.keys[..take].sort_unstable();
-        for &(_, slot) in &self.keys[..take] {
+        for &(key, slot) in &self.keys[..take] {
             let i = slot as usize;
             let (age, sun, other) = (self.age[i], self.age_sun[i], self.age_other[i]);
             let limit = converge_age.min(255);
@@ -351,6 +402,19 @@ impl Schedule {
                 self.age_other[i] = other.saturating_add(1);
                 refreshed[2] += 1;
             }
+            // Refresh period of this probe, by class.
+            if age > 0 {
+                let class = if slot >= self.extra_first {
+                    3
+                } else if slot >= self.cascades[0].probes {
+                    2
+                } else {
+                    usize::from(!matches!(key >> CLASS_SHIFT, 0 | 1 | 6))
+                };
+                let frames = self.frame.wrapping_sub(self.last[i]).max(1);
+                let bucket = (31 - frames.leading_zeros() as usize).min(PERIOD_BUCKETS - 1);
+                self.periods[class][bucket] += 1;
+            }
             self.last[i] = self.frame;
         }
         // Visibility after this frame's updates.
@@ -361,6 +425,11 @@ impl Schedule {
                 seen.converged += u32::from(self.effective_age(slot as usize) >= converge_age);
             }
         }
+        seen.hidden = hidden.len() as u32;
+        seen.hidden_converged = hidden
+            .iter()
+            .filter(|&&slot| self.effective_age(slot as usize) >= converge_age)
+            .count() as u32;
         (seen, urgent, refreshed)
     }
 }
@@ -413,7 +482,7 @@ mod tests {
     #[test]
     fn scroll_resets_only_the_planes_that_left() {
         let mut s = Schedule::default();
-        s.reset(&one([4, 2, 4]));
+        s.reset(&one([4, 2, 4]), 0, 1.0);
         assert_eq!(s.scroll(&[[0, 0, 0]], &[0]), 0);
         let mut jobs = Vec::new();
         s.plan(None, 4, 32, 32, &mut jobs);
@@ -444,7 +513,7 @@ mod tests {
     #[test]
     fn an_invalidated_group_is_refreshed_alone_and_first() {
         let mut s = Schedule::default();
-        s.reset(&one([4, 1, 1]));
+        s.reset(&one([4, 1, 1]), 0, 1.0);
         s.scroll(&[[0, 0, 0]], &[0]);
         let mut jobs = Vec::new();
         // Converge every group of every probe (converge age 3).
@@ -498,7 +567,7 @@ mod tests {
     fn visible_probes_go_first_nearest_first_then_burst_ends() {
         let view = looking_down_x();
         let mut s = Schedule::default();
-        s.reset(&one([8, 1, 1]));
+        s.reset(&one([8, 1, 1]), 0, 1.0);
         // Probes at x = -4..3 on the camera axis: x > 0 are in front (x = 0 sits on the eye).
         s.scroll(&[[-4, 0, 0]], &[0]);
         let mut jobs = Vec::new();
@@ -558,7 +627,7 @@ mod cascade_tests {
             },
         ];
         let mut s = Schedule::default();
-        s.reset(&cascades);
+        s.reset(&cascades, 0, 1.0);
         // y and z closed (the scene ends there), x open on both sides.
         let closed = 0b111100;
         s.scroll(&[[0, 0, 0], [0, 0, 0]], &[closed, closed]);
@@ -584,7 +653,7 @@ mod cascade_tests {
                 probes: 24,
             },
         ];
-        s.reset(&cascades);
+        s.reset(&cascades, 0, 1.0);
         s.scroll(&[[0, 0, 0], [0, 0, 0]], &[closed, closed]);
         s.plan(None, 4, 128, 128, &mut jobs);
         let coarse: Vec<i32> = jobs
