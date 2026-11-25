@@ -347,10 +347,14 @@ impl Engine {
     ) -> Result<(), JsValue> {
         self.with_state(|_, st| {
             let material = material.map(|m| st.material(m)).transpose()?;
+            let single_material = st.single_material;
             let group = st.instance_group_mut(instance)?;
             group.check_live()?;
+            if group.object_material == material {
+                return Ok(());
+            }
             group.object_material = material;
-            if st.single_material {
+            if group.material.is_none() && group.single.unwrap_or(single_material) {
                 st.rebuild_instance_group(instance)?;
             }
             Ok(())
