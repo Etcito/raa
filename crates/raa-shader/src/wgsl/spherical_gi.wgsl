@@ -13,10 +13,12 @@
 // Entry rows: key, slot, first publication frame, light hash; probe xyz + spacing;
 // reserved xyz + published.
 //
-// Light groups: probes store the sun and sky groups at UNIT intensity (the sun group
-// divided by the sun radiance at capture, the sky group captured from the sky texture
-// divided by its DC luminance, or from a unit ambient); the lookup multiplies them by
-// header rows 68 and 69, so a sun or sky intensity / tint change recaptures nothing.
+// Light groups: probes store the sun and sky groups at UNIT intensity (the sun group as
+// the response to a white unit sun, the sky group as the environment divided by its norm,
+// the mean luminance of 64 directions of its last mip, or a unit ambient); the lookup
+// multiplies them by header rows 68 and 69, written on the GPU every frame
+// (spherical_scales: sun radiance; sky diffuse x norm, or the ambient colour), so a sun
+// or sky intensity / tint change recaptures nothing (handoff/light-change.md interface).
 // The other group (local lights, emission) is stored absolute and invalidated per light.
 const RAA_SPHERICAL_TABLE: u32 = 70u;
 const RAA_SPHERICAL_SUN_SCALE_ROW: u32 = 68u;

@@ -49,17 +49,66 @@ fn spherical_unpack(words: vec2<u32>) -> vec3<f32> {
     return vec3<f32>(unpack2x16float(words.x), unpack2x16float(words.y).x);
 }
 
-// Unit-intensity sky group: the environment divided by its DC luminance (options[2].x
-// holds the reciprocal), or a unit ambient. The lookup scales it back (header row 69).
-fn spherical_sky(direction: vec3<f32>) -> vec3<f32> {
-    if options[0].z == 0u { return vec3<f32>(1.0); }
-    return bitcast<f32>(options[2].x) * textureSampleLevel(sky, raa_linear_clamp, direction, 0.0).rgb;
+// Sky norm: mean luminance of 64 fixed Fibonacci directions of the environment cube at
+// its last mip, computed from the very cube the capture samples in the same frame (the
+// published SH lags it by the IBL readback). Every thread of a 64-thread workgroup
+// calls it; 0 without an environment.
+var<workgroup> spherical_norm_sum: array<f32, 64>;
+fn spherical_sky_norm(px: u32) -> f32 {
+    var l = 0.0;
+    if options[0].z != 0u {
+        let z = 1.0 - (2.0 * f32(px) + 1.0) / 64.0;
+        let r = sqrt(max(0.0, 1.0 - z * z));
+        let phi = 2.3999632 * f32(px);
+        let level = f32(textureNumLevels(sky) - 1u);
+        let c = textureSampleLevel(sky, raa_linear_clamp, vec3<f32>(r * cos(phi), z, r * sin(phi)), level).rgb;
+        l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    }
+    spherical_norm_sum[px] = l;
+    workgroupBarrier();
+    for (var stride = 32u; stride > 0u; stride >>= 1u) {
+        if px < stride { spherical_norm_sum[px] += spherical_norm_sum[px + stride]; }
+        workgroupBarrier();
+    }
+    let norm = spherical_norm_sum[0] / 64.0;
+    workgroupBarrier();
+    return norm;
 }
 
-// Unit-intensity sun group: the sun's contribution divided by its radiance.
-fn spherical_unit_sun(rgb: vec3<f32>) -> vec3<f32> {
-    let c = frame.sun_color.rgb;
-    return select(vec3<f32>(0.0), rgb / max(c, vec3<f32>(1e-30)), c > vec3<f32>(0.0));
+// Unit-intensity sky group: the environment divided by its norm, or a unit ambient.
+// The lookup scales it back (header row 69, written by spherical_scales).
+fn spherical_sky(direction: vec3<f32>, inv_norm: f32) -> vec3<f32> {
+    if options[0].z == 0u { return vec3<f32>(1.0); }
+    return inv_norm * textureSampleLevel(sky, raa_linear_clamp, direction, 0.0).rgb;
+}
+
+// Unit-intensity sun group: the response to a white unit sun (mesh_sun_at_hit without
+// frame.sun_color and without its colour gate), scaled at lookup by header row 68.
+fn spherical_unit_sun(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
+                      mat: Material) -> vec3<f32> {
+    let origin = p + ng * (2.0 * EPS);
+    let sun = -frame.sun_dir.xyz;
+    let nl = saturate(dot(n, sun));
+    if nl > 0.0 && dot(ng, sun) > 0.0
+        && closest(Ray(origin, sun), frame.clip.y, true).object == MISS {
+        return direct_brdf(mat, n, v, sun, true) * nl;
+    }
+    return vec3<f32>(0.0);
+}
+
+const SPHERICAL_SUN_SCALE_ROW: u32 = 68u;
+const SPHERICAL_SKY_SCALE_ROW: u32 = 69u;
+// Group scales for the lookup, every frame before the resolve: row 68 = sun radiance,
+// row 69 = sky diffuse x sky norm (or the ambient colour without an environment).
+@compute @workgroup_size(64, 1, 1)
+fn spherical_scales(@builtin(local_invocation_index) px: u32) {
+    let norm = spherical_sky_norm(px);
+    if px == 0u {
+        var sky_scale = frame.ambient.rgb;
+        if options[0].z != 0u { sky_scale = vec3<f32>(bitcast<f32>(options[2].x) * norm); }
+        spherical_lookup[SPHERICAL_SUN_SCALE_ROW] = bitcast<vec4<u32>>(vec4<f32>(frame.sun_color.rgb, 0.0));
+        spherical_lookup[SPHERICAL_SKY_SCALE_ROW] = bitcast<vec4<u32>>(vec4<f32>(sky_scale, 0.0));
+    }
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -69,7 +118,8 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
     if px < 3u {
         atomicStore(&spherical_hit_min[px], 0xffffffffu);
     }
-    workgroupBarrier();
+    let sky_norm = spherical_sky_norm(px);
+    let inv_norm = select(0.0, 1.0 / sky_norm, sky_norm > 0.0);
     let uv = (vec2<f32>(id.xy) + 0.5) * 0.25 - 1.0;
     let direction = normalize(raa_spherical_face_direction(work.ids.y, uv));
     let origin = work.position.xyz + work.normal.xyz * (2.0 * EPS);
@@ -81,7 +131,7 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
     var sun_rgb = vec3<f32>(0.0);
     var other_rgb = vec3<f32>(0.0);
     if hit.object == MISS {
-        sky_rgb = spherical_sky(direction);
+        sky_rgb = spherical_sky(direction, inv_norm);
     } else {
         let tri = mesh_triangle(hit.object);
         let material = hit_material(tri, hit.bary);
@@ -111,7 +161,7 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
             other_rgb += material.base_roughness.rgb;
         } else if (material.flags.x & 1u) == 0u {
             var seed = (work.ids.x * 747796405u + work.ids.y * 277803737u + px) ^ 0x85ebca6bu;
-            sun_rgb = spherical_unit_sun(mesh_sun_at_hit(p, ng, n, -direction, material, true));
+            sun_rgb = spherical_unit_sun(p, ng, n, -direction, material);
             let shadow_origin = p + ng * (2.0 * EPS);
             let light_count = min(256u, frame.light_info.x);
             let light_samples = options[3].z;
@@ -156,7 +206,7 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
                 let phi = 2.0 * PI * random(&seed);
                 let bounce = basis(n) * vec3<f32>(sqrt(u) * cos(phi), sqrt(u) * sin(phi), sqrt(1.0 - u));
                 if dot(ng, bounce) > 0.0 && closest(Ray(p + ng * (2.0 * EPS), bounce), limit, true).object == MISS {
-                    sky_sum += spherical_sky(bounce);
+                    sky_sum += spherical_sky(bounce, inv_norm);
                 }
             }
             if sky_samples > 0u {

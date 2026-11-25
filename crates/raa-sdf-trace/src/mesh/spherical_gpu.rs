@@ -26,9 +26,11 @@ const TEXEL_BYTES: usize = 48;
 const CELL_BYTES: usize = TEXELS_PER_FACE * FACE_COUNT * TEXEL_BYTES;
 const WORK_BYTES: usize = 48;
 const LOOKUP_HEADER: usize = 4 + 64 + 2;
-/// Header rows of the sun and sky group scales (unit-intensity groups, see light_groups).
+/// Header rows of the sun and sky group scales, written every frame by `spherical_scales`.
 const SUN_SCALE_ROW: usize = 68;
 const SKY_SCALE_ROW: usize = 69;
+// The scale rows sit after the 64 shell rows, inside the header.
+const _: () = assert!(SUN_SCALE_ROW >= 4 + 64 && SKY_SCALE_ROW < LOOKUP_HEADER);
 const LOOKUP_ENTRY: usize = 3;
 const CHANNELS: usize = 3;
 /// Legacy projected rows, then 24 parallax patches of four rows, 96 depth-moment
@@ -322,6 +324,7 @@ impl SphericalGiFeature {
             mesh,
             gpu: None,
             staged: Staged::default(),
+            sky_shape: SkyShape::default(),
         }))?;
         pipeline.set_enabled(SPHERICAL_GI_NAME, false)?;
         Ok(state)
@@ -336,8 +339,6 @@ struct Staged {
     grid_revision: u64,
     frame: u64,
     light_revision: u64,
-    /// Capture-side reciprocal of the environment's DC luminance (unit sky group).
-    sky_unit: f32,
     primary: bool,
     recorded: bool,
 }
@@ -347,6 +348,7 @@ struct SphericalPass {
     mesh: MeshTraceHandle,
     gpu: Option<SphericalGpu>,
     staged: Staged,
+    sky_shape: SkyShape,
 }
 
 impl FeaturePass for SphericalPass {
@@ -402,12 +404,11 @@ impl FeaturePass for SphericalPass {
             return Ok(());
         };
         let mut mesh = self.mesh.borrow_mut();
-        let groups = light_groups(
+        let light_revision = light_revision(
+            &mut self.sky_shape,
             ctx.lighting.environment_diffuse_sh(),
             view.light,
-            mesh.sky_diffuse,
         );
-        let light_revision = groups.revision;
         let capacity = settings.scheduler.pool_slots();
         if self.gpu.as_ref().is_none_or(|gpu| gpu.capacity != capacity) {
             self.gpu = Some(SphericalGpu::new(ctx.gpu, capacity, grid_revision));
@@ -465,7 +466,7 @@ impl FeaturePass for SphericalPass {
             gpu.ready_at[slot as usize] = Some((ctx.frame as u32).max(1));
         }
         gpu.set_screen(ctx.gpu, ctx.size);
-        gpu.update_lookup(ctx.gpu, scheduler, settings, ctx.frame as u32, groups);
+        gpu.update_lookup(ctx.gpu, scheduler, settings, ctx.frame as u32);
         ctx.lighting
             .set_spherical_gi(Some((gpu.lookup.clone(), gpu.faces.clone())));
         let burst = scheduler.stats().visible_missing();
@@ -492,7 +493,6 @@ impl FeaturePass for SphericalPass {
             grid_revision,
             frame: ctx.frame,
             light_revision,
-            sky_unit: groups.sky_unit,
             primary: true,
             recorded: false,
         };
@@ -528,12 +528,14 @@ impl FeaturePass for SphericalPass {
                 &geometry,
                 &texture_atlas,
                 mesh.geometry.count(),
-                self.staged.sky_unit,
+                mesh.sky_diffuse,
                 projection,
                 [state.settings.sky_samples, state.settings.light_samples],
             );
         }
         if let Some(frame) = self.mesh.borrow().frame.clone() {
+            let sky_diffuse = self.mesh.borrow().sky_diffuse;
+            gpu.record_scales(ctx, &frame, sky_diffuse);
             gpu.record_resolve(ctx, &frame);
         }
         self.staged.recorded = true;
@@ -621,59 +623,62 @@ impl FeaturePass for SphericalPass {
     }
 }
 
-/// Light groups of the probes. The sun and sky groups are captured at unit intensity
-/// and scaled at lookup, so intensity and tint changes of the sun, the sky (sky diffuse,
-/// a uniformly scaled environment) or the ambient recapture nothing. Only what changes
-/// the SHAPE of a group is in the revision: sun direction, sun or sky switched on/off,
-/// the environment's normalised SH, and the trace distance. The other group (local
-/// lights, emission) is absolute and invalidated per light by the scheduler.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct LightGroups {
-    sun: [f32; 3],
-    sky: [f32; 3],
-    /// Reciprocal of the environment's DC luminance (capture side), 1 for the ambient.
-    sky_unit: f32,
-    revision: u64,
+/// Light groups of the probes: the sun group is captured for a white unit sun and the
+/// sky group divided by the sky norm (GPU, `spherical_sky_norm`), both scaled back at
+/// lookup by `spherical_scales` every frame, so intensity and tint changes of the sun,
+/// the sky (sky diffuse, the physical sky's magnitude, which follows the sun intensity)
+/// or the ambient recapture nothing. The revision only holds what changes a group's
+/// SHAPE: sun direction, environment present, sky dark/lit, the scale-free SH shape
+/// (coefficients / luma(DC), changed by more than 0.02) and the trace distance. The
+/// other group (local lights, emission) is absolute and invalidated per light.
+#[derive(Clone, Debug, Default)]
+struct SkyShape {
+    shape: Option<[[f32; 3]; 9]>,
+    epoch: u64,
 }
 
-fn light_groups(
+impl SkyShape {
+    const TOLERANCE: f32 = 0.02;
+
+    fn update(&mut self, sh: &[[f32; 4]; 9]) -> bool {
+        let [r, g, b, _] = sh[0];
+        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if !(luma.is_finite() && luma > 0.0) {
+            return false;
+        }
+        let shape = sh.map(|[r, g, b, _]| [r / luma, g / luma, b / luma]);
+        let moved = self.shape.is_none_or(|old| {
+            old.iter()
+                .flatten()
+                .zip(shape.iter().flatten())
+                .any(|(a, b)| (a - b).abs() > Self::TOLERANCE)
+        });
+        if moved {
+            self.shape = Some(shape);
+            self.epoch += 1;
+        }
+        true
+    }
+}
+
+fn light_revision(
+    sky: &mut SkyShape,
     environment_sh: Option<&[[f32; 4]; 9]>,
     view: [f32; 10],
-    sky_diffuse: f32,
-) -> LightGroups {
+) -> u64 {
     let mut hash = DefaultHasher::new();
-    let sun = [view[3], view[4], view[5]];
     [view[0], view[1], view[2], view[9]]
         .map(f32::to_bits)
         .hash(&mut hash);
-    sun.map(|c| c > 0.0).hash(&mut hash);
-    let (sky, sky_unit) = match environment_sh {
+    match environment_sh {
         Some(sh) => {
-            let [r, g, b, _] = sh[0];
-            let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            let on = luminance.is_finite() && luminance > 0.0;
-            on.hash(&mut hash);
-            if on {
-                // Normalised shape, quantised so float noise of a rescaled SH does not
-                // read as a new sky.
-                for coefficient in sh {
-                    coefficient
-                        .map(|c| (c / luminance * 4096.0).round() as i32)
-                        .hash(&mut hash);
-                }
-            }
-            let scale = sky_diffuse * luminance.max(0.0);
-            ([scale; 3], if on { luminance.recip() } else { 0.0 })
+            let lit = sky.update(sh);
+            (true, lit, lit.then_some(sky.epoch)).hash(&mut hash);
         }
-        None => ([view[6], view[7], view[8]], 1.0),
-    };
-    LightGroups {
-        sun,
-        sky,
-        sky_unit,
-        // Fits exactly through the public JS number counters; the scheduler still gets 53 bits.
-        revision: hash.finish() & ((1 << 53) - 1),
+        None => false.hash(&mut hash),
     }
+    // Fits exactly through the public JS number counters; the scheduler still gets 53 bits.
+    hash.finish() & ((1 << 53) - 1)
 }
 
 fn hash_key(mut key: u32) -> usize {
@@ -710,6 +715,7 @@ struct SphericalGpu {
     project: wgpu::ComputePipeline,
     bins: wgpu::ComputePipeline,
     lights: wgpu::ComputePipeline,
+    scales: wgpu::ComputePipeline,
     /// Half-resolution screen resolve of the lookup (rows after the slots, forward reads them).
     resolve: wgpu::ComputePipeline,
     /// Resolve size this frame, when it fits the storage binding.
@@ -781,6 +787,7 @@ impl SphericalGpu {
             project: pipeline("spherical_project"),
             bins: pipeline("spherical_bins"),
             lights: pipeline("spherical_lights"),
+            scales: pipeline("spherical_scales"),
             resolve,
             screen: None,
             resolve_rows: 0,
@@ -866,6 +873,42 @@ impl SphericalGpu {
         self.screen = Some((width, height));
     }
 
+    /// Header rows 68/69 (sun and sky group scales) for this frame's lookup. Only the
+    /// options words it reads are written (environment flag, sky diffuse), with the same
+    /// values a capture of this frame writes.
+    fn record_scales(&self, ctx: &mut RecordCtx<'_>, frame: &Buffer, sky_diffuse: f32) {
+        let env = ctx.lighting.environment_diffuse_sh().is_some();
+        let queue = ctx.gpu.queue();
+        queue.write_buffer(&self.options, 8, &u32::from(env).to_le_bytes());
+        queue.write_buffer(&self.options, 32, &sky_diffuse.to_bits().to_le_bytes());
+        let group = ctx
+            .gpu
+            .device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gi.spherical.scales"),
+                layout: &self.scales.get_bind_group_layout(0),
+                entries: &[
+                    buffer_entry(0, frame),
+                    buffer_entry(1, &self.options),
+                    image_entry(14, ctx.lighting.env_specular_view()),
+                    wgpu::BindGroupEntry {
+                        binding: 15,
+                        resource: wgpu::BindingResource::Sampler(ctx.lighting.linear_clamp()),
+                    },
+                    buffer_entry(23, &self.lookup),
+                ],
+            });
+        let mut pass = ctx
+            .encoder
+            .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("gi.spherical.scales"),
+                ..Default::default()
+            });
+        pass.set_pipeline(&self.scales);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+
     fn record_resolve(&self, ctx: &mut RecordCtx<'_>, frame: &Buffer) {
         let Some((width, height)) = self.screen else {
             return;
@@ -915,7 +958,6 @@ impl SphericalGpu {
         scheduler: &SphericalScheduler,
         settings: SphericalGiSettings,
         frame: u32,
-        groups: LightGroups,
     ) {
         let resolve_first_row = self.resolve_first_row() as u32;
         let rows = &mut self.lookup_rows;
@@ -939,10 +981,6 @@ impl SphericalGpu {
             settings.channels,
         ];
         rows[3][1] = settings.parallax_range.to_bits();
-        let [r, g, b] = groups.sun;
-        rows[SUN_SCALE_ROW] = [r, g, b, 0.0].map(f32::to_bits);
-        let [r, g, b] = groups.sky;
-        rows[SKY_SCALE_ROW] = [r, g, b, 0.0].map(f32::to_bits);
         if let Some((width, height)) = self.screen {
             rows[3][2] = resolve_first_row;
             rows[3][3] = width | (height << 16);
@@ -1015,7 +1053,7 @@ impl SphericalGpu {
         geometry: &[Buffer; 3],
         texture_atlas: &wgpu::TextureView,
         triangle_count: u32,
-        sky_unit: f32,
+        sky_diffuse: f32,
         projection: u32,
         samples: [u32; 2],
     ) {
@@ -1071,7 +1109,7 @@ impl SphericalGpu {
             .radial_shell(scheduler.grid().shell_count() - 1)
             .expect("last shell")
             .outer;
-        write_words(&mut options, [sky_unit.to_bits(), end.to_bits(), 0, 0]);
+        write_words(&mut options, [sky_diffuse.to_bits(), end.to_bits(), 0, 0]);
         // The shared local-light integrator uses its one-tap area estimator for this capture;
         // y, z: sky and local-light samples per hit texel.
         write_words(&mut options, [1, samples[0], samples[1], 0]);
@@ -1760,47 +1798,50 @@ mod tests {
         sh[0] = [0.4, 0.5, 0.7, 0.0];
         sh[1] = [0.1, 0.05, -0.02, 0.0];
         let view = [0.3, -0.9, 0.2, 3.0, 2.8, 2.5, 0.1, 0.1, 0.12, 40.0];
-        let base = light_groups(Some(&sh), view, 1.0);
-        // Sun intensity and tint, ambient, sky diffuse and a uniformly scaled sky.
+        let mut sky = SkyShape::default();
+        let base = light_revision(&mut sky, Some(&sh), view);
+        // Sun intensity and tint, ambient, and a uniformly scaled (brighter) sky.
         let mut brighter = view;
         brighter[3..6].copy_from_slice(&[9.0, 7.0, 5.0]);
         brighter[6..9].copy_from_slice(&[0.3, 0.2, 0.1]);
         let scaled = sh.map(|c| c.map(|v| 2.5 * v));
-        let changed = light_groups(Some(&scaled), brighter, 0.4);
-        assert_eq!(changed.revision, base.revision);
-        assert_eq!(changed.sun, [9.0, 7.0, 5.0]);
-        // A probe captured before the change (texture x base unit) and shaded with the new
-        // scale matches the new sky (2.5 x texture) times the new sky diffuse (0.4).
-        assert!((changed.sky[0] * base.sky_unit - 2.5 * 0.4).abs() < 1e-5);
-        // Shape changes: sun direction, sun off, sky shape.
+        assert_eq!(light_revision(&mut sky, Some(&scaled), brighter), base);
+        // A sky shape drift below the tolerance keeps it too.
+        let mut drift = sh;
+        drift[1][0] = 0.105;
+        assert_eq!(light_revision(&mut sky, Some(&drift), view), base);
+        // Shape changes: sun direction, sky shape, sky dark, environment gone.
         let mut turned = view;
         turned[0] = 0.31;
-        assert_ne!(light_groups(Some(&sh), turned, 1.0).revision, base.revision);
-        let mut off = view;
-        off[3..6].copy_from_slice(&[0.0; 3]);
-        assert_ne!(light_groups(Some(&sh), off, 1.0).revision, base.revision);
+        assert_ne!(light_revision(&mut sky, Some(&sh), turned), base);
         let mut reshaped = sh;
         reshaped[1][0] = 0.2;
-        assert_ne!(
-            light_groups(Some(&reshaped), view, 1.0).revision,
-            base.revision
+        let reshaped_revision = light_revision(&mut sky, Some(&reshaped), view);
+        assert_ne!(reshaped_revision, base);
+        assert_eq!(
+            light_revision(&mut sky, Some(&reshaped), brighter),
+            reshaped_revision
         );
-        // Without an environment the ambient is the sky group scale.
-        let ambient = light_groups(None, brighter, 1.0);
-        assert_eq!((ambient.sky, ambient.sky_unit), ([0.3, 0.2, 0.1], 1.0));
-        assert_eq!(ambient.revision, light_groups(None, view, 1.0).revision);
+        assert_ne!(
+            light_revision(&mut sky, Some(&[[0.0; 4]; 9]), view),
+            reshaped_revision
+        );
+        let ambient = light_revision(&mut sky, None, view);
+        assert_eq!(light_revision(&mut sky, None, brighter), ambient);
     }
 
     #[test]
     fn slot_rows_match_the_shared_lookup_layout() {
         assert_eq!(SLOT_ROWS, 167);
         assert_eq!(LOOKUP_HEADER, 70);
+        let module = spherical_module();
+        assert!(module.contains(&format!("SPHERICAL_SUN_SCALE_ROW: u32 = {SUN_SCALE_ROW}u;")));
+        assert!(module.contains(&format!("SPHERICAL_SKY_SCALE_ROW: u32 = {SKY_SCALE_ROW}u;")));
         assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_TABLE: u32 = 70u;"));
         assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_SUN_SCALE_ROW: u32 = 68u;"));
         assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_SKY_SCALE_ROW: u32 = 69u;"));
         assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_SLOT_ROWS: u32 = 167u;"));
         assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_LIGHT_ROW: u32 = 166u;"));
-        let module = spherical_module();
         assert!(module.contains("SPHERICAL_INFO_ROW: u32 = 165u;"));
         assert!(module.contains("SPHERICAL_LIGHT_ROW: u32 = 166u;"));
     }
