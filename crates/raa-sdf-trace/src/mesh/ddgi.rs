@@ -69,8 +69,6 @@ pub struct DdgiSettings {
     pub budget_ms: f32,
     /// GPU time per frame while a visible probe is invalid or still converging (ms).
     pub burst_ms: f32,
-    /// Interpolate the volume once per prepass pixel instead of in the forward shader.
-    pub screen_resolve: bool,
     pub intensity: f32,
     /// Surface biases as fractions of the probe spacing.
     pub normal_bias: f32,
@@ -94,7 +92,6 @@ impl Default for DdgiSettings {
             update_fraction: 0.25,
             budget_ms: 0.6,
             burst_ms: 2.0,
-            screen_resolve: true,
             intensity: 1.0,
             normal_bias: 0.1,
             view_bias: 0.3,
@@ -155,6 +152,8 @@ pub struct DdgiStats {
     pub update_ms: Option<f64>,
     /// Steady state: frames between update batches (1 while bursting).
     pub interval: u32,
+    /// Whether the screen resolve ran (it does unless its rows exceed the storage binding limit;
+    /// forward then gets no DDGI).
     pub screen_resolve: bool,
     pub update_frames: u64,
     pub recycled: u64,
@@ -487,7 +486,7 @@ impl FeaturePass for DdgiPass {
         );
         let rows = layout(probes).rows + u64::from(resolve_size.0) * u64::from(resolve_size.1);
         let fits = 16 * rows <= u64::from(ctx.gpu.limits().max_storage_buffer_binding_size);
-        let screen = (settings.screen_resolve && fits).then_some(resolve_size);
+        let screen = fits.then_some(resolve_size);
         if self.gpu.as_ref().is_none_or(|gpu| {
             gpu.counts != settings.counts || gpu.revision != revision || gpu.screen != screen
         }) {

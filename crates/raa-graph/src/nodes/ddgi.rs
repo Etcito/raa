@@ -196,7 +196,6 @@ impl NodeFamily for Ddgi {
             flag("relocation", "Probe relocation", d.relocation),
             flag("classification", "Probe classification", d.classification),
             flag("bounce", "Multiple bounces", d.bounce),
-            flag("screenResolve", "Screen resolve pass", d.screen_resolve),
             debug,
         ];
         vec![NodeTypeSpec {
@@ -289,7 +288,6 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> DdgiSetti
             ("relocation", ParamValue::Bool(b)) => s.relocation = *b,
             ("classification", ParamValue::Bool(b)) => s.classification = *b,
             ("bounce", ParamValue::Bool(b)) => s.bounce = *b,
-            ("screenResolve", ParamValue::Bool(b)) => s.screen_resolve = *b,
             ("debug", ParamValue::Enum(name)) => {
                 s.debug = match name.as_str() {
                     "irradiance" => DdgiDebug::Irradiance,

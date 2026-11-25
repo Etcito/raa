@@ -175,45 +175,52 @@ fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32>
 
 // The screen-resolved value at a forward pixel (row 9: first row, width, height, scale): a
 // joint-bilateral blend of the four nearest resolve texels, keeping those resolved for a surface
-// at this camera distance (within 2%); the full eight-probe lookup when none was (the
-// `raa_ddgi_fallback` flag records which).
+// at this camera distance (within 2%), else any resolved neighbour (`raa_ddgi_fallback` set).
+// Forward never runs the eight-probe lookup itself: compiled into the forward shader, even an
+// untaken branch to it cost 0.4-2.5 ms through register pressure (Sponza, RTX 3090).
 var<private> raa_ddgi_fallback: bool;
 
-fn raa_ddgi_screen_or_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, frag: vec2<f32>,
-                             eye: vec3<f32>) -> vec4<f32> {
+fn raa_ddgi_screen(p: vec3<f32>, frag: vec2<f32>, eye: vec3<f32>) -> vec4<f32> {
     raa_ddgi_fallback = false;
     let screen = raa_ddgi_word(9u);
-    if screen.w != 0u {
-        let distance = length(p - eye);
-        let at = frag / f32(screen.w) - 0.5;
-        let corner = floor(at);
-        let f = at - corner;
-        let size = vec2<i32>(i32(screen.y), i32(screen.z));
-        var sum = vec4<f32>(0.0);
-        var total = 0.0;
-        for (var i = 0u; i < 4u; i++) {
-            let o = vec2<u32>(i & 1u, i >> 1u);
-            let texel = clamp(vec2<i32>(corner) + vec2<i32>(o), vec2<i32>(0), size - 1);
-            let row = raa_ddgi_word(screen.x + u32(texel.y) * screen.y + u32(texel.x));
-            if row.w == 0u || abs(bitcast<f32>(row.z) - distance) > 0.02 * distance + 0.002 {
-                continue;
-            }
-            let w = select(1.0 - f.x, f.x, o.x == 1u) * select(1.0 - f.y, f.y, o.y == 1u) + 1e-3;
-            let ba = unpack2x16float(row.y);
-            sum += w * vec4<f32>(unpack2x16float(row.x), ba.x, ba.y);
+    if screen.w == 0u { return vec4<f32>(0.0); }
+    let distance = length(p - eye);
+    let at = frag / f32(screen.w) - 0.5;
+    let corner = floor(at);
+    let f = at - corner;
+    let size = vec2<i32>(i32(screen.y), i32(screen.z));
+    var sum = vec4<f32>(0.0);
+    var total = 0.0;
+    var any_sum = vec4<f32>(0.0);
+    var any_total = 0.0;
+    for (var i = 0u; i < 4u; i++) {
+        let o = vec2<u32>(i & 1u, i >> 1u);
+        let texel = clamp(vec2<i32>(corner) + vec2<i32>(o), vec2<i32>(0), size - 1);
+        let row = raa_ddgi_word(screen.x + u32(texel.y) * screen.y + u32(texel.x));
+        if row.w == 0u { continue; }
+        let w = select(1.0 - f.x, f.x, o.x == 1u) * select(1.0 - f.y, f.y, o.y == 1u) + 1e-3;
+        let ba = unpack2x16float(row.y);
+        let value = vec4<f32>(unpack2x16float(row.x), ba.x, ba.y);
+        any_sum += w * value;
+        any_total += w;
+        if abs(bitcast<f32>(row.z) - distance) <= 0.02 * distance + 0.002 {
+            sum += w * value;
             total += w;
         }
-        if total > 0.0 { return sum / total; }
     }
+    if total > 0.0 { return sum / total; }
     raa_ddgi_fallback = true;
-    return raa_ddgi_sample(p, n, view_dir);
+    if any_total > 0.0 { return any_sum / any_total; }
+    return vec4<f32>(0.0);
 }
 
 // Same contract as raa_spherical_evaluate: rgb is irradiance / pi, w the blend weight.
+// Forward / VG entry: reads the screen resolve (see raa_ddgi_screen); `n` and `view_dir` are
+// unused there and kept for the shared call shape.
 fn raa_ddgi_evaluate(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, frag: vec2<f32>,
                      eye: vec3<f32>) -> RaaSphericalResult {
     if !raa_ddgi_active() { return RaaSphericalResult(); }
-    let sample = raa_ddgi_screen_or_sample(p, n, view_dir, frag, eye);
+    let sample = raa_ddgi_screen(p, frag, eye);
     let debug = (raa_ddgi_word(4u).w >> 8u) & 0xffu;
     if debug == 1u { return RaaSphericalResult(sample, vec4<f32>(sample.rgb, 1.0)); }
     if debug == 2u {
