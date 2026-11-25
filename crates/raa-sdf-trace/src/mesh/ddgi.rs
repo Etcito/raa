@@ -198,8 +198,10 @@ pub struct DdgiSettings {
     /// Distance from the surface at which a surface probe is requested (m), shortened to half
     /// the free distance along the normal.
     pub surface_offset: f32,
-    /// A ray hit requests a surface probe when the lookup quality there (trilinear mass of the
-    /// probes in front of the surface, visible and within reach) is below this.
+    /// A ray hit is tested for a surface probe when the lookup quality there (trilinear mass of
+    /// the probes in front of the surface, visible by their distance moments and within reach)
+    /// is below this; the request is made when rays then find no probe of its cage in front of
+    /// the surface with a free segment to it.
     pub surface_need: f32,
     /// Distance (m) beyond which a cascade probe no longer counts as serving a surface in the
     /// quality above; 0 = any distance.
@@ -246,7 +248,7 @@ impl Default for DdgiSettings {
             surface_probes: 0,
             surface_spacing: 0.75,
             surface_offset: 0.5,
-            surface_need: 0.2,
+            surface_need: 0.5,
             surface_reach: 0.0,
             surface_range: 40.0,
             bounce: true,

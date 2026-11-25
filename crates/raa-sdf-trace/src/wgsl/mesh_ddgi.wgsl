@@ -358,6 +358,38 @@ fn ddgi_bounce(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, groups: u32,
     return out;
 }
 
+// Whether a surface point has a probe in front of it in its own free space: one of the eight
+// probes around it in the finest cascade that covers it lies on the front side of the surface
+// (at least ~6 degrees above the tangent plane), within the quality reach, with a free segment
+// to the point (a ray each, the exact test the Chebyshev weights only estimate).
+fn ddgi_served(p: vec3<f32>, n: vec3<f32>) -> bool {
+    let cascades = raa_ddgi_cascades();
+    let reach = bitcast<f32>(raa_ddgi_word(3u).z);
+    let origin = p + n * (4.0 * EPS);
+    for (var k = 0u; k < cascades; k++) {
+        let v = raa_ddgi_volume_at(k);
+        let local = (p + n * v.normal_bias) / v.spacing - vec3<f32>(v.base);
+        if any(local < vec3<f32>(0.0)) || any(local > vec3<f32>(v.counts) - 1.0) { continue; }
+        let cell = clamp(vec3<i32>(floor(local)), vec3<i32>(0), vec3<i32>(v.counts) - 2);
+        for (var i = 0u; i < 8u; i++) {
+            let g = v.base + cell + vec3<i32>(vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u));
+            let row = v.meta_row + RAA_DDGI_META_ROWS * raa_ddgi_slot(v, g);
+            let record = ddgi_probes[row];
+            if any(bitcast<vec3<i32>>(record.xyz) != g) || (record.w & RAA_DDGI_VALID) == 0u
+                || (record.w & RAA_DDGI_INSIDE) != 0u {
+                continue;
+            }
+            let to_probe = vec3<f32>(g) * v.spacing + bitcast<vec3<f32>>(ddgi_probes[row + 1u].xyz) - p;
+            let range = length(to_probe);
+            if dot(to_probe, n) < 0.1 * range || (reach > 0.0 && range > reach) { continue; }
+            if closest(Ray(origin, to_probe / range), range - 8.0 * EPS, true).object == MISS { return true; }
+        }
+        // The finest cascade that covers the point decides.
+        return false;
+    }
+    return false;
+}
+
 // Surface-probe request of a ray hit the volume serves badly: the point `offset` metres in front
 // of the hit (half the free distance along the normal when something is closer), written with a
 // check word into a request entry picked by the cell and the frame. The CPU reads the entries
@@ -376,6 +408,8 @@ fn ddgi_request(p: vec3<f32>, ng: vec3<f32>) {
     let local = (p + ng * reach) / e.spacing;
     let cell = vec3<i32>(floor(local));
     if raa_ddgi_extra_slot(e, cell) != RAA_DDGI_NO_SLOT { return; }
+    // The lookup quality is the cheap filter; the rays decide.
+    if ddgi_served(p, ng) { return; }
     let f = vec3<u32>(clamp((local - floor(local)) * 1024.0, vec3<f32>(0.0), vec3<f32>(1023.0)));
     let packed = f.x | (f.y << 10u) | (f.z << 20u);
     let entry = raa_ddgi_hash(cell, ddgi_params.counts.z) % e.count;
