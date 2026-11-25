@@ -42,6 +42,7 @@ pub struct GridDiffuseCapture {
     pub size: (u32, u32),
     pub candidates: u32,
     pub words: Vec<u32>,
+    pub corner_diagnostics: Vec<u32>,
     request: GridDiffuseCaptureRequest,
 }
 

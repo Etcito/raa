@@ -147,3 +147,12 @@ following layout.
 | 28 | Analytic directional RGB before support blend |
 | 31 | Primary trace pixel ordinal (u32, row-major at trace resolution) |
 | 32 | Up to eight 12-word neighbors. Each contains 8 FP32 features, RGB and base weight. |
+
+The optional `cornerDiagnostics` plane has one u32 per row, in the same order.
+Read four-bit lanes from least to most significant. Codes are 0 for an unused
+corner, 1 for an absent cell, 2 for a cell awaiting current faces, 3 for normal
+rejection, 4 for cross-plane separation rejection, 5 for distance rejection,
+6 for accepted and 7 for a duplicate key. A word of 8 means there was no
+active lookup coordinate. The codes record the first rejection for each
+interpolation corner. The neighbor count in the main row also includes the
+existing ring search when the interpolation corners yield one neighbor.

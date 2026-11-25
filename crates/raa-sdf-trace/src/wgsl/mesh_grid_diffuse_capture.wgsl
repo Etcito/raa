@@ -60,6 +60,41 @@ fn grid_diffuse_write_rgb(offset: u32, value: vec3<f32>) {
     for (var i = 0u; i < 3u; i++) { atomicStore(&counters[offset + i], words[i]); }
 }
 
+// Four bits per interpolation corner. The first rejection explains why
+// that corner cannot contribute, even if another test would also reject it.
+fn grid_diffuse_corner_status(entry: u32, q: GridDiffuseQuery) -> u32 {
+    if entry == RAA_SPHERICAL_EMPTY { return 1u; }
+    if raa_spherical_data[entry + 2u].w == 0u { return 2u; }
+    let gates = raa_spherical_support_gates(entry, q.position, q.normal);
+    if gates.x == 0.0 { return 3u; }
+    if gates.y == 0.0 { return 4u; }
+    if gates.z == 0.0 { return 5u; }
+    return 6u;
+}
+
+fn grid_diffuse_corner_diagnostics(q: GridDiffuseQuery, cell: RaaSphericalCoordinate) -> u32 {
+    if cell.desc.x == 0u { return 8u; }
+    let interpolation = raa_spherical_interpolation(cell);
+    let count = select(8u, 4u, interpolation.shell0 == interpolation.shell1);
+    var keys: array<u32, 8>;
+    var packed = 0u;
+    for (var i = 0u; i < count; i++) {
+        let key = raa_spherical_corner_key(cell, interpolation, raa_spherical_corner(i));
+        var duplicate = false;
+        for (var j = 0u; j < i; j++) { duplicate = duplicate || keys[j] == key; }
+        keys[i] = key;
+        var status = 7u;
+        if !duplicate {
+            status = grid_diffuse_corner_status(raa_spherical_find(key, cell.desc.z), q);
+        }
+        packed |= status << (4u * i);
+    }
+    return packed;
+}
+
+const GRID_DIFFUSE_CAPTURE_MAX_ROWS: u32 = 128u;
+const GRID_DIFFUSE_CAPTURE_ROW_WORDS: u32 = 128u;
+
 fn grid_diffuse_capture(q: GridDiffuseQuery, cell: RaaSphericalCoordinate,
                         neighbors: RaaSphericalNeighbors, active_value: vec4<f32>,
                         analytic: vec4<f32>) {
@@ -68,8 +103,10 @@ fn grid_diffuse_capture(q: GridDiffuseQuery, cell: RaaSphericalCoordinate,
     let hash = raa_spherical_hash(p.x ^ raa_spherical_hash(p.y ^ raa_spherical_hash(p.z ^ q.triangle)));
     if raa_spherical_hash(q.pixel) % options[1].w != 0u { return; }
     let row = atomicAdd(&counters[GRID_DIFFUSE_ROW_COUNT], 1u);
-    let base = REFLECTED_RECEIVER_BASE + row * 128u;
-    if row >= (arrayLength(&counters) - REFLECTED_RECEIVER_BASE) / 128u { return; }
+    if row >= GRID_DIFFUSE_CAPTURE_MAX_ROWS { return; }
+    let base = REFLECTED_RECEIVER_BASE + row * GRID_DIFFUSE_CAPTURE_ROW_WORDS;
+    let diagnostics = REFLECTED_RECEIVER_BASE + GRID_DIFFUSE_CAPTURE_MAX_ROWS * GRID_DIFFUSE_CAPTURE_ROW_WORDS;
+    atomicStore(&counters[diagnostics + row], grid_diffuse_corner_diagnostics(q, cell));
     let channels = raa_spherical_data[2].w;
     let seed = raa_spherical_hash(hash ^ options[2].w);
     let legacy = raa_spherical_diffuse_at(q.position, q.normal, cell);

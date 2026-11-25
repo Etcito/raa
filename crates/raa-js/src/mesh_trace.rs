@@ -409,6 +409,8 @@ impl Engine {
             }
             let rows = js_sys::Uint32Array::from(sample.words.as_slice());
             Reflect::set(&result, &"rows".into(), &rows).expect("fresh object");
+            let diagnostics = js_sys::Uint32Array::from(sample.corner_diagnostics.as_slice());
+            Reflect::set(&result, &"cornerDiagnostics".into(), &diagnostics).expect("fresh object");
             Ok(result.into())
         })
     }

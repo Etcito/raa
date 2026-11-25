@@ -169,13 +169,22 @@ export async function captureGridDiffuseReplay({ target, engine, fixture }, {
         const raw = await save(files, `${frame.id}-rows.bin`, sorted, [rows, packedChannels], 'u32le');
         const rasterIndices = await save(files, `${frame.id}-pixels.bin`,
           Uint32Array.from(order, item => indices[item]), [rows], 'u32le');
+        let cornerDiagnostics;
+        if (capture.cornerDiagnostics !== undefined) {
+          if (!(capture.cornerDiagnostics instanceof Uint32Array) || capture.cornerDiagnostics.length !== rows) {
+            throw new Error(`Misaligned spherical corner diagnostics for ${frame.id}`);
+          }
+          cornerDiagnostics = await save(files, `${frame.id}-corners.bin`,
+            Uint32Array.from(order, item => capture.cornerDiagnostics[item]), [rows], 'u32le');
+        }
         const hitIds = Uint32Array.from({ length: rows * 5 }, (_, i) => {
           const row = Math.floor(i / 5) * packedChannels;
           const lane = i % 5;
           return sorted[row + (lane === 4 ? 31 : lane)];
         });
         const firstHitSha256 = await digest(new Uint8Array(hitIds.buffer));
-        rowFields = { rows, file: raw.file, sha256: raw.sha256, readbackWallMs, rasterIndices, planes: { rows: raw, rasterIndices },
+        rowFields = { rows, file: raw.file, sha256: raw.sha256, readbackWallMs, rasterIndices,
+          planes: { rows: raw, rasterIndices, ...(cornerDiagnostics && { cornerDiagnostics }) },
           coverage: coverage(sorted), width: capture.width, height: capture.height,
           reference: { samplesPerBank, independent: true, firstHitSha256 },
           ...(mode === 'learned' && { learnedWeightsSha256: checkpointSha256 }) };

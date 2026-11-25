@@ -111,6 +111,8 @@ export interface Engine {
   meshGridDiffuseCapture(nodeId: string): {
     frame: number; seed: number; stride: number; width: number; height: number;
     candidates: number; rows: Uint32Array;
+    /** One word per row. Four bits per interpolation corner. */
+    cornerDiagnostics: Uint32Array;
   } | null;
   /** Reads the renderer's tight, little-endian linear RGBA16F scene color. */
   captureMeshLighting(nowMs: number, traced: boolean, raw?: boolean, evidenceSeed?: number): Promise<{

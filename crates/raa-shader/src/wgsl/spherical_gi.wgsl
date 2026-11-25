@@ -38,14 +38,20 @@ fn raa_spherical_key(shell: u32, face: u32, ij: vec2<i32>, n: u32) -> u32 {
 
 fn raa_spherical_supported(entry: u32, p: vec3<f32>, n: vec3<f32>) -> f32 {
     if entry == RAA_SPHERICAL_EMPTY || raa_spherical_data[entry + 2u].w == 0u { return 0.0; }
+    let gates = raa_spherical_support_gates(entry, p, n);
+    return gates.x * gates.y * gates.z;
+}
+
+fn raa_spherical_support_gates(entry: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let surface = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
     let normal = bitcast<vec3<f32>>(raa_spherical_data[entry + 2u].xyz);
     let delta = (p - surface.xyz) / surface.w;
     let facing = dot(normal, n);
     // Reject opposite sides and use a tighter distance gate across the surface.
     let separation = abs(dot(delta, normal));
-    return smoothstep(0.4, 0.9, facing) * (1.0 - smoothstep(0.18, 0.65, separation))
-        * (1.0 - smoothstep(0.7, 2.5, length(delta)));
+    return vec3<f32>(smoothstep(0.4, 0.9, facing),
+        1.0 - smoothstep(0.18, 0.65, separation),
+        1.0 - smoothstep(0.7, 2.5, length(delta)));
 }
 
 fn raa_spherical_slot(entry: u32, mask: u32) -> u32 {
@@ -170,38 +176,61 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
     return vec4<f32>(intensity * sum / neighbors.total, blend);
 }
 
-// Reuse exactly the forward lookup's current, ready, normal-compatible cells.
-// Consumers choose how to evaluate each entry's projected or directional data.
-fn raa_spherical_neighbors(p: vec3<f32>, normal: vec3<f32>,
-                           cell: RaaSphericalCoordinate) -> RaaSphericalNeighbors {
-    if cell.desc.x == 0u { return RaaSphericalNeighbors(); }
+struct RaaSphericalInterpolation {
+    shell0: u32,
+    shell1: u32,
+    fraction: vec3<f32>,
+    base: vec2<i32>,
+}
+
+fn raa_spherical_interpolation(cell: RaaSphericalCoordinate) -> RaaSphericalInterpolation {
     let desc = cell.desc;
     let shell = cell.shell;
     let shell_bounds = cell.bounds;
     let radius = cell.radius;
-    let face = cell.face;
-    let angular = cell.angular;
     var shell0 = shell;
     if radius < shell_bounds.y && shell > 0u { shell0 -= 1u; }
     let shell1 = min(shell0 + 1u, desc.y - 1u);
     let r0 = bitcast<f32>(raa_spherical_data[4u + shell0].y);
     let r1 = bitcast<f32>(raa_spherical_data[4u + shell1].y);
     let depth = clamp((radius - r0) / max(r1 - r0, 1e-8), 0.0, 1.0);
-    let pixel = angular - 0.5;
-    let ij = vec2<i32>(floor(pixel));
-    let f = fract(pixel);
+    let pixel = cell.angular - 0.5;
+    return RaaSphericalInterpolation(shell0, shell1, vec3<f32>(fract(pixel), depth),
+        vec2<i32>(floor(pixel)));
+}
+
+fn raa_spherical_corner(index: u32) -> vec3<bool> {
+    return vec3<bool>((index & 1u) != 0u, (index & 2u) != 0u, (index & 4u) != 0u);
+}
+
+fn raa_spherical_corner_key(cell: RaaSphericalCoordinate, interpolation: RaaSphericalInterpolation,
+                            corner: vec3<bool>) -> u32 {
+    let coord = interpolation.base + select(vec2<i32>(0), vec2<i32>(1), corner.xy);
+    return raa_spherical_key(select(interpolation.shell0, interpolation.shell1, corner.z),
+        cell.face, coord, cell.desc.x);
+}
+
+// Reuse exactly the forward lookup's current, ready, normal-compatible cells.
+// Consumers choose how to evaluate each entry's projected or directional data.
+fn raa_spherical_neighbors(p: vec3<f32>, normal: vec3<f32>,
+                           cell: RaaSphericalCoordinate) -> RaaSphericalNeighbors {
+    if cell.desc.x == 0u { return RaaSphericalNeighbors(); }
+    let interpolation = raa_spherical_interpolation(cell);
+    let desc = cell.desc;
+    let shell = cell.shell;
+    let face = cell.face;
+    let angular = cell.angular;
     var result: RaaSphericalNeighbors;
-    for (var i = 0u; i < select(8u, 4u, shell0 == shell1); i++) {
-        let corner = vec3<bool>((i & 1u) != 0u, (i & 2u) != 0u, (i & 4u) != 0u);
-        let coord = ij + select(vec2<i32>(0), vec2<i32>(1), corner.xy);
-        let key = raa_spherical_key(select(shell0, shell1, corner.z), face, coord, desc.x);
+    for (var i = 0u; i < select(8u, 4u, interpolation.shell0 == interpolation.shell1); i++) {
+        let corner = raa_spherical_corner(i);
+        let key = raa_spherical_corner_key(cell, interpolation, corner);
         let entry = raa_spherical_find(key, desc.z);
         let support = raa_spherical_supported(entry, p, normal);
         if support <= 0.0 { continue; }
         var seen = false;
         for (var j = 0u; j < result.count; j++) { seen = seen || result.entries[j] == entry; }
         if seen { continue; }
-        let w = select(vec3<f32>(1.0) - vec3<f32>(f, depth), vec3<f32>(f, depth), corner);
+        let w = select(1.0 - interpolation.fraction, interpolation.fraction, corner);
         let trilinear = max(w.x * w.y * w.z, 0.01);
         let weight = support * trilinear;
         result.entries[result.count] = entry;

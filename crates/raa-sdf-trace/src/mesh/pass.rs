@@ -29,8 +29,10 @@ const MESH_PHYSICAL_MIRROR: u32 = 16;
 const MESH_GRID_DIFFUSE_CAPTURE: u32 = 32;
 const MESH_GRID_DIFFUSE_SKY: u32 = 64;
 const GRID_DIFFUSE_CAPTURE_COUNT: usize = 34;
+const GRID_DIFFUSE_DIAGNOSTICS_START: usize =
+    COUNTER_BYTES as usize + GRID_DIFFUSE_CAPTURE_WORDS * GRID_DIFFUSE_MAX_CAPTURE_ROWS * 4;
 const GRID_DIFFUSE_CAPTURE_BYTES: u64 =
-    COUNTER_BYTES + (GRID_DIFFUSE_CAPTURE_WORDS * GRID_DIFFUSE_MAX_CAPTURE_ROWS * 4) as u64;
+    (GRID_DIFFUSE_DIAGNOSTICS_START + GRID_DIFFUSE_MAX_CAPTURE_ROWS * 4) as u64;
 const FEEDBACK_BYTES: u64 = COUNTER_BYTES + (MAX_REFLECTED_RECEIVERS * RECEIVER_BYTES) as u64;
 const CONFIDENCE: &str = "ssr.confidence";
 const COMPOSITE_WGSL: &str = include_str!("../wgsl/mesh_composite.wgsl");
@@ -580,21 +582,28 @@ impl FeaturePass for MeshTracePass {
                             };
                             let grid_diffuse_capture = capture.map(|request| {
                                 let candidates = counts[GRID_DIFFUSE_CAPTURE_COUNT];
-                                let word_count = (candidates as usize)
-                                    .min(GRID_DIFFUSE_MAX_CAPTURE_ROWS)
-                                    * GRID_DIFFUSE_CAPTURE_WORDS;
-                                let words = bytes[COUNTER_BYTES as usize..]
-                                    .chunks_exact(4)
-                                    .take(word_count)
-                                    .map(|word| {
-                                        u32::from_le_bytes(word.try_into().expect("one word"))
-                                    })
-                                    .collect();
+                                let rows = (candidates as usize).min(GRID_DIFFUSE_MAX_CAPTURE_ROWS);
+                                let read_words = |start, count| {
+                                    bytes[start..]
+                                        .chunks_exact(4)
+                                        .take(count)
+                                        .map(|word| {
+                                            u32::from_le_bytes(word.try_into().expect("one word"))
+                                        })
+                                        .collect()
+                                };
+                                let words = read_words(
+                                    COUNTER_BYTES as usize,
+                                    rows * GRID_DIFFUSE_CAPTURE_WORDS,
+                                );
+                                let corner_diagnostics =
+                                    read_words(GRID_DIFFUSE_DIAGNOSTICS_START, rows);
                                 GridDiffuseCapture {
                                     frame,
                                     size: (width, height),
                                     candidates,
                                     words,
+                                    corner_diagnostics,
                                     request,
                                 }
                             });
