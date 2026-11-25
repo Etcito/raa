@@ -55,6 +55,10 @@ pub struct NrcSettings {
     pub learning_rate: f32,
     /// Weight of the previous average in the exponential moving average of the weights.
     pub ema: f32,
+    /// Epsilon of the relative loss (the paper's 0.01). The loss weights come from the
+    /// prediction, so a small epsilon under noisy one-sample targets biases the cache upward
+    /// (measured on Sponza: 1e-4 gave 2.7 times the indirect light of 0.01, 0.1 or 1).
+    pub loss_epsilon: f32,
     /// Online training on or off (off renders a frozen cache, e.g. a loaded checkpoint).
     pub train: bool,
     /// Alternate frames between tracing the training rays and the Adam step (single-step
@@ -77,6 +81,7 @@ impl Default for NrcSettings {
             train_samples: 16_384,
             learning_rate: 2e-3,
             ema: 0.99,
+            loss_epsilon: 0.01,
             train: true,
             interleave: true,
             divisor: 4,
@@ -95,6 +100,7 @@ impl NrcSettings {
             && self.learning_rate.is_finite()
             && (0.0..=0.1).contains(&self.learning_rate)
             && (0.0..=0.9999).contains(&self.ema)
+            && (1e-8..=1.0).contains(&self.loss_epsilon)
             && matches!(self.divisor, 1 | 2 | 4 | 8)
             && self.bounces <= 1
             && self.temporal_blend > 0.0
@@ -104,7 +110,7 @@ impl NrcSettings {
                 code: "gi.nrc.invalid_settings",
                 message: format!(
                     "expected 1-{MAX_HIDDEN} hidden layers, 1-{MAX_FREQUENCIES} frequencies, a power-of-two sample count in \
-                     [{MIN_SAMPLES}, {}], a learning rate in [0, 0.1], an EMA in [0, 0.9999], \
+                     [{MIN_SAMPLES}, {}], a learning rate in [0, 0.1], an EMA in [0, 0.9999], a loss epsilon in [1e-8, 1], \
                      a divisor of 1, 2, 4 or 8, 0 or 1 bounce and a temporal blend in (0, 1]",
                     MAX_BATCH * MAX_STEPS
                 ),
@@ -527,7 +533,7 @@ impl FeaturePass for NrcPass {
                     1.0 / (1.0 - BETA1.powf(t)),
                     1.0 / (1.0 - BETA2.powf(t)).max(1e-6),
                     settings.ema.min(1.0 - 1.0 / t),
-                    0.0,
+                    settings.loss_epsilon,
                 ],
             );
             queue.write_buffer(&gpu.train[step as usize - 1], 0, &train);
@@ -627,6 +633,7 @@ impl FeaturePass for NrcPass {
             }
             let learn = |pipeline: &wgpu::ComputePipeline, partial: bool| {
                 let mut entries = vec![
+                    buffer_entry(0, &gpu.train[step]),
                     buffer_entry(1, &gpu.trained),
                     buffer_entry(2, &gpu.samples),
                     buffer_entry(3, &gpu.acts),

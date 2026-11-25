@@ -5,7 +5,7 @@
 struct NrcTrain {
     // learning rate, beta1, beta2, epsilon
     adam: vec4<f32>,
-    // 1 / (1 - beta1^t), 1 / (1 - beta2^t), EMA weight of the previous average, unused
+    // 1 / (1 - beta1^t), 1 / (1 - beta2^t), EMA weight of the previous average, loss epsilon
     correction: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> nrc_train: NrcTrain;
@@ -19,7 +19,8 @@ struct NrcTrain {
 //!include nrc_mlp
 
 // One invocation per training sample: forward keeping every layer input, relative L2 loss
-// (normalized by the squared predicted luminance), backward.
+// (normalized by the squared predicted luminance plus an epsilon),
+// backward.
 @compute @workgroup_size(64)
 fn nrc_forward_backward(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= NRC_BATCH { return; }
@@ -42,7 +43,7 @@ fn nrc_forward_backward(@builtin(global_invocation_id) id: vec3<u32>) {
     let prediction = nrc_output_layer(&a);
     let wanted = nrc_samples[id.x * 3u + 2u].rgb;
     let luminance = dot(max(prediction, vec3<f32>(0.0)), vec3<f32>(0.2126, 0.7152, 0.0722));
-    let gradient = 2.0 * (prediction - wanted) / (luminance * luminance + 0.01);
+    let gradient = 2.0 * (prediction - wanted) / (luminance * luminance + nrc_train.correction.w);
     var delta: array<vec4<f32>, 16>;
     delta[0] = vec4<f32>(gradient, 0.0);
     for (var j = 0u; j < 16u; j++) {
