@@ -19,7 +19,8 @@ use std::{cell::RefCell, rc::Rc};
 
 use super::{
     AppliedDescs, ExecExtension, FeatureHandles, NodeStats, SetResult, SettingsSnapshot,
-    export_snapshot, merge_values, pipeline_instructions, read_values, snapshot_keys, write_values,
+    export_snapshot, graph_owns_virtual_geometry, merge_values, pipeline_with_virtual_geometry,
+    read_values, snapshot_keys, write_values,
 };
 use crate::catalog::{Catalog, FeatureId, ParamBinding, ParamSpec, ParamValue, Rebuild};
 use crate::error::{Issue, Severity, Stage};
@@ -475,7 +476,9 @@ impl GraphExecutor {
             if let Some(observed) = read_values(h, feature) {
                 adopt_values(no_graph, feature, applied_values, &observed);
             }
-            if let Some(target) = applied_values {
+            if let Some(target) = applied_values
+                && !(inherit_vg && *feature == FeatureId::Vg)
+            {
                 write_values(h, feature, target)?;
             }
         }
@@ -517,6 +520,7 @@ impl GraphExecutor {
                 self.plan = Some(plan);
                 self.doc = doc;
                 self.no_graph = Some(no_graph);
+        let inherit_vg = !graph_owns_virtual_geometry(plan);
                 self.applied = Some(snapshot(h));
                 self.applied_descs = AppliedDescs::capture(h);
                 self.frame = None;
@@ -570,9 +574,17 @@ pub fn settings_targets(
             required: false,
         })
         .collect();
-    let pipeline = pipeline_instructions(plan, catalog, &installed);
+    let pipeline = pipeline_with_virtual_geometry(
+        plan,
+        catalog,
+        &installed,
+        virtual_geometry_enabled(current),
+    );
 
-    if let Some(node) = plan.nodes.iter().find(|node| node.type_id == SPHERICAL_TYPE)
+    if let Some(node) = plan
+        .nodes
+        .iter()
+        .find(|node| node.type_id == SPHERICAL_TYPE)
         && values_for(current, &SPHERICAL).is_none()
     {
         return Err(vec![Issue {
@@ -652,6 +664,14 @@ fn snapshot(h: &FeatureHandles<'_>) -> SettingsSnapshot {
 #[derive(Default)]
 struct Progress {
     pipeline: bool,
+fn virtual_geometry_enabled(settings: &SettingsSnapshot) -> bool {
+    values_for(settings, &FeatureId::Vg).is_some_and(|values| {
+        values
+            .iter()
+            .any(|(key, value)| key == "enabled" && *value == ParamValue::Bool(true))
+    })
+}
+
     features: Vec<FeatureId>,
     extensions: usize,
 }
@@ -668,7 +688,13 @@ fn apply(
     h: &mut FeatureHandles<'_>,
     progress: &mut Progress,
 ) -> Result<u32, Vec<Issue>> {
-    apply_pipeline(catalog, plan, h, progress)?;
+    apply_pipeline(
+        catalog,
+        plan,
+        h,
+        progress,
+        virtual_geometry_enabled(targets),
+    )?;
     let rebuilt = apply_features(catalog, plan, targets, h, progress)?;
     for extension in extensions.iter_mut() {
         extension.apply(plan, previous, h)?;
@@ -686,7 +712,7 @@ fn apply_pipeline(
     progress: &mut Progress,
 ) -> Result<(), Vec<Issue>> {
     let installed = h.pipeline.borrow().passes();
-    let instructions = pipeline_instructions(plan, catalog, &installed);
+    let instructions = pipeline_with_virtual_geometry(plan, catalog, &installed, virtual_geometry);
     progress.pipeline = true;
     let mut pipeline = h.pipeline.borrow_mut();
     for (name, enabled) in &instructions.enable {
@@ -731,6 +757,7 @@ fn rollback(
     extensions: &mut [Box<dyn ExecExtension>],
     previous: Option<&GraphPlan>,
     before: &SettingsSnapshot,
+    virtual_geometry: bool,
     progress: &Progress,
     h: &mut FeatureHandles<'_>,
 ) {
@@ -859,7 +886,8 @@ fn reapply_pipeline(
     h: &FeatureHandles<'_>,
 ) -> Result<(), RaaError> {
     let installed = h.pipeline.borrow().passes();
-    let instructions = pipeline_instructions(plan, catalog, &installed);
+    let enabled = h.handles.vg.as_ref().is_some_and(|vg| vg.get().enabled);
+    let instructions = pipeline_with_virtual_geometry(plan, catalog, &installed, enabled);
     let mut pipeline = h.pipeline.borrow_mut();
     for (name, enabled) in &instructions.enable {
         pipeline.set_enabled(name, *enabled)?;
@@ -1002,18 +1030,13 @@ fn plan_settings(
     changes
 }
 
-/// The presence keys of `feature`. Vg `enabled` holds when the plan has a `pass.vg.*` node; Gi
+/// The presence keys of `feature`. Authored VG nodes opt in; other graphs inherit VG. Gi
 /// `enabled` when it has `pass.gi.volume`, Gi `screenSpace` when it has `pass.gi.ssgi`.
 fn presence(plan: &GraphPlan, feature: &FeatureId) -> Vec<(String, ParamValue)> {
     let has = |type_id: &str| plan.nodes.iter().any(|node| node.type_id == type_id);
     let flag = |name: &str, on: bool| (name.to_owned(), ParamValue::Bool(on));
     match feature {
-        FeatureId::Vg => vec![flag(
-            "enabled",
-            plan.nodes
-                .iter()
-                .any(|node| node.type_id.starts_with("pass.vg.")),
-        )],
+        FeatureId::Vg if graph_owns_virtual_geometry(plan) => vec![flag("enabled", true)],
         FeatureId::Gi => vec![
             flag("enabled", has("pass.gi.volume")),
             flag("screenSpace", has("pass.gi.ssgi")),

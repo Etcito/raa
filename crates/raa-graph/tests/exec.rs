@@ -566,3 +566,74 @@ fn simple_forward_apply_enables_the_sun_shadow_and_forwards_its_parameters() {
         ParamValue::Number(0.5)
     );
 }
+
+#[test]
+fn ordinary_graphs_inherit_virtual_geometry_and_merge_before_depth_consumers() {
+    let catalog = Catalog::build();
+    let mut installed = installed();
+    installed.extend([
+        entry("vg.cull", PassRole::Pass, 21),
+        entry("vg.raster", PassRole::Pass, 22),
+        entry("vg.resolve", PassRole::Pass, 23),
+        entry("vg.gbuffer", PassRole::Pass, 32),
+        entry("vg.shade", PassRole::Contributor, 450),
+    ]);
+    let mut preferences = SettingsSnapshot {
+        passes: installed
+            .iter()
+            .map(|p| (p.name.clone(), p.enabled))
+            .collect(),
+        order: installed
+            .iter()
+            .filter(|p| p.role == PassRole::Pass)
+            .map(|p| p.name.clone())
+            .collect(),
+        values: vec![(FeatureId::Vg, default_values(&FeatureId::Vg))],
+    };
+    let ordinary = plan(&[
+        "pass.shadow.csm",
+        "pass.prepass",
+        "pass.light.tiles",
+        "pass.ao.gtao",
+        "pass.forward",
+        "pass.tonemap",
+    ]);
+    let vg = [
+        "vg.cull",
+        "vg.raster",
+        "vg.resolve",
+        "vg.gbuffer",
+        "vg.shade",
+    ];
+    for enabled in [false, true] {
+        set_value(
+            &mut preferences.values[0].1,
+            "enabled",
+            ParamValue::Bool(enabled),
+        );
+        let result = settings_targets(&ordinary, &catalog, &preferences).unwrap();
+        for name in vg {
+            assert!(result.passes.contains(&(name.to_owned(), enabled)));
+        }
+        assert_eq!(
+            target(&result, &FeatureId::Vg, "enabled"),
+            ParamValue::Bool(enabled)
+        );
+        if enabled {
+            let index = |name| result.order.iter().position(|p| p == name).unwrap();
+            assert!(index("shadow.csm") < index("vg.raster"));
+            assert!(index("vg.resolve") < index("vg.gbuffer"));
+            assert!(index("prepass") < index("vg.gbuffer"));
+            assert!(index("vg.gbuffer") < index("light.tiles"));
+        }
+    }
+    let explicit = plan(&[
+        "pass.prepass",
+        "pass.vg.gbuffer",
+        "pass.forward",
+        "pass.tonemap",
+    ]);
+    let result = settings_targets(&explicit, &catalog, &preferences).unwrap();
+    assert!(result.passes.contains(&("vg.gbuffer".into(), true)));
+    assert!(result.passes.contains(&("vg.raster".into(), false)));
+}

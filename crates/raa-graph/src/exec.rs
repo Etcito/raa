@@ -8,7 +8,8 @@ mod settings;
 mod settings_post;
 
 pub use executor::{
-    AreaGraphModel, GraphExecutor, RealModelHeads, RealModelPackage, RealModelSelection, RealModelStats, adopt_pipeline, external_changes, pipeline_differs, settings_targets,
+    AreaGraphModel, GraphExecutor, RealModelHeads, RealModelPackage, RealModelSelection,
+    RealModelStats, adopt_pipeline, external_changes, pipeline_differs, settings_targets,
 };
 pub use export::export_snapshot;
 pub use settings::{
@@ -94,6 +95,30 @@ pub fn pipeline_instructions(
     catalog: &Catalog,
     installed: &[PassInfo],
 ) -> PipelineInstructions {
+    pipeline_with_virtual_geometry(plan, catalog, installed, false)
+}
+
+const VG_ENTRIES: [&str; 5] = [
+    "vg.cull",
+    "vg.raster",
+    "vg.resolve",
+    "vg.gbuffer",
+    "vg.shade",
+];
+
+pub(crate) fn graph_owns_virtual_geometry(plan: &GraphPlan) -> bool {
+    plan.nodes
+        .iter()
+        .any(|node| node.type_id.starts_with("pass.vg."))
+}
+
+pub(crate) fn pipeline_with_virtual_geometry(
+    plan: &GraphPlan,
+    catalog: &Catalog,
+    installed: &[PassInfo],
+    enabled: bool,
+) -> PipelineInstructions {
+    let inherited = !graph_owns_virtual_geometry(plan);
     let mut planned: Vec<&str> = Vec::new();
     for node in &plan.nodes {
         let Some(entry) = catalog.node(&node.type_id).and_then(|spec| spec.pass) else {
@@ -106,7 +131,11 @@ pub fn pipeline_instructions(
     let mut enable = Vec::new();
     for info in installed.iter().filter(|info| !info.name.contains('#')) {
         if !enable.iter().any(|(name, _)| *name == info.name) {
-            enable.push((info.name.clone(), planned.contains(&info.name.as_str())));
+            let entry = info.name.as_str();
+            enable.push((
+                info.name.clone(),
+                planned.contains(&entry) || (inherited && enabled && VG_ENTRIES.contains(&entry)),
+            ));
         }
     }
 
@@ -129,6 +158,26 @@ pub fn pipeline_instructions(
             .position(|p| planned.contains(&p.name.as_str()) && p.order > info.order)
             .unwrap_or(order.len());
         order.insert(at, info);
+    }
+    if inherited && enabled {
+        // VG merges into the ordinary prepass attachments. Keep those graph resources
+        // and every authored link intact, but populate them before the first consumer.
+        let mut vg = [None; 4];
+        for (slot, entry) in vg.iter_mut().zip(VG_ENTRIES) {
+            if let Some(index) = order.iter().position(|p| p.name == entry) {
+                *slot = Some(order.remove(index));
+            }
+        }
+        let first = order
+            .iter()
+            .position(|p| p.name == "gi.volume" || p.name == "prepass")
+            .unwrap_or(order.len());
+        order.splice(first..first, vg[..3].iter().copied().flatten());
+        if let (Some(gbuffer), Some(prepass)) =
+            (vg[3], order.iter().position(|p| p.name == "prepass"))
+        {
+            order.insert(prepass + 1, gbuffer);
+        }
     }
     PipelineInstructions {
         enable,
