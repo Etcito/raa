@@ -74,6 +74,18 @@ impl Engine {
                     textures.push((name, image.view.texture().clone()));
                 }
             }
+            // Denoiser outputs (`denoise.<kind>#<id>` / `signal`); the first instance of each kind.
+            let entries = resources.entries();
+            for (name, prefix) in [("reflectionDenoised", "denoise.relax#"), ("areaDenoised", "denoise.sigma#")] {
+                if name == "areaDenoised" && !include_area.unwrap_or(false) {
+                    continue;
+                }
+                if let Some((pass, port, _)) = entries.iter().find(|(pass, port, _)| pass.starts_with(prefix) && port == "signal")
+                    && let Some(image) = resources.get(pass, port)
+                {
+                    textures.push((name, image.view.texture().clone()));
+                }
+            }
             if include_composite.unwrap_or(false) {
                 let image = resources
                     .get("ssr.replace#replace", "color")

@@ -435,6 +435,11 @@ pub fn port_signals(node: &str, port: &str, output: bool) -> &'static [SignalCon
             ..PAIRS
         }],
         ("neural.area-reconstruction", "pairs", false) => &[PAIRS],
+        ("denoise.sigma", "signal", true) => &[SignalContract {
+            usage: AREA_OUTPUT,
+            ..PAIRS
+        }],
+        ("denoise.sigma", "signal", false) => &[PAIRS],
         ("area.temporal", "raw", false) | ("area.spatial", "src", false) => &[PAIRS],
         ("area.temporal", "history", false) => &[SignalContract {
             cadence: SignalCadence::Previous,

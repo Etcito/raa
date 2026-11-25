@@ -18,7 +18,7 @@ use crate::{
     plan::{GraphPlan, InputSource, PlanNode},
 };
 
-const SLOTS: usize = MAX_STOCHASTIC_LIGHTS;
+pub(super) const SLOTS: usize = MAX_STOCHASTIC_LIGHTS;
 const LAYERS: u32 = SLOTS.div_ceil(2) as u32;
 const BRIDGE: &str = include_str!("area_model.wgsl");
 const RAW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -124,15 +124,15 @@ pub(super) struct AreaModelFrame {
     pending: Option<AreaFrame>,
 }
 
-struct AreaFrame {
+pub(super) struct AreaFrame {
     stochastic: AreaStochasticFrame,
     lights: [Option<[u8; LIGHT_GPU_SIZE]>; SLOTS],
-    slots: u32,
+    pub(super) slots: u32,
     jitter: [f32; 2],
 }
 
 impl AreaFrame {
-    fn capture(stochastic: AreaStochasticFrame, jitter: [f32; 2], ctx: &RecordCtx<'_>) -> Self {
+    pub(super) fn capture(stochastic: AreaStochasticFrame, jitter: [f32; 2], ctx: &RecordCtx<'_>) -> Self {
         let lights = std::array::from_fn(|slot| {
             let (index, _) = table_slot(&stochastic.table, slot)?;
             let mut light = *ctx.lighting.local_light_record(index)?;
@@ -152,7 +152,7 @@ impl AreaFrame {
         }
     }
 
-    fn same_light(&self, previous: &Self, slot: usize) -> bool {
+    pub(super) fn same_light(&self, previous: &Self, slot: usize) -> bool {
         self.stochastic.generations[slot] == previous.stochastic.generations[slot]
             && self.lights[slot] == previous.lights[slot]
     }

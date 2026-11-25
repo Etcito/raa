@@ -32,6 +32,24 @@ fn main() {
         .validate(&module)
         .unwrap_or_else(|error| panic!("{path}: {error:?}"));
     }
+    for (path, format) in [
+        ("src/exec/denoise.wgsl", ""),
+        ("src/exec/denoise_relax.wgsl", "rgba32float"),
+        ("src/exec/denoise_relax.wgsl", "rgba16float"),
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+        let source = fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("{path}: {error}"))
+            .replace("OUT_FORMAT", format);
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|error| panic!("{path}: {}", error.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("{path}: {error:?}"));
+    }
     let reproject = "../raa-taa/src/wgsl/reproject.wgsl";
     let model = "src/exec/real_model.wgsl";
     for path in [reproject, model] {

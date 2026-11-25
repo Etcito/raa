@@ -10,12 +10,16 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const [chromeArg, pageArg, outputArg, mode = 'area-pilot', comparison = 'fixed', ...flags] = process.argv.slice(2);
 const headful = flags.includes('--headful');
+// Denoiser arms of the ray-budget replay: --denoise [--denoise-params=<json>].
+const denoiseArms = flags.includes('--denoise');
+const denoiseParams = JSON.parse(flags.find(flag => flag.startsWith('--denoise-params='))?.slice(17) ?? '{}');
 const op = mode === '--prediction' ? 'prediction' : mode;
 const capture = op === 'area-pilot' || op === 'gallery-path-capture';
 const gallery = op.startsWith('gallery-');
 const spherical = op === 'gallery-spherical';
 const mirror = op === 'gallery-mirror';
 const rayBudget = op === 'gallery-ray-budget';
+const denoiseTiming = op === 'gallery-denoise-timing';
 const raySelection = rayBudget ? /^(area|reflection):(joint-(?:development|final-[ab]))(?::(\d+))?$/.exec(comparison) : null;
 const srReplay = op === 'gallery-sr-replay';
 const sequence = op === 'gallery-sequence' || srReplay;
@@ -33,8 +37,8 @@ if (rayBudget && (!headful || !raySelection)) {
   throw new Error('Ray budget needs --headful and <area|reflection>:<joint-development|joint-final-a|joint-final-b>[:final budget]');
 }
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
-    || flags.some(flag => flag !== '--headful')
-    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-grid-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-sr-replay', 'gallery-sr-timing', 'gallery-reflection-model', 'gallery-ray-budget', 'gallery-mirror'].includes(op)) {
+    || flags.some(flag => flag !== '--headful' && flag !== '--denoise' && !flag.startsWith('--denoise-params='))
+    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-grid-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-sr-replay', 'gallery-sr-timing', 'gallery-reflection-model', 'gallery-ray-budget', 'gallery-denoise-timing', 'gallery-mirror'].includes(op)) {
   throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-grid-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-sr-replay|gallery-sr-timing|gallery-reflection-model|gallery-ray-budget|gallery-mirror] [baseline|fixed|live|live-ui|train|test|both|reflection|joint-train-a|joint-train-b|joint-train-c|joint-development|joint-final-a|joint-final-b|sr|sr-reflection|joint|dataset|learned|coverage|sharp|priority] [--headful]');
 }
 let gridArgs;
@@ -196,7 +200,8 @@ try {
       buildId: receipt.buildId, remainingMs: 280000, requireFixed: comparison !== 'baseline',
       ...(mirror && { baseline: comparison === 'baseline', coverageOnly: comparison === 'coverage', sharpOnly: comparison === 'sharp', priorityOnly: comparison === 'priority' }),
       ...(srTiming && { modelHeads: comparison === 'fixed' ? 'sr' : comparison }), ...(sequence && { split: jointTrajectory || ['fixed', 'reflection'].includes(comparison) ? 'both' : comparison, reflection: comparison === 'reflection', trajectory: jointTrajectory }), ...(predictionDataset && { dataset: true }), ...(predictionLearned && { learned: true }),
-      ...(raySelection && { head: raySelection[1], trajectory: raySelection[2], budget: Number(raySelection[3] || 0) }),
+      ...(raySelection && { head: raySelection[1], trajectory: raySelection[2], budget: Number(raySelection[3] || 0), denoiseArms, denoiseParams }),
+      ...(denoiseTiming && { size: comparison.split('x').map(Number), denoiseParams }),
       ...gridArgs,
     })});
     const files = await Promise.all(result.files.map(async ({ name, blob, base64 }) => {
@@ -214,7 +219,7 @@ try {
   if (spherical && receipt.files.includes('lib/gallery-temporal-fit/manifest.json')) {
     ui.neural = await evalPage(`import('/lib/gallery-neural.js').then(module => module.verifyGalleryNeuralUi())`, 60000);
   }
-  if ((spherical || mirror || sequence || srTiming || rayBudget || gridDiffuse || predictionDataset || predictionLearned || op === 'gallery-reflection-model') && browserErrors.length) throw new Error(browserErrors.join('\n'));
+  if ((spherical || mirror || sequence || srTiming || rayBudget || denoiseTiming || gridDiffuse || predictionDataset || predictionLearned || op === 'gallery-reflection-model') && browserErrors.length) throw new Error(browserErrors.join('\n'));
   const userAgent = await evalPage('navigator.userAgent');
   if (headful && /HeadlessChrome/.test(userAgent)) throw new Error('Expected a windowed Windows Chrome session');
   const windows = { browser: version.Browser, mode: headful ? 'windowed' : 'headless',
@@ -307,7 +312,7 @@ try {
       receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'), url,
     };
     const manifest = path.join(output, op === 'prediction' && !predictionDataset ? (predictionLearned ? 'learned-prediction.json' : 'prediction.json') : capture || sequence || predictionDataset || gridDiffuse ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
-      : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : mirror ? 'mirror.json' : op === 'gallery-reflection-model' ? 'reflection-model.json' : srTiming ? 'sr-timing.json' : rayBudget ? 'ray-budget.json' : 'measurement.json');
+      : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : mirror ? 'mirror.json' : op === 'gallery-reflection-model' ? 'reflection-model.json' : srTiming ? 'sr-timing.json' : rayBudget ? 'ray-budget.json' : denoiseTiming ? 'denoise-timing.json' : 'measurement.json');
     await writeFile(manifest, JSON.stringify({ ...data, source, windows, ...(ui && { ui }) }, null, 2) + '\n', { flag: 'wx' });
     console.log(manifest);
     if (mirror && data.failure) {

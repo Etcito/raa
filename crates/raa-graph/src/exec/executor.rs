@@ -10,6 +10,9 @@ pub use area_model::AreaGraphModel;
 use area_model::{AreaModelFrame, SharedAreaFrame};
 #[path = "real_model.rs"]
 mod real_model;
+#[path = "denoise.rs"]
+mod denoise;
+use denoise::{DenoiseFrame, SharedDenoiseFrame};
 use real_model::{NeuralRoutes, RealModelFrame, SharedNeuralRoutes, SharedRealFrame};
 pub use real_model::{RealModelHeads, RealModelPackage, RealModelSelection, RealModelStats};
 
@@ -79,6 +82,7 @@ pub struct GraphExecutor {
     area_model: Option<Rc<RefCell<AreaModelFrame>>>,
     real_model: Option<Rc<RefCell<RealModelFrame>>>,
     neural_routes: Option<Rc<RefCell<NeuralRoutes>>>,
+    denoise: Option<Rc<RefCell<DenoiseFrame>>>,
 }
 
 impl Default for GraphExecutor {
@@ -105,6 +109,7 @@ impl GraphExecutor {
             area_model: None,
             real_model: None,
             neural_routes: None,
+            denoise: None,
         }
     }
 
@@ -210,6 +215,12 @@ impl GraphExecutor {
                 ));
             }
         };
+        let denoise_routes = match denoise::routes_from_plan(&plan, &self.catalog) {
+            Ok(routes) => routes,
+            Err(error) => {
+                return area_model::refused(area_model::issue(error.code(), error.to_string()));
+            }
+        };
         if model.is_some() && real.as_ref().is_some_and(|r| r.heads.area) {
             return area_model::refused(area_model::issue(
                 "graph.neural_route",
@@ -245,6 +256,7 @@ impl GraphExecutor {
         if result.ok {
             self.clear_real_model(h);
             self.install_neural_routes(h, routes);
+            self.install_denoise(h, denoise_routes);
             if let Some(real) = real {
                 self.install_real_model(h, real)
                     .expect("executor owns neural frame name");
@@ -336,6 +348,21 @@ impl GraphExecutor {
         }
     }
 
+    fn install_denoise(&mut self, h: &mut FeatureHandles<'_>, routes: Vec<denoise::Route>) {
+        const FRAME: &str = "denoise";
+        if self.denoise.take().is_some() {
+            h.pipeline.borrow_mut().remove_graph_frame(FRAME);
+        }
+        if !routes.is_empty() {
+            let frame = Rc::new(RefCell::new(DenoiseFrame::new(routes, h)));
+            h.pipeline
+                .borrow_mut()
+                .add_graph_frame(FRAME, Box::new(SharedDenoiseFrame(frame.clone())))
+                .expect("executor owns the denoise frame name");
+            self.denoise = Some(frame);
+        }
+    }
+
     fn clear_real_model(&mut self, h: &mut FeatureHandles<'_>) {
         if self.real_model.take().is_some() {
             h.pipeline
@@ -369,6 +396,9 @@ impl GraphExecutor {
             h.pipeline
                 .borrow_mut()
                 .remove_graph_frame("neural.native-inputs");
+        }
+        if self.denoise.take().is_some() {
+            h.pipeline.borrow_mut().remove_graph_frame("denoise");
         }
         self.no_graph = None;
         self.doc = None;

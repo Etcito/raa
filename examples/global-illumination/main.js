@@ -4,6 +4,7 @@ import { syncSphericalControls } from './lib/gallery-spherical.js';
 import { captureGallerySequence, captureGallerySrReplay, verifyGalleryReflection } from './lib/gallery-sequence.js';
 import { captureGalleryGridDiffuse } from './lib/gallery-grid-diffuse.js';
 import { measureGalleryRayBudget } from './lib/gallery-ray-budget.js';
+import { measureGalleryDenoiseTiming } from './lib/gallery-denoise-timing.js';
 import { measureGallerySrTiming } from './lib/gallery-sr-timing.js';
 import { applyGalleryNeural, syncNeuralControls } from './lib/gallery-neural.js';
 import { captureGalleryPath, measureGalleryDiffuse, measureGalleryPanelNoise, measureGalleryPath, measureGallerySpherical } from './lib/gallery-path-evidence.js';
@@ -145,7 +146,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
     for (const [op, action] of [['gallery-path-capture', captureGalleryPath],
       ['gallery-grid-diffuse', captureGalleryGridDiffuse], ['gallery-path-measure', measureGalleryPath], ['gallery-path-diffuse', measureGalleryDiffuse],
       ['gallery-panel-noise', measureGalleryPanelNoise], ['gallery-spherical', measureGallerySpherical],
-      ['gallery-sequence', captureGallerySequence], ['gallery-sr-replay', captureGallerySrReplay], ['gallery-sr-timing', measureGallerySrTiming], ['gallery-ray-budget', measureGalleryRayBudget], ['gallery-mirror', measureGalleryMirror], ['gallery-reflection-model', verifyGalleryReflection]]) {
+      ['gallery-sequence', captureGallerySequence], ['gallery-sr-replay', captureGallerySrReplay], ['gallery-sr-timing', measureGallerySrTiming], ['gallery-ray-budget', measureGalleryRayBudget], ['gallery-denoise-timing', measureGalleryDenoiseTiming], ['gallery-mirror', measureGalleryMirror], ['gallery-reflection-model', verifyGalleryReflection]]) {
       target.nmcGpu.ops[op] = input => exclusively(() => {
         stopInteractive();
         runner?.dispose();

@@ -180,6 +180,8 @@ pub fn node_entries(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> Vec<(Stri
                         | "ssr.replace"
                         | "neural.area-reconstruction"
                         | "neural.reflection-reconstruction"
+                        | "denoise.sigma"
+                        | "denoise.relax"
                         | "bloom.down"
                         | "bloom.up"
                         | "compute.wgsl"
