@@ -170,12 +170,18 @@ fn raa_ddgi_depth(v: RaaDdgiVolume, slot: u32, dir: vec3<f32>) -> vec2<f32> {
 // - the last cascade, with `clamp`, takes points beyond it from its border probes (trilinear at
 //   the clamped position, the normal-oriented weights only);
 // - legacy (`clamp` off on the last cascade): fades to zero over its outer half cell.
+// Inactive probes (classified "no surface in my cell", which 64 rays decide at random near small
+// geometry such as a pillar foot) are used only when no active probe is: otherwise all eight can
+// be inactive and the point got nothing (the flat ambient term in forward). Inactive probes stay
+// valid, refreshed one turn in eight. Probes inside geometry are never used.
 struct RaaDdgiCorners {
     slot: array<u32, 8>,
     weight: array<f32, 8>,
     total: f32,
     coverage: f32,
     band: f32,
+    // The weights come from inactive probes (no active probe was usable).
+    filled: bool,
 }
 
 fn raa_ddgi_corners(v: RaaDdgiVolume, p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>,
@@ -204,6 +210,8 @@ fn raa_ddgi_corners(v: RaaDdgiVolume, p: vec3<f32>, n: vec3<f32>, view_dir: vec3
     if out.band <= 0.0 { return out; }
     let cell = clamp(vec3<i32>(floor(local)), vec3<i32>(0), vec3<i32>(v.counts) - 2);
     let alpha = clamp(local - vec3<f32>(cell), vec3<f32>(0.0), vec3<f32>(1.0));
+    var spare_total = 0.0;
+    var spare_coverage = 0.0;
     for (var i = 0u; i < 8u; i++) {
         let corner = vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
         let g = v.base + cell + vec3<i32>(corner);
@@ -211,9 +219,11 @@ fn raa_ddgi_corners(v: RaaDdgiVolume, p: vec3<f32>, n: vec3<f32>, view_dir: vec3
         out.slot[i] = slot;
         let record = raa_ddgi_word(v.meta_row + RAA_DDGI_META_ROWS * slot);
         if any(bitcast<vec3<i32>>(record.xyz) != g) || (record.w & RAA_DDGI_VALID) == 0u
-            || (record.w & RAA_DDGI_INACTIVE) != 0u {
+            || (record.w & RAA_DDGI_INSIDE) != 0u {
             continue;
         }
+        let inactive = (record.w & RAA_DDGI_INACTIVE) != 0u;
+        if inactive && !clamp_far { continue; }
         let offset = bitcast<vec3<f32>>(raa_ddgi_word(v.meta_row + RAA_DDGI_META_ROWS * slot + 1u).xyz);
         let probe = vec3<f32>(g) * v.spacing + offset;
         let tri = mix(1.0 - alpha, alpha, vec3<f32>(corner));
@@ -238,9 +248,25 @@ fn raa_ddgi_corners(v: RaaDdgiVolume, p: vec3<f32>, n: vec3<f32>, view_dir: vec3
         weight = max(weight, 1e-6);
         if weight < 0.2 { weight *= weight * weight / 0.04; }
         weight *= trilinear;
+        if inactive {
+            // Kept negative until the end: used only if no active probe is.
+            out.weight[i] = -weight;
+            spare_total += weight;
+            spare_coverage += trilinear;
+            continue;
+        }
         out.weight[i] = weight;
         out.total += weight;
         out.coverage += trilinear;
+    }
+    let fill = out.total <= 0.0 && spare_total > 0.0;
+    for (var i = 0u; i < 8u; i++) {
+        out.weight[i] = select(max(out.weight[i], 0.0), max(-out.weight[i], 0.0), fill);
+    }
+    if fill {
+        out.total = spare_total;
+        out.coverage = spare_coverage;
+        out.filled = true;
     }
     return out;
 }
@@ -255,7 +281,12 @@ fn raa_ddgi_confidence(c: RaaDdgiCorners) -> f32 {
 // confidence in w. Cascades from the finest: each takes the weight its confidence leaves to the
 // coarser ones. With the default far mode the result is renormalized and w is 1 wherever any
 // probe is usable (no flat-ambient remainder); legacy mode keeps the faded confidence.
+// Per-sample diagnostics of the last raa_ddgi_sample (debug "probes"): weight taken from
+// cascade 0, from the coarser cascades, and 1 where inactive probes filled a hole.
+var<private> raa_ddgi_diag: vec3<f32>;
+
 fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32> {
+    raa_ddgi_diag = vec3<f32>(0.0);
     let v0 = raa_ddgi_volume();
     let clamp_far = (v0.flags & RAA_DDGI_FAR_AMBIENT) == 0u;
     let cascades = raa_ddgi_cascades();
@@ -275,6 +306,8 @@ fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32>
         }
         let root = sum / c.total;
         let share = remaining * confidence;
+        if k == 0u { raa_ddgi_diag.x += share; } else { raa_ddgi_diag.y += share; }
+        if c.filled { raa_ddgi_diag.z = 1.0; }
         rgb += share * root * root;
         weight += share;
         remaining -= share;
@@ -339,7 +372,7 @@ fn raa_ddgi_evaluate(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, frag: vec2
     if !raa_ddgi_active() { return RaaSphericalResult(); }
     let sample = raa_ddgi_screen(p, frag, eye);
     let debug = (raa_ddgi_word(4u).w >> 8u) & 0xffu;
-    if debug == 1u { return RaaSphericalResult(sample, vec4<f32>(sample.rgb, 1.0)); }
+    if debug == 1u || debug == 4u { return RaaSphericalResult(sample, vec4<f32>(sample.rgb, 1.0)); }
     if debug == 2u {
         return RaaSphericalResult(sample, vec4<f32>(1.0 - sample.w, sample.w, 0.1, 1.0));
     }

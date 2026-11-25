@@ -811,7 +811,12 @@ fn ddgi_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let n = normalize((frame.inv_view * vec4<f32>(normal_view, 0.0)).xyz);
     let to_eye = frame.camera_pos.xyz - p;
     let distance = length(to_eye);
-    let sample = raa_ddgi_sample(p, n, to_eye / max(distance, 1e-6));
+    var sample = raa_ddgi_sample(p, n, to_eye / max(distance, 1e-6));
+    if ((raa_ddgi_word(4u).w >> 8u) & 0xffu) == 4u {
+        // Debug "probes": red = cascade 0 weight, green = coarser cascades, blue = hole filled by
+        // inactive probes; black = no usable probe (forward then takes the flat ambient term).
+        sample = vec4<f32>(raa_ddgi_diag * vec3<f32>(1.0, 1.0, 0.0) + vec3<f32>(0.0, 0.0, raa_ddgi_diag.z), 1.0);
+    }
     let rgb = clamp(sample.rgb, vec3<f32>(0.0), vec3<f32>(65504.0));
     ddgi_probes[row] = vec4<u32>(pack2x16float(rgb.xy), pack2x16float(vec2<f32>(rgb.z, sample.w)),
         bitcast<u32>(distance), 1u);
