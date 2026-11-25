@@ -251,7 +251,8 @@ fn raa_ddgi_probe_weight(v: RaaDdgiVolume, slot: u32, probe: vec3<f32>, p: vec3<
     let reach = bitcast<f32>(raa_ddgi_word(3u).z);
     var near = 1.0;
     if reach > 0.0 { near = saturate(2.0 - 2.0 * range / reach); }
-    return RaaDdgiProbeWeight(weight, saturate(2.0 * facing) * visible * near);
+    // In front: at least ~6 degrees above the tangent plane (a floor's probes sit just above it).
+    return RaaDdgiProbeWeight(weight, saturate(10.0 * facing) * visible * near);
 }
 
 // The eight probes of one cascade around a surface point and their weights (trilinear, smooth

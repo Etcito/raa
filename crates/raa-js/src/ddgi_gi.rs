@@ -55,6 +55,8 @@ impl Engine {
             put(&result, "budgetMs", s.budget_ms.into());
             put(&result, "burstMs", s.burst_ms.into());
             put(&result, "skyTransfer", s.sky_transfer.into());
+            put(&result, "surfaceSpacing", s.surface_spacing.into());
+            put(&result, "surfaceProbes", s.surface_probes.into());
             put(&result, "invalidation", (s.invalidation as u32).into());
             if let Some(stats) = state.stats() {
                 put(&result, "probes", stats.probes.into());
