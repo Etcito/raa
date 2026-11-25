@@ -63,8 +63,11 @@ var<workgroup> ddgi_direction: array<vec4<f32>, 256>;
 var<workgroup> ddgi_distance: array<f32, 256>;
 var<workgroup> ddgi_irr: array<vec3<f32>, 64>;
 var<workgroup> ddgi_depth_tile: array<vec2<f32>, 256>;
-// slot, run (0 skip, 1 trace), fresh, geometry age
+// slot, run (0 skip, 1 trace; 3 trace and request surface probes), fresh, geometry age
 var<workgroup> ddgi_job: vec4<u32>;
+// Whether this thread's probe may request surface probes: only a probe known to be in free space
+// (updated before, not inside geometry) speaks for the surfaces it sees.
+var<private> ddgi_may_request: bool;
 // sun age, other age, groups, replace the light mask
 var<workgroup> ddgi_job_groups: vec4<u32>;
 var<workgroup> ddgi_origin: vec4<f32>;
@@ -396,7 +399,7 @@ fn ddgi_served(p: vec3<f32>, n: vec3<f32>) -> bool {
 // back and assigns the cells (ddgi/extras.rs). Called right after the hit's `ddgi_bounce`.
 fn ddgi_request(p: vec3<f32>, ng: vec3<f32>) {
     let e = raa_ddgi_extra();
-    if e.count == 0u { return; }
+    if e.count == 0u || !ddgi_may_request { return; }
     let need = bitcast<f32>(raa_ddgi_word(7u).w);
     if raa_ddgi_quality.x >= need || raa_ddgi_quality.y >= 0.5 { return; }
     if distance(p, frame.camera_pos.xyz) > bitcast<f32>(raa_ddgi_word(8u).w) { return; }
@@ -640,6 +643,9 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
             run = 0u;
             ddgi_probes[row] = vec4<u32>(record.xyz, (record.w & 0xffu) | (((turn + 1u) & 0xffu) << 8u));
         }
+        if run == 1u && !fresh && (record.w & (RAA_DDGI_VALID | RAA_DDGI_INSIDE)) == RAA_DDGI_VALID {
+            run = 3u;
+        }
         ddgi_job = vec4<u32>(slot, run, u32(fresh), job >> 16u);
         // A fresh probe has no group to keep.
         ddgi_job_groups = vec4<u32>(job_groups & 0xffu, (job_groups >> 8u) & 0xffu,
@@ -649,6 +655,7 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
     let job = workgroupUniformLoad(&ddgi_job);
     let ages = workgroupUniformLoad(&ddgi_job_groups);
     if job.y == 0u { return; }
+    ddgi_may_request = job.y == 3u;
     let origin = workgroupUniformLoad(&ddgi_origin).xyz;
     let slot = job.x;
     let fresh = job.z != 0u;
