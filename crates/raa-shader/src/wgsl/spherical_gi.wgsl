@@ -132,25 +132,27 @@ fn raa_spherical_channel_sum(base: u32, channels: u32) -> vec3<f32> {
 // scaled so that it reproduces the probe's captured irradiance at the probe; misses
 // arrive from infinity along the patch direction.
 fn raa_spherical_probe_irradiance(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
-    let base = raa_spherical_slot(entry, mask) + RAA_SPHERICAL_PATCH_ROW;
+    let slot = raa_spherical_slot(entry, mask);
+    let base = slot + RAA_SPHERICAL_PATCH_ROW;
+    // Bit k: patch k saw sky (written by the projection), so its miss row is needed.
+    let misses = raa_spherical_data[slot + RAA_SPHERICAL_INFO_ROW].w;
     var e = vec3<f32>(0.0);
     for (var k = 0u; k < 24u; k++) {
         let r0 = bitcast<vec4<f32>>(raa_spherical_data[base + 3u * k]);
-        let r1 = bitcast<vec4<f32>>(raa_spherical_data[base + 3u * k + 1u]);
-        let r2 = raa_spherical_data[base + 3u * k + 2u];
         if r0.w >= 0.0 {
             let delta = r0.xyz - p;
             let d2 = dot(delta, delta);
             let w = delta * inverseSqrt(max(d2, 1e-10));
             let cos_n = dot(n, w);
             if cos_n > 0.0 {
-                let normal = raa_spherical_oct_decode(unpack2x16snorm(r2.w));
+                let r1 = bitcast<vec4<f32>>(raa_spherical_data[base + 3u * k + 1u]);
+                let normal = raa_spherical_oct_decode(unpack2x16snorm(raa_spherical_data[base + 3u * k + 2u].w));
                 let cos_h = mix(1.0, max(0.0, -dot(normal, w)), r1.w);
                 e += r1.xyz * (cos_h * cos_n / (d2 + r0.w));
             }
         }
-        let miss = bitcast<vec3<f32>>(r2.xyz);
-        if any(miss > vec3<f32>(0.0)) {
+        if (misses & (1u << k)) != 0u {
+            let miss = bitcast<vec3<f32>>(raa_spherical_data[base + 3u * k + 2u].xyz);
             let corner = vec2<f32>(f32(k & 1u), f32((k >> 1u) & 1u)) - 0.5;
             let d = normalize(raa_spherical_face_direction(k / 4u, corner));
             e += miss * max(0.0, dot(n, d));
@@ -255,31 +257,40 @@ fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult
     return RaaSphericalResult(raa_spherical_diffuse_at(p, normal, cell), vec4<f32>(0.0));
 }
 
+const RAA_SPHERICAL_EVALUATED: u32 = 2u;
+
 // Physical irradiance / pi stays available while forward displays a debug overlay.
-// The strongest four supported probes are evaluated with parallax; their support
+// Only the strongest RAA_SPHERICAL_EVALUATED probes are evaluated with parallax. Each
+// keeps its weight minus the next strongest weight, so a probe enters or leaves the
+// evaluated set at zero weight and the selection never shows a seam. The support
 // weights already include visibility, so occluded probes do not leak.
 fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
                            cell: RaaSphericalCoordinate) -> vec4<f32> {
     let neighbors = raa_spherical_neighbors(p, normal, cell);
     if neighbors.count == 0u { return vec4<f32>(0.0); }
     let mask = cell.desc.z;
-    var used = 0u;
-    var picked: array<bool, 8>;
+    var top: array<u32, 3>;
+    var top_weight = array<f32, 3>(0.0, 0.0, 0.0);
+    for (var i = 0u; i < neighbors.count; i++) {
+        let w = neighbors.weights[i];
+        if w > top_weight[0] {
+            top[2] = top[1]; top_weight[2] = top_weight[1];
+            top[1] = top[0]; top_weight[1] = top_weight[0];
+            top[0] = i; top_weight[0] = w;
+        } else if w > top_weight[1] {
+            top[2] = top[1]; top_weight[2] = top_weight[1];
+            top[1] = i; top_weight[1] = w;
+        } else if w > top_weight[2] {
+            top[2] = i; top_weight[2] = w;
+        }
+    }
     var sum = vec3<f32>(0.0);
     var total = 0.0;
-    for (var round = 0u; round < min(neighbors.count, 4u); round++) {
-        var best = 0u;
-        var best_weight = -1.0;
-        for (var i = 0u; i < neighbors.count; i++) {
-            if !picked[i] && neighbors.weights[i] > best_weight {
-                best = i;
-                best_weight = neighbors.weights[i];
-            }
-        }
-        picked[best] = true;
-        if best_weight <= 1e-6 { break; }
-        sum += best_weight * raa_spherical_probe_irradiance(neighbors.entries[best], mask, p, normal);
-        total += best_weight;
+    for (var k = 0u; k < RAA_SPHERICAL_EVALUATED; k++) {
+        let w = top_weight[k] - top_weight[RAA_SPHERICAL_EVALUATED];
+        if w <= 1e-7 { continue; }
+        sum += w * raa_spherical_probe_irradiance(neighbors.entries[top[k]], mask, p, normal);
+        total += w;
     }
     if total <= 0.0 { return vec4<f32>(0.0); }
     // Coverage ignores visibility so an occluded receiver still uses the probes
@@ -379,14 +390,14 @@ fn raa_spherical_neighbors(p: vec3<f32>, normal: vec3<f32>,
         result.count += 1u;
     }
 
-    if coverage < 0.5 && result.count < 8u {
+    if coverage < 0.5 && result.count < 2u {
         let center = vec2<i32>(floor(cell.angular));
-        let lo = max(i32(cell.shell) - 1, 0);
-        let hi = min(i32(cell.shell) + 1, i32(desc.y) - 1);
+        let lo = i32(cell.shell);
+        let hi = lo;
         for (var ri = lo - 1; ri <= hi; ri++) {
             for (var y = -1; y <= 1; y++) {
                 for (var x = -1; x <= 1; x++) {
-                    if result.count >= 8u { break; }
+                    if result.count >= 3u { break; }
                     // ri == lo - 1 visits the centre probe once.
                     if ri == lo - 1 && (x != 0 || y != 0) { continue; }
                     let shell = select(u32(max(ri, 0)), RAA_SPHERICAL_CENTER, ri == lo - 1);

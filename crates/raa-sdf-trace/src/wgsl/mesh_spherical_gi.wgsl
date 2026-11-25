@@ -151,6 +151,7 @@ var<workgroup> spherical_sky_sum: array<vec4<f32>, 64>;
 var<workgroup> spherical_sun_sum: array<vec3<f32>, 64>;
 var<workgroup> spherical_other_sum: array<vec3<f32>, 64>;
 var<workgroup> spherical_hit_sum: array<vec2<f32>, 64>;
+var<workgroup> spherical_miss_patches: atomic<u32>;
 
 // Slot row layout after the 21 legacy rows (keep in sync with spherical_gpu.rs and
 // RAA_SPHERICAL_* in spherical_gi.wgsl): 24 patches x 3 rows, 96 depth-moment bins
@@ -178,6 +179,9 @@ fn spherical_project(@builtin(local_invocation_id) id: vec3<u32>,
     var other_rgb = vec3<f32>(0.0);
     var total = 0.0;
     var hits = vec2<f32>(0.0);
+    var misses = 0u;
+    if px == 0u { atomicStore(&spherical_miss_patches, 0u); }
+    workgroupBarrier();
     // A free-space probe has no surface normal: projection zero is the uniform
     // spherical average and also counts back-face hits. The other six workgroups
     // each reduce one face into a world-axis descriptor.
@@ -191,7 +195,11 @@ fn spherical_project(@builtin(local_invocation_id) id: vec3<u32>,
         other_rgb += spherical_unpack(texel.other) * weight;
         total += weight;
         hits += vec2<f32>(f32(texel.hit_position.w > 0.5), f32(spherical_backface(texel)));
+        if texel.hit_position.w <= 0.5 {
+            misses |= 1u << (4u * face + (id.x >> 2u) + 2u * (id.y >> 2u));
+        }
     }
+    if misses != 0u { atomicOr(&spherical_miss_patches, misses); }
     spherical_sky_sum[px] = vec4<f32>(sky_rgb, total);
     spherical_sun_sum[px] = sun_rgb;
     spherical_other_sum[px] = other_rgb;
@@ -217,8 +225,9 @@ fn spherical_project(@builtin(local_invocation_id) id: vec3<u32>,
             let rays = 384.0;
             let back = spherical_hit_sum[0].y / rays;
             let validity = 1.0 - smoothstep(0.3, 0.5, back);
+            let info = bitcast<vec4<u32>>(vec4<f32>(validity, back, spherical_hit_sum[0].x / rays, 0.0));
             spherical_lookup[work.ids.y + SPHERICAL_INFO_ROW] =
-                bitcast<vec4<u32>>(vec4<f32>(validity, back, spherical_hit_sum[0].x / rays, 0.0));
+                vec4<u32>(info.xyz, atomicLoad(&spherical_miss_patches));
         }
     }
 }
