@@ -158,19 +158,25 @@ impl ClusterStore {
     /// stops the call. Units go to the lowest baking key, then to its first unfinished bake; a key
     /// whose bakes are all done is finished without a unit.
     pub fn step_all(&mut self, unit_clock: &mut dyn FnMut() -> bool) {
-        while let Some(key) = self.lowest_baking() {
-            if !self.has_unfinished(key) {
-                self.finish(key);
-                continue;
+        while let Some((key, bakes)) = self.entries.iter_mut().find_map(|(&key, entry)| match entry
+        {
+            Entry::Baking { bakes } => Some((key, bakes)),
+            _ => None,
+        }) {
+            for bake in bakes {
+                if is_done(bake) {
+                    continue;
+                }
+                loop {
+                    if !unit_clock() {
+                        return;
+                    }
+                    if bake.step(WorkBudget { units: 1 }) == crate::BakeStatus::Done {
+                        break;
+                    }
+                }
             }
-            if !unit_clock() {
-                return;
-            }
-            if let Some(Entry::Baking { bakes }) = self.entries.get_mut(&key)
-                && let Some(bake) = bakes.iter_mut().find(|bake| !is_done(bake))
-            {
-                bake.step(WorkBudget { units: 1 });
-            }
+            self.finish(key);
         }
     }
 
@@ -186,19 +192,6 @@ impl ClusterStore {
             self.generation += 1;
         }
         self.entries.insert(key, entry);
-    }
-
-    fn lowest_baking(&self) -> Option<u32> {
-        self.entries
-            .iter()
-            .find_map(|(key, entry)| matches!(entry, Entry::Baking { .. }).then_some(*key))
-    }
-
-    fn has_unfinished(&self, key: u32) -> bool {
-        match self.entries.get(&key) {
-            Some(Entry::Baking { bakes }) => bakes.iter().any(|bake| !is_done(bake)),
-            _ => false,
-        }
     }
 
     /// Finishes every bake of a key in order. The first failure refuses the key; otherwise the
