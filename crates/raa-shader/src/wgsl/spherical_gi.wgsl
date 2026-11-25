@@ -97,20 +97,37 @@ fn raa_spherical_oct_decode(e: vec2<f32>) -> vec3<f32> {
     return normalize(v);
 }
 
-// Chebyshev visibility of p from the probe on the stored depth moments (DDGI style),
-// queried slightly off the surface along its normal.
-fn raa_spherical_visibility(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f32>) -> f32 {
+fn raa_spherical_moments(slot: u32, face: u32, bin: vec2<u32>) -> vec2<f32> {
+    let index = 16u * face + 4u * bin.y + bin.x;
+    let row = bitcast<vec4<f32>>(raa_spherical_data[slot + RAA_SPHERICAL_MOMENT_ROW + index / 2u]);
+    return select(row.xy, row.zw, (index & 1u) != 0u);
+}
+
+// Chebyshev visibility of a query point (already biased off the surface). Bilinear: the
+// moments of the four nearest 4x4 bins of the face are interpolated (clamped at the face
+// border) before the Chebyshev test, so the visibility has no bin edges.
+fn raa_spherical_visibility_at(entry: u32, mask: u32, query: vec3<f32>, bilinear: bool) -> f32 {
     let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
-    let biased = p + n * max(0.02, 0.05 * probe.w);
-    let offset = biased - probe.xyz;
+    let offset = query - probe.xyz;
     let distance = length(offset);
     if distance < 1e-5 { return 1.0; }
     let face_uv = raa_spherical_face_uv(offset);
-    let bin = clamp(vec2<u32>((face_uv.xy + 1.0) * 2.0), vec2<u32>(0u), vec2<u32>(3u));
-    let index = 16u * u32(face_uv.z) + 4u * bin.y + bin.x;
-    let row = bitcast<vec4<f32>>(raa_spherical_data[raa_spherical_slot(entry, mask)
-        + RAA_SPHERICAL_MOMENT_ROW + index / 2u]);
-    let moments = select(row.xy, row.zw, (index & 1u) != 0u);
+    let face = u32(face_uv.z);
+    let slot = raa_spherical_slot(entry, mask);
+    var moments: vec2<f32>;
+    if bilinear {
+        let t = clamp((face_uv.xy + 1.0) * 2.0 - 0.5, vec2<f32>(0.0), vec2<f32>(3.0));
+        let b0 = min(vec2<u32>(floor(t)), vec2<u32>(2u));
+        let f = t - vec2<f32>(b0);
+        let m00 = raa_spherical_moments(slot, face, b0);
+        let m10 = raa_spherical_moments(slot, face, b0 + vec2<u32>(1u, 0u));
+        let m01 = raa_spherical_moments(slot, face, b0 + vec2<u32>(0u, 1u));
+        let m11 = raa_spherical_moments(slot, face, b0 + vec2<u32>(1u, 1u));
+        moments = mix(mix(m00, m10, f.x), mix(m01, m11, f.x), f.y);
+    } else {
+        let bin = clamp(vec2<u32>((face_uv.xy + 1.0) * 2.0), vec2<u32>(0u), vec2<u32>(3u));
+        moments = raa_spherical_moments(slot, face, bin);
+    }
     if distance <= moments.x { return 1.0; }
     let variance = max(abs(moments.y - moments.x * moments.x), 1e-4 * probe.w * probe.w);
     let d = distance - moments.x;
@@ -120,13 +137,34 @@ fn raa_spherical_visibility(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f32>) -
 
 // x: probe in front of the receiver, y: visibility, z: fade-in times validity.
 fn raa_spherical_support_gates(entry: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    return raa_spherical_support_gates_at(entry, p, n, p, 0u);
+}
+
+// EVAL ONLY (lookup variants): parallaxRange >= 9000 selects variant bits (value - 9000);
+// the parallax range is then effectively infinite (patches everywhere). Bit 0: small
+// normal/view offset of the lookup point, bit 1: large offset, bit 2: sharp backface
+// weight, bit 3: bilinear Chebyshev moments.
+fn raa_spherical_variant() -> u32 {
+    let range = bitcast<f32>(raa_spherical_data[3].y);
+    return select(0u, u32(range - 9000.0), range >= 9000.0);
+}
+
+// Gates with the visibility queried at `query` (the biased lookup point).
+fn raa_spherical_support_gates_at(entry: u32, p: vec3<f32>, n: vec3<f32>, query: vec3<f32>,
+                                  variant: u32) -> vec3<f32> {
     let mask = raa_spherical_data[1].z;
     let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
     let to_probe = probe.xyz - p;
     let facing = dot(to_probe * inverseSqrt(max(dot(to_probe, to_probe), 1e-12)), n);
     let half = 0.5 * (facing + 1.0);
-    let front = 0.05 + 0.95 * half * half;
-    let visibility = raa_spherical_visibility(entry, mask, p, n);
+    var front = 0.05 + 0.95 * half * half;
+    if (variant & 4u) != 0u {
+        let h = max(1e-4, half);
+        front = h * h;
+    }
+    // Without the lookup offset (bits 0-1) the query is p biased by this probe's spacing.
+    let at = select(p + n * max(0.02, 0.05 * probe.w), query, (variant & 3u) != 0u);
+    let visibility = raa_spherical_visibility_at(entry, mask, at, (variant & 8u) != 0u);
     let age = f32(raa_spherical_data[2].z - raa_spherical_data[entry].z);
     let fade = smoothstep(0.0, RAA_SPHERICAL_FADE_FRAMES, age + 1.0);
     let validity = bitcast<f32>(raa_spherical_data[raa_spherical_slot(entry, mask)
@@ -496,8 +534,25 @@ fn raa_spherical_top(p: vec3<f32>, n: vec3<f32>, cell: RaaSphericalCoordinate) -
 // centre probe and the shell's 3x3 ring join with a distance weight. It runs in the
 // half-resolution screen resolve, never in forward.
 fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
-                           cell: RaaSphericalCoordinate) -> vec4<f32> {
-    if cell.desc.x == 0u { return vec4<f32>(0.0); }
+                           cell_at_p: RaaSphericalCoordinate) -> vec4<f32> {
+    if cell_at_p.desc.x == 0u { return vec4<f32>(0.0); }
+    let variant = raa_spherical_variant();
+    // The receiver's normal (and the direction to the grid anchor, i.e. the camera) offsets
+    // the point that selects and weights the cell's corners and queries their visibility;
+    // the irradiance itself stays evaluated at p with n.
+    var q = p;
+    var cell = cell_at_p;
+    if (variant & 3u) != 0u {
+        let anchor = bitcast<vec4<f32>>(raa_spherical_data[0]).xyz;
+        let to_eye = anchor - p;
+        let eye = length(to_eye);
+        let v = select(normal, to_eye / max(eye, 1e-6), eye > 1e-4);
+        let k = select(vec2<f32>(0.2, 0.2), vec2<f32>(0.45, 0.25), (variant & 2u) != 0u);
+        q = p + raa_spherical_spacing(cell_at_p) * (k.x * normal + k.y * v);
+        let moved = raa_spherical_coordinate(q);
+        if moved.desc.x != 0u { cell = moved; }
+    }
+    let sharp = (variant & 4u) != 0u;
     let mask = cell.desc.z;
     // Far receivers may use the six-face irradiance (no parallax), see parallaxRange.
     let range = bitcast<f32>(raa_spherical_data[3].y);
@@ -517,10 +572,10 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
         if !raa_spherical_published(entry) { continue; }
         let f = select(1.0 - interpolation.fraction, interpolation.fraction, corner);
         let trilinear = f.x * f.y * f.z;
-        let gates = raa_spherical_support_gates(entry, p, normal);
+        let gates = raa_spherical_support_gates_at(entry, p, normal, q, variant);
         coverage += trilinear * gates.z;
-        let support = gates.x * gates.y * gates.z;
-        if support <= 1e-6 { continue; }
+        let support = raa_spherical_support(gates, sharp);
+        if support <= select(1e-6, 1e-12, sharp) { continue; }
         let value = raa_spherical_probe_value(entry, mask, p, normal, far);
         sum += trilinear * support * value;
         total += trilinear * support;
@@ -531,7 +586,7 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
     // faded in continuously as the trilinear coverage drops below 0.5.
     let corners = select(vec3<f32>(0.0), sum / max(total, 1e-12), total > 0.0);
     let floor_value = select(vec3<f32>(0.0), floor_sum / max(floor_total, 1e-12), floor_total > 0.0);
-    let main_weight = smoothstep(0.0, 0.02, total);
+    let main_weight = smoothstep(0.0, select(0.02, 1e-6, sharp), total);
     sum = mix(floor_value, corners, main_weight);
     total = select(0.0, 1.0, total > 0.0 || floor_total > 0.0);
     let ring = 1.0 - smoothstep(0.25, 0.5, coverage);
@@ -551,10 +606,10 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
             let offset = probe.xyz - p;
             let spacing2 = probe.w * probe.w;
             let distance_weight = 0.25 * spacing2 / (dot(offset, offset) + spacing2);
-            let gates = raa_spherical_support_gates(entry, p, normal);
+            let gates = raa_spherical_support_gates_at(entry, p, normal, q, variant);
             coverage += distance_weight * gates.z;
-            let w = distance_weight * gates.x * gates.y * gates.z;
-            if w <= 1e-6 { continue; }
+            let w = distance_weight * raa_spherical_support(gates, sharp);
+            if w <= select(1e-6, 1e-12, sharp) { continue; }
             ring_sum += w * raa_spherical_probe_value(entry, mask, p, normal, far);
             ring_total += w;
         }
@@ -572,6 +627,22 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
     let blend = smoothstep(0.0, 0.25, coverage) * edge;
     let intensity = bitcast<f32>(raa_spherical_data[0].w);
     return vec4<f32>(intensity * sum / total, blend);
+}
+
+// Probe spacing at a grid coordinate: the larger of the shell thickness and the angular
+// cell width (the same measure as a probe's stored spacing).
+fn raa_spherical_spacing(cell: RaaSphericalCoordinate) -> f32 {
+    let angular = 2.0 * cell.radius / f32(max(cell.desc.x, 1u));
+    return max(cell.bounds.z - cell.bounds.x, angular);
+}
+
+// Corner support from its gates. Sharp: facing x visibility below 0.2 is crushed
+// cubically (DDGI), so a probe behind the surface or occluded fades out smoothly but
+// steeply instead of keeping a few percent that normalisation can amplify into a leak.
+fn raa_spherical_support(gates: vec3<f32>, sharp: bool) -> f32 {
+    var w = gates.x * gates.y;
+    if sharp && w < 0.2 { w *= w * w / 0.04; }
+    return max(w, select(0.0, 1e-9, sharp)) * gates.z;
 }
 
 // One probe: parallax patches near, six-face irradiance beyond parallaxRange.
