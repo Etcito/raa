@@ -107,7 +107,7 @@ fn grid_diffuse_capture(q: GridDiffuseQuery, cell: RaaSphericalCoordinate,
     let base = REFLECTED_RECEIVER_BASE + row * GRID_DIFFUSE_CAPTURE_ROW_WORDS;
     let diagnostics = REFLECTED_RECEIVER_BASE + GRID_DIFFUSE_CAPTURE_MAX_ROWS * GRID_DIFFUSE_CAPTURE_ROW_WORDS;
     atomicStore(&counters[diagnostics + row], grid_diffuse_corner_diagnostics(q, cell));
-    let channels = raa_spherical_data[2].w;
+    let channels = raa_spherical_data[2].w & 7u;
     let seed = raa_spherical_hash(hash ^ options[2].w);
     let legacy = raa_spherical_diffuse_at(q.position, q.normal, cell);
     grid_diffuse_write_rgb(base, q.position);

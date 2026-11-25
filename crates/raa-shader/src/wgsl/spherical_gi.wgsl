@@ -237,7 +237,7 @@ fn raa_spherical_probe_irradiance(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f
 // The weights sum to 1 for any unit n, so uniform radiance L gives exactly L.
 fn raa_spherical_probe_cube(entry: u32, mask: u32, n: vec3<f32>) -> vec3<f32> {
     let slot = raa_spherical_slot(entry, mask);
-    let channels = raa_spherical_data[2].w;
+    let channels = raa_spherical_data[2].w & 7u;
     var e = vec3<f32>(0.0);
     for (var face = 0u; face < 6u; face++) {
         let axis = face / 2u;
@@ -342,6 +342,11 @@ fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult
     }
 
     return RaaSphericalResult(raa_spherical_diffuse_at(p, normal, cell), vec4<f32>(0.0));
+}
+
+// Whether the spherical term takes the screen AO (header row 2.w bit 16).
+fn raa_spherical_screen_ao() -> bool {
+    return (raa_spherical_data[2].w & 0x10000u) != 0u;
 }
 
 // Forward entry: the screen-resolved lookup at a forward pixel. A joint-bilateral blend of

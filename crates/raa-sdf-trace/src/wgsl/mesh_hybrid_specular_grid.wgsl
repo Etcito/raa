@@ -71,7 +71,7 @@ fn rough_spherical_direction(neighbors: RaaSphericalNeighbors, p: vec3<f32>,
                              direction: vec3<f32>) -> vec4<f32> {
     if neighbors.count < 2u { return vec4<f32>(0.0); }
     let intensity = bitcast<f32>(raa_spherical_data[0].w);
-    let channels = raa_spherical_data[2].w;
+    let channels = raa_spherical_data[2].w & 7u;
     var sum = vec3<f32>(0.0);
     var weight = 0.0;
     var supported = 0u;

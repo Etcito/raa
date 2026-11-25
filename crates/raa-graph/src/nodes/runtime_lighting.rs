@@ -168,6 +168,14 @@ impl NodeFamily for RuntimeLighting {
                 &[][..],
                 Rebuild::None,
             ),
+            (
+                "screenAo",
+                "Screen AO (GTAO) on the spherical irradiance",
+                ParamKind::Bool,
+                None,
+                &[][..],
+                Rebuild::None,
+            ),
         ];
         vec![NodeTypeSpec {
             id: SPHERICAL_TYPE,

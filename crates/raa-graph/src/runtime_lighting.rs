@@ -25,6 +25,7 @@ pub(crate) const SPHERICAL_KEYS: &[&str] = &[
     "sphereDirect",
     "directSunRange",
     "autoRange",
+    "screenAo",
     "enabled",
 ];
 
@@ -55,6 +56,7 @@ pub(crate) fn spherical_get(settings: SphericalGiSettings, key: &str) -> Option<
         "sphereDirect" => ParamValue::Bool(settings.sphere_direct),
         "directSunRange" => ParamValue::Number(f64::from(settings.direct_sun_range)),
         "autoRange" => ParamValue::Bool(settings.scheduler.auto_range),
+        "screenAo" => ParamValue::Bool(settings.screen_ao),
         "debug" => ParamValue::Enum(
             DEBUG
                 .iter()
@@ -120,6 +122,7 @@ pub(crate) fn spherical_set(
             settings.direct_sun_range = *value as f32;
         }
         ("autoRange", ParamValue::Bool(value)) => settings.scheduler.auto_range = *value,
+        ("screenAo", ParamValue::Bool(value)) => settings.screen_ao = *value,
         ("debug", ParamValue::Enum(value)) => {
             settings.debug = DEBUG
                 .iter()

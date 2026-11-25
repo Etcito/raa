@@ -67,6 +67,12 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
     var c = raa_pass_shade_ctx(s, in, ao, shadow);
     var spherical_debug = spherical.debug;
     c.spherical_diffuse = spherical.diffuse;
+    if !capture && raa_feature_enabled(RAA_SPHERICAL_GI_FEATURE) && raa_spherical_screen_ao() {
+        // Same as DDGI: the probe term takes the screen AO like the ambient it replaces
+        // (c.ao = min(material, screen); the blend multiplies by the material AO).
+        c.spherical_diffuse = vec4<f32>(spherical.diffuse.rgb * (c.ao / max(s.ao, 1e-4)),
+            spherical.diffuse.w);
+    }
     if !capture && !unlit && raa_feature_enabled(RAA_DDGI_GI_FEATURE)
         && !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
         let ddgi = raa_ddgi_evaluate(c.position, s.normal, c.view_dir, c.frag.xy,

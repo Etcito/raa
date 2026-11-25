@@ -263,7 +263,7 @@ fn ddgi_bounce(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, groups: u32,
     for (var k = 0u; k < cascades; k++) {
         let v = raa_ddgi_volume_at(k);
         let c = raa_ddgi_corners(v, p, n, view_dir, k + 1u == cascades, clamp_far);
-        let confidence = raa_ddgi_confidence(c);
+        let confidence = raa_ddgi_confidence(c, clamp_far);
         if confidence <= 0.0 { continue; }
         let share = remaining * confidence;
         for (var i = 0u; i < 8u; i++) {

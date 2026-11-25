@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 18] = [
+const OPTIONS: [&str; 19] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
@@ -43,6 +43,7 @@ const OPTIONS: [&str; 18] = [
     "sphereDirect",
     "directSunRange",
     "autoRange",
+    "screenAo",
 ];
 
 fn invalid(key: &str, reason: &str) -> RaaError {
@@ -158,6 +159,11 @@ fn read_patch(
                     .as_bool()
                     .ok_or_else(|| invalid(&name, "expected a boolean"))?;
             }
+            "screenAo" => {
+                settings.screen_ao = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(&name, "expected a boolean"))?;
+            }
             "probeCache" | "skySamples" | "lightSamples" => {
                 let count = number()?;
                 let max = if name == "probeCache" { 4096.0 } else { 64.0 };
@@ -251,6 +257,7 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
     put(&result, "sphereDirect", settings.sphere_direct.into());
     put(&result, "directSunRange", settings.direct_sun_range.into());
     put(&result, "autoRange", settings.scheduler.auto_range.into());
+    put(&result, "screenAo", settings.screen_ao.into());
     result.into()
 }
 
