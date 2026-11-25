@@ -42,6 +42,7 @@ const OPTIONS: [&str; 18] = [
     "parallaxRange",
     "sphereDirect",
     "directSunRange",
+    "frontProbes",
     "autoRange",
 ];
 
@@ -143,6 +144,11 @@ fn read_patch(
             }
             "sphereDirect" => {
                 settings.sphere_direct = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(&name, "expected a boolean"))?;
+            }
+            "frontProbes" => {
+                settings.front_probes = value
                     .as_bool()
                     .ok_or_else(|| invalid(&name, "expected a boolean"))?;
             }
@@ -249,6 +255,7 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
     put(&result, "lightSamples", settings.light_samples.into());
     put(&result, "parallaxRange", settings.parallax_range.into());
     put(&result, "sphereDirect", settings.sphere_direct.into());
+    put(&result, "frontProbes", settings.front_probes.into());
     put(&result, "directSunRange", settings.direct_sun_range.into());
     put(&result, "autoRange", settings.scheduler.auto_range.into());
     result.into()

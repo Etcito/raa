@@ -81,6 +81,9 @@ pub struct SphericalGiSettings {
     /// probes' visibility, and the probes' sun visibility replaces the far shadow.
     pub sphere_direct: bool,
     pub direct_sun_range: f32,
+    /// Experimental lookup (user sketch): a receiver uses the probes on the side its normal
+    /// faces, weighted by a compact distance kernel, instead of the trilinear cell corners.
+    pub front_probes: bool,
     pub intensity: f32,
     pub debug: SphericalGiDebug,
     /// Bit 0 selects sky, bit 1 sun and bit 2 other.
@@ -100,6 +103,7 @@ impl Default for SphericalGiSettings {
             parallax_range: 0.0,
             sphere_direct: false,
             direct_sun_range: 12.0,
+            front_probes: false,
             intensity: 1.0,
             debug: SphericalGiDebug::Off,
             channels: 7,
@@ -994,6 +998,8 @@ impl SphericalGpu {
         if settings.sphere_direct {
             rows[4][3] = settings.direct_sun_range.max(1e-6).to_bits();
         }
+        // Row 5 w: normal-side probe selection (frontProbes).
+        rows[5][3] = u32::from(settings.front_probes);
         for cell in scheduler.cells() {
             let key = encode_key(cell.key);
             let mut hash = hash_key(key) & mask;
