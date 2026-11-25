@@ -15,7 +15,7 @@ use crate::validate::ValidateCtx;
 
 pub(crate) const NRC_TYPE: &str = "neural.radiance-cache";
 const SOURCE: &str = "crates/raa-sdf-trace/src/mesh/nrc.rs";
-const SCALE_OPTIONS: &[&str] = &["quarter", "half", "full"];
+const SCALE_OPTIONS: &[&str] = &["eighth", "quarter", "half", "full"];
 const SAMPLE_OPTIONS: &[&str] = &["4096", "8192", "16384", "32768", "65536"];
 
 pub fn family() -> Box<dyn NodeFamily> {
@@ -60,7 +60,8 @@ fn scale_name(divisor: u32) -> &'static str {
     match divisor {
         1 => "full",
         2 => "half",
-        _ => "quarter",
+        4 => "quarter",
+        _ => "eighth",
     }
 }
 
@@ -234,6 +235,7 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> NrcSettin
                     "full" => 1,
                     "half" => 2,
                     "quarter" => 4,
+                    "eighth" => 8,
                     _ => 0,
                 }
             }

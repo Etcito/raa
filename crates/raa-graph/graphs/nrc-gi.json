@@ -53,7 +53,7 @@
         "hiddenLayers": 3,
         "trainSamples": "16384",
         "scale": "quarter",
-        "bounces": 1
+        "bounces": 0
       }
     },
     {

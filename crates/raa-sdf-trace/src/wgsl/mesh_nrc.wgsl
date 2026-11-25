@@ -1,9 +1,9 @@
-// Neural radiance cache on the shared world-space mesh BVH: training paths (self-trained short
-// suffixes) and the per-pixel use of the cache. The cache stores R(x, n) = indirect diffuse
+// Neural radiance cache on the shared world-space mesh BVH: training rays (self-trained
+// one-bounce suffixes) and the per-pixel use of the cache. The cache stores R(x, n) = indirect diffuse
 // irradiance / pi. Composed after the mesh trace module and `nrc_mlp.wgsl`.
 
 struct NrcParams {
-    // training paths, seed, bounces of the render pass, local-light count sampled exhaustively
+    // training samples, seed, bounces of the render pass, local-light count sampled exhaustively
     counts: vec4<u32>,
     // sky scale, ray limit (m), target clamp, unused
     tuning: vec4<f32>,
@@ -15,6 +15,9 @@ struct NrcParams {
 // Three rows per sample: position.xyz + valid, normal.xyz, target.rgb.
 @group(0) @binding(32) var<storage, read_write> nrc_samples: array<vec4<f32>>;
 @group(0) @binding(33) var nrc_noisy: texture_storage_2d<rgba16float, write>;
+// Two rows per pair of training threads: hit position + valid, hit normal.
+@group(0) @binding(34) var<storage, read> nrc_origins_in: array<vec4<f32>>;
+@group(0) @binding(35) var<storage, read_write> nrc_origins_out: array<vec4<f32>>;
 
 //!include nrc_mlp
 
@@ -108,46 +111,63 @@ fn nrc_store(index: u32, p: vec3<f32>, n: vec3<f32>, wanted: vec3<f32>, valid: b
     nrc_samples[index * 3u + 2u] = vec4<f32>(clamped, 0.0);
 }
 
-// One training path per invocation: a random pixel's visible point x0, a cosine bounce to y, a
-// second bounce to z and the cache at z as the tail. Sample 0 learns R(x0) = L_o(y), sample 1
-// learns R(y) = L_o(z).
+// One training sample per invocation: an origin x (a random visible pixel for even threads, a
+// surface reached by last frame's rays for odd threads, so the cache also learns what the
+// tails query off screen), one cosine bounce to y, direct light at y and the cache at y as the
+// tail (self-training). The sample learns R(x) = L_o(y). Each pair of threads hands one hit to
+// the next frame. A thread traces one closest-hit ray and its shadow rays: the pass costs about
+// one ray of latency.
 @compute @workgroup_size(64)
 fn nrc_paths(@builtin(global_invocation_id) id: vec3<u32>) {
-    let paths = nrc_params.counts.x;
-    if id.x >= paths { return; }
+    if id.x >= nrc_params.counts.x { return; }
     var seed = (id.x * 747796405u + nrc_params.counts.y * 2891336453u) ^ 0x85ebca6bu;
     let limit = nrc_params.tuning.y;
-    let uv = vec2<f32>(random(&seed), random(&seed));
-    let origin = world_at(uv, 0.0);
-    let x0 = nrc_surface(Ray(origin, normalize(world_at(uv, 1.0) - origin)), limit);
-    let first = id.x * 2u;
-    if !x0.hit || x0.unlit {
-        nrc_store(first, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0), false);
-        nrc_store(first + 1u, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0), false);
+    let slot = id.x >> 1u;
+    var p = vec3<f32>(0.0);
+    var n = vec3<f32>(0.0, 1.0, 0.0);
+    var bias = 2.0 * EPS;
+    var valid = false;
+    if (id.x & 1u) == 1u {
+        let stored = nrc_origins_in[slot * 2u];
+        p = stored.xyz;
+        n = nrc_origins_in[slot * 2u + 1u].xyz;
+        valid = stored.w > 0.5;
+    }
+    if !valid {
+        let dims = textureDimensions(depth);
+        let pixel = min(vec2<i32>(vec2<f32>(random(&seed), random(&seed)) * vec2<f32>(dims)),
+            vec2<i32>(dims) - 1);
+        let z = textureLoad(depth, pixel, 0);
+        let normal_view = textureLoad(normals, pixel, 0).xyz;
+        if z < 1.0 && dot(normal_view, normal_view) > 0.0 {
+            p = world_at(uv_at(pixel, dims), z);
+            n = normalize((frame.inv_view * vec4<f32>(normal_view, 0.0)).xyz);
+            bias = max(4.0 * EPS, 2e-3 * distance(p, frame.camera_pos.xyz));
+            valid = true;
+        }
+    }
+    // Which thread of the pair hands its hit over: the off-screen walk continues half the time.
+    var pair_seed = (slot * 2654435761u) ^ (nrc_params.counts.y * 2246822519u);
+    let keeper = u32(random(&pair_seed) < 0.5);
+    let keeps = (id.x & 1u) == keeper;
+    if !valid {
+        nrc_store(id.x, p, n, vec3<f32>(0.0), false);
+        if keeps { nrc_origins_out[slot * 2u] = vec4<f32>(0.0); }
         return;
     }
-    let d1 = nrc_bounce(x0.n, x0.ng, &seed);
-    let y = nrc_surface(Ray(x0.p + x0.ng * (2.0 * EPS), d1), limit);
-    if !y.hit {
-        nrc_store(first, x0.p, x0.n, nrc_sky(d1), true);
-        nrc_store(first + 1u, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0), false);
-        return;
+    let d = nrc_bounce(n, n, &seed);
+    let y = nrc_surface(Ray(p + n * bias, d), limit);
+    var wanted = nrc_sky(d);
+    if y.hit {
+        wanted = nrc_direct(y, -d, &seed);
+        if !y.unlit { wanted += diffuse(y.mat) * nrc_cached(y); }
     }
-    let direct_y = nrc_direct(y, -d1, &seed);
-    if y.unlit {
-        nrc_store(first, x0.p, x0.n, direct_y, true);
-        nrc_store(first + 1u, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0), false);
-        return;
+    nrc_store(id.x, p, n, wanted, true);
+    if keeps {
+        let next = y.hit && !y.unlit;
+        nrc_origins_out[slot * 2u] = vec4<f32>(y.p, select(0.0, 1.0, next));
+        nrc_origins_out[slot * 2u + 1u] = vec4<f32>(y.n, 0.0);
     }
-    let d2 = nrc_bounce(y.n, y.ng, &seed);
-    let z = nrc_surface(Ray(y.p + y.ng * (2.0 * EPS), d2), limit);
-    var from_z = nrc_sky(d2);
-    if z.hit {
-        from_z = nrc_direct(z, -d2, &seed);
-        if !z.unlit { from_z += diffuse(z.mat) * nrc_cached(z); }
-    }
-    nrc_store(first + 1u, y.p, y.n, from_z, true);
-    nrc_store(first, x0.p, x0.n, direct_y + diffuse(y.mat) * from_z, true);
 }
 
 // The cache at reduced resolution: rgb = R at the pixel, alpha = bounce ray length (0 without a

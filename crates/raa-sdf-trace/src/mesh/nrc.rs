@@ -55,7 +55,7 @@ pub struct NrcSettings {
     pub ema: f32,
     /// Online training on or off (off renders a frozen cache, e.g. a loaded checkpoint).
     pub train: bool,
-    /// Resolution divisor of the cache queries: 1, 2 or 4.
+    /// Resolution divisor of the cache queries: 1, 2, 4 or 8.
     pub divisor: u32,
     /// 0 queries the cache at the visible point; 1 traces one cosine bounce first.
     pub bounces: u32,
@@ -73,8 +73,8 @@ impl Default for NrcSettings {
             ema: 0.99,
             train: true,
             divisor: 4,
-            bounces: 1,
-            temporal_blend: 0.1,
+            bounces: 0,
+            temporal_blend: 0.2,
         }
     }
 }
@@ -87,7 +87,7 @@ impl NrcSettings {
             && self.learning_rate.is_finite()
             && (0.0..=0.1).contains(&self.learning_rate)
             && (0.0..=0.9999).contains(&self.ema)
-            && matches!(self.divisor, 1 | 2 | 4)
+            && matches!(self.divisor, 1 | 2 | 4 | 8)
             && self.bounces <= 1
             && self.temporal_blend > 0.0
             && self.temporal_blend <= 1.0;
@@ -97,7 +97,7 @@ impl NrcSettings {
                 message: format!(
                     "expected 1-{MAX_HIDDEN} hidden layers, a power-of-two sample count in \
                      [{MIN_SAMPLES}, {}], a learning rate in [0, 0.1], an EMA in [0, 0.9999], \
-                     a divisor of 1, 2 or 4, 0 or 1 bounce and a temporal blend in (0, 1]",
+                     a divisor of 1, 2, 4 or 8, 0 or 1 bounce and a temporal blend in (0, 1]",
                     MAX_BATCH * MAX_STEPS
                 ),
             });
@@ -326,6 +326,8 @@ impl NrcFeature {
 
 struct Staged {
     train_steps: u32,
+    /// Origin buffer the first training step reads; steps alternate.
+    origin: usize,
     render: bool,
     write: usize,
     export: Option<u32>,
@@ -480,7 +482,7 @@ impl FeaturePass for NrcPass {
             let mut params = Vec::with_capacity(48);
             push_u32(
                 &mut params,
-                [batch / 2, seed.wrapping_add(step), settings.bounces, 4],
+                [batch, seed.wrapping_add(step), settings.bounces, 4],
             );
             push_f32(&mut params, [sky_diffuse, limit, 64.0, 0.0]);
             push_u32(&mut params, [low.0, low.1, divisor, 0]);
@@ -509,6 +511,7 @@ impl FeaturePass for NrcPass {
         queue.write_buffer(&gpu.resolve_params, 0, &resolve);
         self.staged = Some(Staged {
             train_steps,
+            origin: (self.steps & 1) as usize,
             render: true,
             write,
             export: export.then_some((self.steps + u64::from(train_steps)) as u32),
@@ -571,6 +574,11 @@ impl FeaturePass for NrcPass {
             let mut entries = scene.clone();
             entries.push(buffer_entry(30, &gpu.params[step + 1]));
             entries.push(buffer_entry(32, &gpu.samples));
+            entries.push(image_entry(6, &depth));
+            entries.push(image_entry(7, &normal));
+            let origin = (staged.origin + step) & 1;
+            entries.push(buffer_entry(34, &gpu.origins[origin]));
+            entries.push(buffer_entry(35, &gpu.origins[1 - origin]));
             let paths = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("gi.nrc.paths"),
                 layout: &gpu.paths.get_bind_group_layout(0),
@@ -581,7 +589,7 @@ impl FeaturePass for NrcPass {
                 "gi.nrc.paths",
                 &gpu.paths,
                 &paths,
-                ((gpu.batch / 2).div_ceil(64), 1),
+                (gpu.batch.div_ceil(64), 1),
             );
             let learn = |pipeline: &wgpu::ComputePipeline, partial: bool| {
                 let mut entries = vec![
@@ -821,6 +829,7 @@ struct NrcGpu {
     moment1: Buffer,
     moment2: Buffer,
     samples: Buffer,
+    origins: [Buffer; 2],
     acts: Buffer,
     deltas: Buffer,
     partial: Buffer,
@@ -881,6 +890,10 @@ impl NrcGpu {
             moment1: storage("gi.nrc.moment1", rows * 16),
             moment2: storage("gi.nrc.moment2", rows * 16),
             samples: storage("gi.nrc.samples", u64::from(batch) * 48),
+            origins: [
+                storage("gi.nrc.origins.a", u64::from(batch) * 16),
+                storage("gi.nrc.origins.b", u64::from(batch) * 16),
+            ],
             acts: storage("gi.nrc.acts", batch_bytes),
             deltas: storage("gi.nrc.deltas", batch_bytes),
             partial: storage("gi.nrc.partial", u64::from(batch / CHUNK) * rows * 16),
