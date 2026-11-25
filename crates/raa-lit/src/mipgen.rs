@@ -11,8 +11,17 @@
 use crate::textures::quantize;
 use std::sync::LazyLock;
 
-static LINEAR_CHANNELS: LazyLock<[f32; 256]> =
-    LazyLock::new(|| std::array::from_fn(|i| srgb_to_linear(i as u8)));
+const ENCODE_BINS: usize = 4096;
+
+struct SrgbTables {
+    linear: [f32; 256],
+    encoded: [u8; ENCODE_BINS + 1],
+}
+
+static SRGB: LazyLock<SrgbTables> = LazyLock::new(|| SrgbTables {
+    linear: std::array::from_fn(|i| srgb_to_linear(i as u8)),
+    encoded: std::array::from_fn(|i| quantize(linear_to_srgb(i as f32 / ENCODE_BINS as f32))),
+});
 
 /// The rgba bytes of texel `(x, y)` of a `width`-texel-wide image; `[0; 4]` out of range.
 fn texel(src: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
@@ -41,16 +50,30 @@ fn linear_to_srgb(l: f32) -> f32 {
     }
 }
 
+// Most bins lie inside one output byte of the monotone transfer curve.
+// Evaluate the original curve in bins that cross a rounding boundary.
+fn encode_channel(linear: f32, endpoints: &[u8; ENCODE_BINS + 1]) -> u8 {
+    let bin = ((linear * ENCODE_BINS as f32) as usize).min(ENCODE_BINS - 1);
+    if endpoints[bin] == endpoints[bin + 1] {
+        endpoints[bin]
+    } else {
+        quantize(linear_to_srgb(linear))
+    }
+}
+
 /// One output texel from its four taps: the linear rule for every channel, or the sRGB rule
 /// for r, g and b when `srgb` is set (alpha stays linear).
-fn average(taps: [[u8; 4]; 4], linear_channels: Option<&[f32; 256]>) -> [u8; 4] {
+fn average(taps: [[u8; 4]; 4], srgb: Option<&SrgbTables>) -> [u8; 4] {
     let mut out = [0; 4];
     for (channel, value) in out.iter_mut().enumerate() {
-        *value = if let Some(table) = linear_channels
+        *value = if let Some(tables) = srgb
             && channel < 3
         {
-            let sum: f32 = taps.iter().map(|t| table[usize::from(t[channel])]).sum();
-            quantize(linear_to_srgb(sum / 4.0))
+            let sum: f32 = taps
+                .iter()
+                .map(|t| tables.linear[usize::from(t[channel])])
+                .sum();
+            encode_channel(sum / 4.0, &tables.encoded)
         } else {
             let sum: u32 = taps.iter().map(|t| u32::from(t[channel])).sum();
             ((sum + 2) / 4) as u8
@@ -76,7 +99,7 @@ pub fn downsample_rgba8(src: &[u8], width: u32, height: u32, srgb: bool) -> (Vec
     if width == 0 || height == 0 || src.len() < len {
         return (Vec::new(), out_width, out_height);
     }
-    let linear_channels = srgb.then(|| LazyLock::force(&LINEAR_CHANNELS));
+    let tables = srgb.then(|| LazyLock::force(&SRGB));
     let (w, h) = (width as usize, height as usize);
     let mut out = Vec::with_capacity(out_width as usize * out_height as usize * 4);
     for j in 0..out_height as usize {
@@ -91,7 +114,7 @@ pub fn downsample_rgba8(src: &[u8], width: u32, height: u32, srgb: bool) -> (Vec
                 texel(src, w, x0, y1),
                 texel(src, w, x1, y1),
             ];
-            out.extend_from_slice(&average(taps, linear_channels));
+            out.extend_from_slice(&average(taps, tables));
         }
     }
     (out, out_width, out_height)
