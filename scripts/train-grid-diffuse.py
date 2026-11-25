@@ -17,6 +17,7 @@ FEATURES = (
 LAYOUT = (("w1", (8, 8)), ("b1", (8,)), ("w2", (8,)), ("b2", (1,)))
 FORMAT = "raa.spherical-diffuse-gate/1"
 UNITS = "scene-linear irradiance/pi before receiver albedo"
+PARAMETER_LIMIT = 16.0
 LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
 
@@ -59,8 +60,8 @@ def unpack(blob):
     if len(blob) != 81 * 4:
         raise ValueError("Expected 81 float32 weights")
     words = np.frombuffer(blob, dtype="<f4")
-    if not np.isfinite(words).all():
-        raise ValueError("Model contains non-finite weights")
+    if not np.isfinite(words).all() or (np.abs(words) > PARAMETER_LIMIT).any():
+        raise ValueError("Model weights must be finite and bounded by 16")
     arrays = []
     offset = 0
     for _, shape in LAYOUT:
@@ -146,6 +147,7 @@ def optimize(taps, steps, batch_size, seed, learning_rate):
             second *= 0.999
             second += 0.001 * grad ** 2
             weight -= rate * first / (np.sqrt(second) + 1e-8)
+            np.clip(weight, -PARAMETER_LIMIT, PARAMETER_LIMIT, out=weight)
         if step % 50 == 0 or step == steps:
             train_loss = log_error(gated_mix(taps, params), target, scale)
             history.append({"step": step, "logMse": train_loss})
@@ -171,7 +173,10 @@ def metrics(prediction, target, scale):
 
 def score(taps, params, scale):
     mask = taps.supported
-    result = {"hits": len(mask), "supportedHits": int(mask.sum()), "coverage": float(mask.mean())}
+    result = {"hits": len(mask), "supportedHits": int(mask.sum()),
+              "coverage": float(mask.mean()) if len(mask) else None}
+    if not len(mask):
+        return result
     analytic = gated_mix(taps)
     learned = gated_mix(taps, params)
     # Scores of the cache contribution on all requests retain weak or absent support.
@@ -218,7 +223,7 @@ def relative_read(directory, name):
 
 
 def unpack_rows(data, row_count):
-    if type(row_count) is not int or row_count <= 0:
+    if type(row_count) is not int or row_count < 0:
         raise ValueError("Invalid capture row count")
     if len(data) != row_count * 128 * 4:
         raise ValueError("Expected 128 words per native capture row")
@@ -263,7 +268,9 @@ def read_capture(path, split):
     scene = manifest["scene"]
     if scene["split"] != split or not scene["id"] or not is_sha256(scene["geometrySha256"]):
         raise ValueError(f"Capture is not an identified {split} scene: {path}")
-    if manifest["source"]["platform"] != "win32" or not manifest["source"]["adapter"]:
+    source = manifest["source"]
+    facts = source.get("facts", {})
+    if source["platform"] != "win32" or not source.get("adapter") and not facts.get("hardware"):
         raise ValueError(f"Capture lacks native Windows GPU provenance: {path}")
     if not manifest["frames"]:
         raise ValueError(f"No frames in capture: {path}")
@@ -280,6 +287,9 @@ def read_capture(path, split):
         if sha256(data) != record["sha256"]:
             raise ValueError(f"Capture digest mismatch: {record['file']}")
         taps, rows = unpack_rows(data, record["rows"])
+        identity = rows.view("<u4")[:, [0, 1, 2, 3, 31]]
+        if sha256(identity.tobytes()) != ref["firstHitSha256"]:
+            raise ValueError(f"First-hit digest does not match the captured geometry: {record['id']}")
         frames.append((record, taps, rows))
     return manifest, frames, sha256(payload)
 
@@ -301,8 +311,8 @@ def coverage(taps, params):
         "oneNeighbor": int(distribution[1]),
         "fallbackFull": int((blend == 0).sum()),
         "fallbackPartial": int(((blend > 0) & (blend < 1)).sum()),
-        "fallbackFraction": float((blend < 1).mean()),
-        "meanFallbackBlend": float((1 - blend).mean()),
+        "fallbackFraction": float((blend < 1).mean()) if len(blend) else None,
+        "meanFallbackBlend": float((1 - blend).mean()) if len(blend) else None,
         # Check the weighting itself, even though the runtime routes one-cell hits to fallback.
         "oneNeighborNormalizedRgbDeltaMax": float(np.max(np.abs(
             gated_mix(singles, require_support=False)

@@ -51,7 +51,8 @@ def sample_capture(directory, scene, split):
         "frames": [{
             "id": "one", "condition": "static", "file": "frame.bin", "rows": len(rows),
             "sha256": grid.sha256(data), "reference": {
-                "samplesPerBank": 32, "independent": True, "firstHitSha256": grid.sha256(b"same ray"),
+                "samplesPerBank": 32, "independent": True,
+                "firstHitSha256": grid.sha256(rows.view("<u4")[:, [0, 1, 2, 3, 31]].tobytes()),
             },
         }],
     })
@@ -60,13 +61,15 @@ def sample_capture(directory, scene, split):
 
 class GridDiffuseTrainerTest(unittest.TestCase):
     def test_weight_package_uses_renderer_offsets(self):
-        data = np.arange(81, dtype="<f4").tobytes()
+        data = (np.arange(81, dtype="<f4") / 8).tobytes()
         w1, b1, w2, b2 = grid.unpack(data)
-        self.assertEqual(w1[1, 0], 8)
-        self.assertEqual(b1[0], 64)
-        self.assertEqual(w2[0], 72)
-        self.assertEqual(b2[0], 80)
+        self.assertEqual(w1[1, 0], 1)
+        self.assertEqual(b1[0], 8)
+        self.assertEqual(w2[0], 9)
+        self.assertEqual(b2[0], 10)
         self.assertEqual(grid.pack((w1, b1, w2, b2)), data)
+        with self.assertRaisesRegex(ValueError, "bounded by 16"):
+            grid.unpack(np.full(81, 17, dtype="<f4").tobytes())
 
     def test_one_cell_reweighting_cancels_and_routes_to_fallback(self):
         taps = example_taps()
@@ -84,6 +87,13 @@ class GridDiffuseTrainerTest(unittest.TestCase):
         self.assertEqual(report["fallbackFull"], 2)
         self.assertEqual(report["fallbackPartial"], 1)
         self.assertEqual(report["oneNeighborNormalizedRgbDeltaMax"], 0)
+
+    def test_empty_frame_does_not_drop_coverage_or_invent_a_score(self):
+        taps, rows = grid.unpack_rows(b"", 0)
+        params = tuple(np.zeros(shape, np.float32) for _, shape in grid.LAYOUT)
+        self.assertEqual(rows.shape, (0, 128))
+        self.assertEqual(grid.score(taps, params, 1), {"hits": 0, "supportedHits": 0, "coverage": None})
+        self.assertEqual(grid.coverage(taps, params)["neighborCountHistogram0To8"], [0] * 9)
 
     def test_analytic_gradient_matches_finite_difference(self):
         taps = example_taps()
