@@ -108,7 +108,13 @@ fn find_node<'a>(plan: &'a GraphPlan, id: &str) -> Option<&'a PlanNode> {
 }
 
 pub fn mesh_trace_type(ty: &str) -> bool {
-    matches!(ty, "mesh.reflection" | "mesh.reference" | "mesh.fitted-specular")
+    matches!(
+        ty,
+        "mesh.reflection"
+            | "mesh.reference"
+            | "mesh.fitted-specular"
+            | crate::mesh_indirect::GRID_DIFFUSE_TYPE
+    )
 }
 
 /// Whether the node writes a pooled chain image.

@@ -94,3 +94,56 @@ Connect the desired stage's `color` to the downstream tone mapper or HDR effect.
 complete SSR and geometry-reflection route. `meshTracingStats(nodeId)` reports completed GPU
 counters for a graph instance. Graph settings are per instance. Detaching the graph returns
 control to the existing `setMeshTracing` settings.
+
+### Grid-conditioned secondary diffuse experiment
+
+The opt-in `mesh.grid-diffuse` graph stage uses the geometry-reflections wiring.
+Connect `pass.gi.spherical.lookup` to its `sphericalLookup` input. An explicit
+spherical-only link leaves the volume atlas disconnected. The default
+`analytic-directional` mode cosine-weights six solid-angle-weighted face means
+from the same cache. `legacy` measures the existing projection with identical
+graph wiring. `learned` runs the same directional lookup with a shared 8→8→1
+ReLU gate compiled into the mesh WGSL pipeline.
+
+Load the frozen 324-byte little-endian FP32 checkpoint with
+`setMeshGridDiffuseModel` before applying a learned graph. The tensor order is
+row-major W1[8,8], b1[8], W2[8], b2. Inputs per cell are the three normalized
+query offsets, normal agreement, directional luminance-moment alignment,
+floored trilinear factor, geometric support and validity. The correction
+multiplies the existing base weights by `exp(clamp(logit, -4, 4))` before
+normalization. The existing support blend uses the uncorrected weights and
+requires two compatible, current cells. The receiver's diffuse material weight
+is applied once, after interpolation. Each cache slot gains 288 bytes for the
+six RGB face means in each of three lighting groups.
+
+For offline captures, call `setMeshGridDiffuseCapture(seed, stride)` and read
+`meshGridDiffuseCapture(nodeId)` after the GPU has submitted and mapped a
+frame. Zero stride disables capture. A stable hash of the primary trace pixel
+selects one in stride eligible diffuse secondary hits. A candidate count over
+128 marks a truncated frame. The seed changes the two independent 32-ray
+reference banks. The reference reads scene-linear irradiance divided by π at
+the real secondary hit and uses the same sky, sun and local-light groups as
+the grid. RGB values include grid intensity.
+
+Each row has 128 words. Interpret the header triplets as FP32, with the
+following layout.
+
+| Word | Field |
+|---:|---|
+| 0 | World position XYZ |
+| 3 | Dense triangle ID (u32) |
+| 4 | Shading normal XYZ |
+| 7 | Material ID (u32) |
+| 8 | Geometric normal XYZ |
+| 11 | Neighbor count (u32) |
+| 12 | Traced reference bank A RGB |
+| 15 | Directional support blend |
+| 16 | Traced reference bank B RGB |
+| 19 | Legacy support blend |
+| 20 | Legacy RGB before support blend |
+| 23 | Sum of base neighbor weights |
+| 24 | Active mode RGB before support blend |
+| 27 | Light-group mask (u32) |
+| 28 | Analytic directional RGB before support blend |
+| 31 | Primary trace pixel ordinal (u32, row-major at trace resolution) |
+| 32 | Up to eight 12-word neighbors. Each contains 8 FP32 features, RGB and base weight. |

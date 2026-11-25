@@ -7,9 +7,10 @@ use raa_core::RaaError;
 use raa_lit::{DrawClass, FLAG_TRACE_MIRROR, FLAG_UNLIT, SurfaceModel};
 use raa_math::Mat4;
 use raa_sdf_trace::mesh::{
-    DiffuseOutput, LightingOutput, MAX_BOUNCES, MAX_LIGHTING_DEPTH, MESH_TRACE_NAME,
-    MeshIndirectGrid, MeshInput, MeshTraceFeature, MeshTraceHandle, MeshTraceMaterial,
-    MeshTraceSettings, MirrorPriority, PanelSampling, PathMode, SphericalGiHandle,
+    DiffuseOutput, GridDiffuseMode, LightingOutput, MAX_BOUNCES, MAX_LIGHTING_DEPTH,
+    MESH_TRACE_NAME, MeshIndirectGrid, MeshInput, MeshTraceFeature, MeshTraceHandle,
+    MeshTraceMaterial, MeshTraceSettings, MirrorPriority, PanelSampling, PathMode,
+    SphericalGiHandle,
 };
 use raa_shader::{RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE};
 use wasm_bindgen::prelude::*;
@@ -235,6 +236,7 @@ impl Engine {
             };
             let settings = MeshTraceSettings {
                 lighting_output,
+                grid_diffuse: GridDiffuseMode::Legacy,
                 reflections: js::optional_bool(&options, "reflections")?
                     .unwrap_or(previous.reflections),
                 reference: js::optional_bool(&options, "reference")?.unwrap_or(previous.reference),
@@ -353,6 +355,64 @@ impl Engine {
         })
     }
 
+    /// Loads the frozen 8→8→1 local interpolation gate for the grid diffuse graph node.
+    #[wasm_bindgen(js_name = setMeshGridDiffuseModel)]
+    pub fn set_mesh_grid_diffuse_model(&self, weights: &[u8]) -> Result<(), JsValue> {
+        self.with_state(|_, st| {
+            let handle = if let Some(handle) = st.features.get::<MeshTraceHandle>().cloned() {
+                handle
+            } else {
+                let handle = MeshTraceHandle::default();
+                st.features.insert(handle.clone());
+                handle
+            };
+            handle.borrow_mut().set_grid_diffuse_model(weights)
+        })
+    }
+
+    /// Requests deterministic offline rows from the live secondary-hit query. Zero disables.
+    #[wasm_bindgen(js_name = setMeshGridDiffuseCapture)]
+    pub fn set_mesh_grid_diffuse_capture(&self, seed: u32, stride: u32) -> Result<(), JsValue> {
+        self.with_state(|_, st| {
+            let handle = st
+                .features
+                .get::<MeshTraceHandle>()
+                .ok_or_else(|| api_error(INVALID_ARGUMENT, "Apply a grid diffuse graph first."))?;
+            handle
+                .borrow_mut()
+                .request_grid_diffuse_capture(seed, stride);
+            Ok(())
+        })
+    }
+
+    /// Latest completed row buffer for the specified opt-in node.
+    #[wasm_bindgen(js_name = meshGridDiffuseCapture)]
+    pub fn mesh_grid_diffuse_capture(&self, node: String) -> Result<JsValue, JsValue> {
+        self.with_state(|_, st| {
+            let Some(sample) = st
+                .features
+                .get::<MeshTraceHandle>()
+                .and_then(|handle| handle.borrow().grid_diffuse_capture(&node))
+            else {
+                return Ok(JsValue::NULL);
+            };
+            let result = Object::new();
+            for (name, value) in [
+                ("frame", sample.frame as f64),
+                ("seed", f64::from(sample.seed())),
+                ("stride", f64::from(sample.stride())),
+                ("width", f64::from(sample.size.0)),
+                ("height", f64::from(sample.size.1)),
+                ("candidates", f64::from(sample.candidates)),
+            ] {
+                Reflect::set(&result, &name.into(), &value.into()).expect("fresh object");
+            }
+            let rows = js_sys::Uint32Array::from(sample.words.as_slice());
+            Reflect::set(&result, &"rows".into(), &rows).expect("fresh object");
+            Ok(result.into())
+        })
+    }
+
     /// The latest completed GPU counter sample, or null until one is available.
     #[wasm_bindgen(js_name = meshTracingStats)]
     pub fn mesh_tracing_stats(&self, node: Option<String>) -> Result<JsValue, JsValue> {
@@ -401,6 +461,9 @@ impl Engine {
                 "sphericalPrimaryInGrid",
                 "sphericalPrimarySupported",
                 "reflectedReceiverCandidates",
+                "directionalDiffuseHits",
+                "learnedDiffuseHits",
+                "gridDiffuseCaptureCandidates",
             ];
             for (name, value) in names.into_iter().zip(stats.counts) {
                 Reflect::set(&result, &name.into(), &f64::from(value).into())
@@ -414,6 +477,12 @@ impl Engine {
             Reflect::set(&result, &"mirrorPriority".into(), &mirror_priority.into())
                 .expect("fresh object");
             let controls = stats.settings;
+            Reflect::set(
+                &result,
+                &"diffuseMode".into(),
+                &controls.grid_diffuse.name().into(),
+            )
+            .expect("fresh object");
             for (name, value) in [
                 ("frame", stats.frame as f64),
                 ("width", f64::from(stats.size.0)),

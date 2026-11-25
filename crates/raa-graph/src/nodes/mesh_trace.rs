@@ -6,7 +6,7 @@ use crate::catalog::{
     Category, GraphFormat, NodeFamily, NodeTypeSpec, ParamKind, ParamSpec, ParamValue, PortType,
     ShaderStage, SizeSpec,
 };
-use crate::mesh_indirect::{INHERIT_GI, VOLUME_PORT, VOLUME_SOURCE};
+use crate::mesh_indirect::{GRID_DIFFUSE_TYPE, INHERIT_GI, VOLUME_PORT, VOLUME_SOURCE};
 use raa_sdf_trace::mesh::{MAX_BOUNCES, MAX_LIGHTING_DEPTH, MeshTraceSettings, REFERENCE_SPP};
 
 pub fn family() -> Box<dyn NodeFamily> {
@@ -150,7 +150,26 @@ impl NodeFamily for MeshTrace {
             "Base scene HDR",
             GraphFormat::Rgba16Float,
         ));
+        let mut grid_params = screen_params();
+        grid_params.push(ParamSpec {
+            default: ParamValue::Enum("analytic-directional".into()),
+            ..choice(
+                "diffuseMode",
+                "Secondary diffuse",
+                &["legacy", "analytic-directional", "learned"],
+            )
+        });
+        let mut grid_diffuse = mesh(
+            GRID_DIFFUSE_TYPE,
+            "Grid-conditioned secondary diffuse",
+            reflection_inputs.clone(),
+            grid_params,
+            0.5,
+            false,
+        );
+        grid_diffuse.description = "Experimental geometry reflections with an opt-in directional or frozen learned diffuse lookup at secondary mesh hits.";
         vec![
+            grid_diffuse,
             mesh(
                 "mesh.reflection",
                 "Geometry reflections",

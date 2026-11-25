@@ -79,13 +79,55 @@ pub(crate) const MESH_VOLUME_GI: u32 = 2;
 
 /// World-space mesh intersections and the shared live GI lookups.
 pub fn mesh_trace_module() -> String {
-    mesh_trace_with_rough_grid(
-        "fn hybrid_grid_specular(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
-                                 mat: Material) -> HybridRoughGrid { return HybridRoughGrid(); }",
-    )
+    mesh_trace_with_rough_grid(NO_ROUGH_GRID, NO_GRID_DIFFUSE)
 }
 
-fn mesh_trace_with_rough_grid(rough_grid: &str) -> String {
+const NO_ROUGH_GRID: &str = "
+fn hybrid_grid_specular(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
+                        mat: Material) -> HybridRoughGrid { return HybridRoughGrid(); }
+";
+
+const NO_GRID_DIFFUSE: &str = "
+fn grid_diffuse(q: GridDiffuseQuery, cell: RaaSphericalCoordinate) -> vec4<f32> {
+    return raa_spherical_diffuse_at(q.position, q.normal, cell);
+}
+";
+
+/// Directional secondary-hit lookup. The selected fit is immutable for this pipeline.
+pub fn mesh_grid_diffuse_module(
+    directional: bool,
+    weights: Option<&[f32; crate::mesh::GRID_DIFFUSE_WEIGHT_COUNT]>,
+) -> String {
+    let mut source = mesh_trace_with_rough_grid(NO_ROUGH_GRID, "");
+    let _ = writeln!(
+        source,
+        "\nconst GRID_DIFFUSE_DIRECTIONAL: bool = {directional};"
+    );
+    if let Some(weights) = weights {
+        let words = weights
+            .iter()
+            .map(|weight| format!("{}u", weight.to_bits()))
+            .collect::<Vec<_>>();
+        let _ = writeln!(
+            source,
+            "const GRID_GATE_WEIGHTS = array<u32, 81>({});",
+            words.join(", ")
+        );
+        source.push_str(include_str!("wgsl/mesh_grid_diffuse_gate.wgsl"));
+    } else {
+        source.push_str(
+            "
+const GRID_DIFFUSE_LEARNED: bool = false;
+fn grid_diffuse_gate(features: array<f32, 8>) -> f32 { return 1.0; }
+",
+        );
+    }
+    source.push_str(include_str!("wgsl/mesh_grid_diffuse.wgsl"));
+    source.push_str(include_str!("wgsl/mesh_grid_diffuse_capture.wgsl"));
+    source
+}
+
+fn mesh_trace_with_rough_grid(rough_grid: &str, diffuse: &str) -> String {
     let gi = raa_shader::GI_VOLUME_WGSL;
     let mirror = raa_shader::NEAR_MIRROR_WGSL;
     let cube = raa_shader::SPHERICAL_CUBE_WGSL;
@@ -96,12 +138,15 @@ fn mesh_trace_with_rough_grid(rough_grid: &str) -> String {
          @group(0) @binding({MESH_SPHERICAL_BINDING}) var<storage, read> raa_spherical_data: array<vec4<u32>>;\n\
          const MESH_GRAPH_SCREEN: u32 = {MESH_GRAPH_SCREEN}u;\n\
          const MESH_VOLUME_GI: u32 = {MESH_VOLUME_GI}u;\n\
-         {spherical}{mirror}{mesh}\n{rough_grid}"
+         {spherical}{mirror}{mesh}\n{rough_grid}{diffuse}"
     )
 }
 
 pub fn mesh_hybrid_module() -> String {
-    let source = mesh_trace_with_rough_grid(include_str!("wgsl/mesh_hybrid_specular_grid.wgsl"));
+    let source = mesh_trace_with_rough_grid(
+        include_str!("wgsl/mesh_hybrid_specular_grid.wgsl"),
+        NO_GRID_DIFFUSE,
+    );
     let (word, bit) = raa_shader::feature_address(raa_shader::RAA_INDIRECT_DIFFUSE_AO_FEATURE)
         .expect("indirect diffuse AO has a frame feature address");
     let hybrid = include_str!("wgsl/mesh_hybrid.wgsl");

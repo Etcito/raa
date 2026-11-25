@@ -25,7 +25,34 @@ pub const MAX_BOUNCES: u32 = 6;
 /// A complete reference path can use both the diffuse/specular and mirror budgets.
 pub const MAX_LIGHTING_DEPTH: u32 = 2 * MAX_BOUNCES;
 pub const REFERENCE_SPP: u32 = 4;
-const COUNTER_COUNT: usize = 32;
+const COUNTER_COUNT: usize = 36;
+pub const GRID_DIFFUSE_WEIGHT_COUNT: usize = 81;
+const GRID_DIFFUSE_CAPTURE_WORDS: usize = 128;
+const GRID_DIFFUSE_MAX_CAPTURE_ROWS: usize = 128;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GridDiffuseCaptureRequest {
+    seed: u32,
+    stride: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct GridDiffuseCapture {
+    pub frame: u64,
+    pub size: (u32, u32),
+    pub candidates: u32,
+    pub words: Vec<u32>,
+    request: GridDiffuseCaptureRequest,
+}
+
+impl GridDiffuseCapture {
+    pub fn seed(&self) -> u32 {
+        self.request.seed
+    }
+    pub fn stride(&self) -> u32 {
+        self.request.stride
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
@@ -72,6 +99,25 @@ pub enum PanelSampling {
     Independent,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GridDiffuseMode {
+    #[default]
+    Legacy,
+    LegacyExperiment,
+    AnalyticDirectional,
+    Learned,
+}
+
+impl GridDiffuseMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Legacy | Self::LegacyExperiment => "legacy",
+            Self::AnalyticDirectional => "analytic-directional",
+            Self::Learned => "learned",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeshTraceSettings {
     pub reflections: bool,
@@ -83,6 +129,7 @@ pub struct MeshTraceSettings {
     pub diffuse_output: DiffuseOutput,
     pub panel_sampling: PanelSampling,
     pub lighting_output: LightingOutput,
+    pub grid_diffuse: GridDiffuseMode,
 }
 
 impl Default for MeshTraceSettings {
@@ -97,6 +144,7 @@ impl Default for MeshTraceSettings {
             diffuse_output: DiffuseOutput::Off,
             panel_sampling: PanelSampling::Stable,
             lighting_output: LightingOutput::Combined,
+            grid_diffuse: GridDiffuseMode::Legacy,
         }
     }
 }
@@ -214,6 +262,8 @@ pub struct MeshTraceScene {
     reflected_snapshot: Option<ReflectedSnapshot>,
     reference_sample: Option<(u32, u32)>,
     path: hybrid::PathState,
+    grid_diffuse_weights: Option<[f32; GRID_DIFFUSE_WEIGHT_COUNT]>,
+    grid_diffuse_capture: Option<GridDiffuseCaptureRequest>,
     geometry: Geometry,
     gpu_geometry: Option<pass::GeometryBuffers>,
     spherical_active: bool,
@@ -238,6 +288,64 @@ impl MeshTraceScene {
         self.epoch = self.epoch.wrapping_add(1);
         self.report.latest = None;
         Ok(())
+    }
+
+    /// A frozen local gate in row-major W1, b1, W2, b2 order.
+    pub fn set_grid_diffuse_model(&mut self, bytes: &[u8]) -> Result<(), RaaError> {
+        let error = || RaaError::FrameGraph {
+            code: "trace.grid_diffuse_model",
+            message: "Expected 81 finite little-endian f32 grid diffuse weights bounded by 16."
+                .into(),
+        };
+        if bytes.len() != GRID_DIFFUSE_WEIGHT_COUNT * 4 {
+            return Err(error());
+        }
+        let weights = std::array::from_fn(|i| {
+            let lane = i * 4;
+            f32::from_le_bytes(bytes[lane..lane + 4].try_into().expect("one weight"))
+        });
+        if weights
+            .iter()
+            .any(|weight| !(-16.0..=16.0).contains(weight))
+        {
+            return Err(error());
+        }
+        if self
+            .grid_diffuse_weights
+            .is_some_and(|loaded| loaded != weights)
+        {
+            return Err(RaaError::FrameGraph {
+                code: "trace.grid_diffuse_model_frozen",
+                message: "This renderer already owns a different frozen grid diffuse checkpoint."
+                    .into(),
+            });
+        }
+        self.grid_diffuse_weights = Some(weights);
+        Ok(())
+    }
+
+    pub fn request_grid_diffuse_capture(&mut self, seed: u32, stride: u32) {
+        let request = (stride != 0).then_some(GridDiffuseCaptureRequest { seed, stride });
+        if request != self.grid_diffuse_capture {
+            self.grid_diffuse_capture = request;
+            for report in self.graph_reports.values() {
+                report.borrow_mut().grid_diffuse_capture = None;
+            }
+        }
+    }
+
+    pub fn grid_diffuse_capture(&self, node: &str) -> Option<GridDiffuseCapture> {
+        let mut report = self.graph_report(node)?.borrow_mut();
+        report.poll_pending();
+        report
+            .grid_diffuse_capture
+            .as_ref()
+            .filter(|capture| Some(capture.request) == self.grid_diffuse_capture)
+            .cloned()
+    }
+
+    pub fn grid_diffuse_model_ready(&self) -> bool {
+        self.grid_diffuse_weights.is_some()
     }
 
     pub fn path_model_ready(&self) -> bool {
@@ -368,22 +476,33 @@ impl MeshTraceScene {
     }
 
     pub fn graph_stats(&self, node: &str) -> Option<MeshTraceStats> {
-        let mut report = self
-            .graph_reports
-            .iter()
-            .find(|(entry, _)| entry.rsplit_once('#').is_some_and(|(_, id)| id == node))?
-            .1
-            .borrow_mut();
+        let mut report = self.graph_report(node)?.borrow_mut();
         report.poll_pending();
         report.latest
     }
+
+    fn graph_report(&self, node: &str) -> Option<&Rc<RefCell<TraceReport>>> {
+        self.graph_reports.iter().find_map(|(entry, report)| {
+            entry
+                .rsplit_once('#')
+                .is_some_and(|(_, id)| id == node)
+                .then_some(report)
+        })
+    }
+}
+
+struct TraceReadback {
+    stats: MeshTraceStats,
+    reflected_feedback: Option<ReflectedFeedback>,
+    grid_diffuse_capture: Option<GridDiffuseCapture>,
 }
 
 #[derive(Default)]
 struct TraceReport {
     latest: Option<MeshTraceStats>,
-    pending: Option<Receiver<Option<(MeshTraceStats, Option<ReflectedFeedback>)>>>,
+    pending: Option<Receiver<Option<TraceReadback>>>,
     reflected_feedback: Option<ReflectedFeedback>,
+    grid_diffuse_capture: Option<GridDiffuseCapture>,
 }
 
 impl TraceReport {
@@ -397,9 +516,10 @@ impl TraceReport {
             return;
         };
         match pending.try_recv() {
-            Ok(Some((report, feedback))) => {
-                self.latest = Some(report);
-                self.reflected_feedback = feedback;
+            Ok(Some(readback)) => {
+                self.latest = Some(readback.stats);
+                self.reflected_feedback = readback.reflected_feedback;
+                self.grid_diffuse_capture = readback.grid_diffuse_capture;
                 self.pending = None;
             }
             Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => self.pending = None,

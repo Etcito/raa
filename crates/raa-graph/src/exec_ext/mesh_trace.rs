@@ -4,7 +4,8 @@ use crate::catalog::{Catalog, ParamValue};
 use crate::error::{Issue, Severity, Stage};
 use crate::exec::{ExecExtension, FeatureHandles, NodeStats, ResourceStat};
 use crate::mesh_indirect::{
-    SPHERICAL_INPUT, SPHERICAL_OUTPUT, VOLUME_PORT, VOLUME_TYPE, mesh_grid_consumer, mesh_grid_port,
+    GRID_DIFFUSE_TYPE, SPHERICAL_INPUT, SPHERICAL_OUTPUT, VOLUME_PORT, VOLUME_TYPE,
+    mesh_grid_consumer, mesh_grid_port,
 };
 use crate::plan::{GraphPlan, InputSource, PlanNode};
 use crate::registry::exec_wiring::plan_fns::{mesh_trace_type, node_entries};
@@ -12,7 +13,8 @@ use crate::runtime_lighting::SPHERICAL_TYPE;
 use raa_core::RaaError;
 use raa_pipeline::{GraphFrame, ImageDesc, RecordCtx};
 use raa_sdf_trace::mesh::{
-    GraphMeshTrace, LightingOutput, MeshTraceFeature, MeshTraceSettings, PanelSampling, PathMode,
+    GraphMeshTrace, GridDiffuseMode, LightingOutput, MeshTraceFeature, MeshTraceSettings,
+    PanelSampling, PathMode,
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -127,6 +129,16 @@ impl ExecExtension for MeshTrace {
         let mut bindings = Vec::new();
         for node in nodes {
             let options = options(node);
+            if options.settings.grid_diffuse == GridDiffuseMode::Learned
+                && !scene.borrow().grid_diffuse_model_ready()
+            {
+                return Err(issue(
+                    node,
+                    "trace.grid_diffuse_model_missing",
+                    "The frozen grid diffuse checkpoint has not been loaded.",
+                    "Load the frozen weights or select Analytic directional.",
+                ));
+            }
             if options.settings.path_mode == PathMode::Learned && !scene.borrow().path_model_ready()
             {
                 return Err(issue(
@@ -140,6 +152,14 @@ impl ExecExtension for MeshTrace {
                 .expect("mesh trace node has a pipeline entry")
                 .clone();
             let grids = indirect_grids(plan, node)?;
+            if node.type_id == GRID_DIFFUSE_TYPE && !grids.spherical {
+                return Err(issue(
+                    node,
+                    "graph.mesh_grid",
+                    "Grid-conditioned diffuse requires an active spherical lookup.",
+                    "Connect the Spherical GI lookup or restore inheritance.",
+                ));
+            }
             for input in node
                 .inputs
                 .iter()
@@ -328,6 +348,15 @@ fn options(node: &PlanNode) -> GraphMeshTrace {
             PathMode::Learned
         } else {
             PathMode::Off
+        },
+        grid_diffuse: if node.type_id == GRID_DIFFUSE_TYPE {
+            match choice("diffuseMode") {
+                "legacy" => GridDiffuseMode::LegacyExperiment,
+                "learned" => GridDiffuseMode::Learned,
+                _ => GridDiffuseMode::AnalyticDirectional,
+            }
+        } else {
+            GridDiffuseMode::Legacy
         },
         confidence_threshold: match value("confidenceThreshold") {
             Some(ParamValue::Number(value)) => *value as f32,

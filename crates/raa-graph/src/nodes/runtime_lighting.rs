@@ -279,7 +279,7 @@ fn validate_links(doc: &GraphDoc, issues: &mut Vec<Issue>) {
             param: None,
             link: Some(index as u32),
             message: "The spherical lookup buffer requires a dedicated lighting binding.".into(),
-            fix: "Connect lookup to sphericalLookup on forward, mesh.reflection or mesh.fitted-specular.".into(),
+            fix: "Connect lookup to sphericalLookup on forward or a mesh trace stage with a spherical input.".into(),
         });
     }
 }

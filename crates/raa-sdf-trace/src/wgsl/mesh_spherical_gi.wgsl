@@ -149,7 +149,8 @@ var<workgroup> spherical_other_sum: array<vec3<f32>, 64>;
 @compute @workgroup_size(8, 8, 1)
 fn spherical_project(@builtin(local_invocation_id) id: vec3<u32>,
                      @builtin(workgroup_id) group: vec3<u32>) {
-    let work = spherical_work[options[0].y + group.z];
+    let work = spherical_work[options[0].y + group.z / 7u];
+    let projection = group.z % 7u;
     let px = id.x + 8u * id.y;
     let uv = (vec2<f32>(id.xy) + 0.5) * 0.25 - 1.0;
     let jacobian = pow(1.0 + dot(uv, uv), -1.5);
@@ -157,9 +158,13 @@ fn spherical_project(@builtin(local_invocation_id) id: vec3<u32>,
     var sun_rgb = vec3<f32>(0.0);
     var other_rgb = vec3<f32>(0.0);
     var total = 0.0;
-    for (var face = 0u; face < 6u; face++) {
+    // Projection zero preserves the legacy surface-normal integral. The other
+    // six workgroups each reduce one face into a world-axis descriptor.
+    let first = max(projection, 1u) - 1u;
+    let last = select(projection, 6u, projection == 0u);
+    for (var face = first; face < last; face++) {
         let direction = normalize(raa_spherical_face_direction(face, uv));
-        let weight = jacobian * max(0.0, dot(direction, work.normal.xyz));
+        let weight = jacobian * select(1.0, max(0.0, dot(direction, work.normal.xyz)), projection == 0u);
         let texel = spherical_faces[384u * work.ids.x + 64u * face + px];
         sky_rgb += spherical_unpack(texel.sky) * weight;
         sun_rgb += spherical_unpack(texel.sun) * weight;
@@ -180,7 +185,7 @@ fn spherical_project(@builtin(local_invocation_id) id: vec3<u32>,
     }
     if px == 0u {
         let inv = 1.0 / max(spherical_sky_sum[0].w, 1e-8);
-        let base = work.ids.y;
+        let base = work.ids.y + 3u * projection;
         spherical_lookup[base] = bitcast<vec4<u32>>(vec4<f32>(spherical_sky_sum[0].rgb * inv, 0.0));
         spherical_lookup[base + 1u] = bitcast<vec4<u32>>(vec4<f32>(spherical_sun_sum[0] * inv, 0.0));
         spherical_lookup[base + 2u] = bitcast<vec4<u32>>(vec4<f32>(spherical_other_sum[0] * inv, 0.0));

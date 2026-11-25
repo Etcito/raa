@@ -28,6 +28,7 @@ const WORK_BYTES: usize = 48;
 const LOOKUP_HEADER: usize = 4 + 64;
 const LOOKUP_ENTRY: usize = 3;
 const CHANNELS: usize = 3;
+const SLOT_ROWS: usize = CHANNELS * (1 + FACE_COUNT);
 const MAX_FACES_PER_BUDGET: u32 = 4096;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -623,7 +624,7 @@ impl SphericalGpu {
             light_feedback: None,
             lookup: sized(
                 "gi.spherical.lookup",
-                16 * (lookup_rows + CHANNELS * slots),
+                16 * (lookup_rows + SLOT_ROWS * slots),
                 Usage::STORAGE | Usage::COPY_DST,
             ),
             table_entries,
@@ -760,7 +761,7 @@ impl SphericalGpu {
                 .ready_faces;
             let bit = 1 << job.face as u8;
             if (ready | *mask) != ALL_FACES && (ready | *mask | bit) == ALL_FACES {
-                let index = self.lookup_rows.len() + CHANNELS * job.slot as usize;
+                let index = self.lookup_rows.len() + SLOT_ROWS * job.slot as usize;
                 write_work(&mut self.work_bytes, job, index as u32);
                 projected += 1;
             }
@@ -835,7 +836,7 @@ impl SphericalGpu {
             });
         pass.set_pipeline(&self.project);
         pass.set_bind_group(0, &project_group, &[]);
-        pass.dispatch_workgroups(1, 1, projected);
+        pass.dispatch_workgroups(1, 1, projected * (1 + FACE_COUNT as u32));
     }
 
     fn record_light_feedback(&self, ctx: &mut RecordCtx<'_>) -> Option<LightFeedback> {

@@ -7,21 +7,30 @@ use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, Prepa
 
 use super::geometry::TRIANGLE_BYTES;
 use super::{
-    COUNTER_COUNT, MeshIndirectGrid, MeshTraceScene, MeshTraceSettings, MeshTraceStats,
-    MirrorPriority, PathMode, REFERENCE_SPP, ReflectedFeedback, TraceReport,
+    COUNTER_COUNT, GRID_DIFFUSE_CAPTURE_WORDS, GRID_DIFFUSE_MAX_CAPTURE_ROWS, GridDiffuseCapture,
+    GridDiffuseMode, MeshIndirectGrid, MeshTraceScene, MeshTraceSettings, MeshTraceStats,
+    MirrorPriority, PathMode, REFERENCE_SPP, ReflectedFeedback, TraceReadback, TraceReport,
     hybrid::HybridGpu,
     spherical::{MAX_REFLECTED_RECEIVERS, ReflectedReceiver},
 };
-use crate::wgsl::{MESH_GRAPH_SCREEN, MESH_SPHERICAL_BINDING, MESH_VOLUME_GI, mesh_trace_module};
+use crate::wgsl::{
+    MESH_GRAPH_SCREEN, MESH_SPHERICAL_BINDING, MESH_VOLUME_GI, mesh_grid_diffuse_module,
+    mesh_trace_module,
+};
 
 pub const MESH_TRACE_NAME: &str = "trace.mesh";
 const ORDER: u32 = 66;
 const COUNTER_BYTES: u64 = (COUNTER_COUNT * 4) as u64;
 const RECEIVER_BYTES: usize = 8 * 4;
-const RECEIVER_COUNT: usize = COUNTER_COUNT - 1;
+const RECEIVER_COUNT: usize = 31;
 const MESH_MIRROR_MEASURE: u32 = 4;
 const MESH_MIRROR_FEEDBACK: u32 = 8;
 const MESH_PHYSICAL_MIRROR: u32 = 16;
+const MESH_GRID_DIFFUSE_CAPTURE: u32 = 32;
+const MESH_GRID_DIFFUSE_SKY: u32 = 64;
+const GRID_DIFFUSE_CAPTURE_COUNT: usize = 34;
+const GRID_DIFFUSE_CAPTURE_BYTES: u64 =
+    COUNTER_BYTES + (GRID_DIFFUSE_CAPTURE_WORDS * GRID_DIFFUSE_MAX_CAPTURE_ROWS * 4) as u64;
 const FEEDBACK_BYTES: u64 = COUNTER_BYTES + (MAX_REFLECTED_RECEIVERS * RECEIVER_BYTES) as u64;
 const CONFIDENCE: &str = "ssr.confidence";
 const COMPOSITE_WGSL: &str = include_str!("../wgsl/mesh_composite.wgsl");
@@ -71,6 +80,14 @@ impl MeshTraceFeature {
         use_volume_atlas: bool,
     ) -> Result<(), RaaError> {
         options.settings.validate()?;
+        if options.settings.grid_diffuse == GridDiffuseMode::Learned
+            && !state.borrow().grid_diffuse_model_ready()
+        {
+            return Err(RaaError::FrameGraph {
+                code: "trace.grid_diffuse_model_missing",
+                message: "Load the frozen grid diffuse gate before installing Learned.".into(),
+            });
+        }
         let grids = IndirectGrids {
             spherical: use_spherical_lookup,
             volume: use_volume_atlas,
@@ -155,11 +172,18 @@ impl FeaturePass for MeshTracePass {
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         if self.graph.is_none() {
             let scene = self.state.borrow();
-            if scene.settings.reflections && !scene.settings.reference
-                && scene.settings.path_mode == PathMode::Off {
+            if scene.settings.reflections
+                && !scene.settings.reference
+                && scene.settings.path_mode == PathMode::Off
+            {
                 if let Some(frame) = &scene.frame {
                     // The stock SSR pass owns all other lobes.
-                    ctx.resources.publish_buffer(MESH_TRACE_NAME, "nearMirror", frame, frame.size());
+                    ctx.resources.publish_buffer(
+                        MESH_TRACE_NAME,
+                        "nearMirror",
+                        frame,
+                        frame.size(),
+                    );
                 }
             }
         }
@@ -193,7 +217,17 @@ impl FeaturePass for MeshTracePass {
         };
         let [nodes, triangles, materials] = scene.geometry_buffers(ctx.gpu);
         let device = ctx.gpu.device();
-        let gpu = self.gpu.get_or_insert_with(|| Pipelines::new(device));
+        let gpu = self.gpu.get_or_insert_with(|| {
+            let source = match settings.grid_diffuse {
+                GridDiffuseMode::Legacy => mesh_trace_module(),
+                GridDiffuseMode::LegacyExperiment => mesh_grid_diffuse_module(false, None),
+                GridDiffuseMode::AnalyticDirectional => mesh_grid_diffuse_module(true, None),
+                GridDiffuseMode::Learned => {
+                    mesh_grid_diffuse_module(true, scene.grid_diffuse_weights.as_ref())
+                }
+            };
+            Pipelines::new(device, source)
+        });
         if self
             .targets
             .as_ref()
@@ -275,7 +309,13 @@ impl FeaturePass for MeshTracePass {
             mirror_priority == MirrorPriority::On
                 && snapshot.configuration == scene.mirror_priority_configuration
         });
-        let counters = if reflected_snapshot.is_some() {
+        let capture = scene
+            .grid_diffuse_capture
+            .filter(|_| spherical_routed && settings.grid_diffuse != GridDiffuseMode::Legacy);
+        let counters = if capture.is_some() {
+            gpu.grid_diffuse_capture
+                .get_or_insert_with(|| CounterBuffers::new(device, GRID_DIFFUSE_CAPTURE_BYTES))
+        } else if reflected_snapshot.is_some() {
             gpu.feedback
                 .get_or_insert_with(|| CounterBuffers::new(device, FEEDBACK_BYTES))
         } else {
@@ -290,11 +330,11 @@ impl FeaturePass for MeshTracePass {
             settings.confidence_threshold.to_bits(),
             u32::from(settings.reflections),
             u32::from(history_valid),
-            reference_spp,
+            capture.map_or(reference_spp, |capture| capture.stride),
             scene.sky_diffuse.to_bits(),
             path_mode as u32,
             settings.diffuse_output as u32,
-            reference_seed,
+            capture.map_or(reference_seed, |capture| capture.seed),
             settings.panel_sampling as u32,
             settings.lighting_output.code(),
             u32::from(reference_sample.is_some()),
@@ -302,7 +342,10 @@ impl FeaturePass for MeshTracePass {
                 | (u32::from(grid_enabled && grids.volume) * MESH_VOLUME_GI)
                 | (u32::from(mirror_priority != MirrorPriority::Off) * MESH_MIRROR_MEASURE)
                 | (u32::from(reflected_snapshot.is_some()) * MESH_MIRROR_FEEDBACK)
-                | (u32::from(physical_mirrors) * MESH_PHYSICAL_MIRROR),
+                | (u32::from(physical_mirrors) * MESH_PHYSICAL_MIRROR)
+                | (u32::from(capture.is_some()) * MESH_GRID_DIFFUSE_CAPTURE)
+                | (u32::from(capture.is_some() && ctx.lighting.environment_diffuse_sh().is_some())
+                    * MESH_GRID_DIFFUSE_SKY),
         ];
         let queue = ctx.gpu.queue();
         let bytes: Vec<_> = params.into_iter().flat_map(u32::to_le_bytes).collect();
@@ -477,7 +520,9 @@ impl FeaturePass for MeshTracePass {
         report.poll(settings);
         if report.pending.is_none() {
             let (send, receive) = sync_channel(1);
-            let size = if reflected_snapshot.is_some() {
+            let size = if capture.is_some() {
+                GRID_DIFFUSE_CAPTURE_BYTES
+            } else if reflected_snapshot.is_some() {
                 FEEDBACK_BYTES
             } else {
                 COUNTER_BYTES
@@ -533,7 +578,31 @@ impl FeaturePass for MeshTracePass {
                                 mirror_priority,
                                 counts,
                             };
-                            (stats, reflected_feedback)
+                            let grid_diffuse_capture = capture.map(|request| {
+                                let candidates = counts[GRID_DIFFUSE_CAPTURE_COUNT];
+                                let word_count = (candidates as usize)
+                                    .min(GRID_DIFFUSE_MAX_CAPTURE_ROWS)
+                                    * GRID_DIFFUSE_CAPTURE_WORDS;
+                                let words = bytes[COUNTER_BYTES as usize..]
+                                    .chunks_exact(4)
+                                    .take(word_count)
+                                    .map(|word| {
+                                        u32::from_le_bytes(word.try_into().expect("one word"))
+                                    })
+                                    .collect();
+                                GridDiffuseCapture {
+                                    frame,
+                                    size: (width, height),
+                                    candidates,
+                                    words,
+                                    request,
+                                }
+                            });
+                            TraceReadback {
+                                stats,
+                                reflected_feedback,
+                                grid_diffuse_capture,
+                            }
                         });
                         readback.unmap();
                         sample
@@ -751,6 +820,7 @@ struct Pipelines {
     options: wgpu::Buffer,
     counters: CounterBuffers,
     feedback: Option<CounterBuffers>,
+    grid_diffuse_capture: Option<CounterBuffers>,
 }
 
 struct CounterBuffers {
@@ -780,10 +850,10 @@ impl CounterBuffers {
 }
 
 impl Pipelines {
-    fn new(device: &wgpu::Device) -> Self {
+    fn new(device: &wgpu::Device, source: String) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(MESH_TRACE_NAME),
-            source: wgpu::ShaderSource::Wgsl(mesh_trace_module().into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
             binding,
@@ -855,7 +925,12 @@ impl Pipelines {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("trace.mesh.resolve"),
             source: wgpu::ShaderSource::Wgsl(
-                format!("{}{}", raa_shader::IBL_SPECULAR_RESPONSE_WGSL, COMPOSITE_WGSL).into(),
+                format!(
+                    "{}{}",
+                    raa_shader::IBL_SPECULAR_RESPONSE_WGSL,
+                    COMPOSITE_WGSL
+                )
+                .into(),
             ),
         });
         let composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -891,6 +966,7 @@ impl Pipelines {
             ),
             counters: CounterBuffers::new(device, COUNTER_BYTES),
             feedback: None,
+            grid_diffuse_capture: None,
         }
     }
 }

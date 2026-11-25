@@ -87,6 +87,10 @@ export interface MeshTracingStats extends Required<Pick<MeshTracingSettings,
   sphericalPrimarySupported: number;
   /** Offscreen hash-sampled receivers before the readback cap. */
   reflectedReceiverCandidates: number;
+  directionalDiffuseHits: number;
+  learnedDiffuseHits: number;
+  gridDiffuseCaptureCandidates: number;
+  diffuseMode: 'legacy' | 'analytic-directional' | 'learned';
   mirrorPriority: NonNullable<MeshTracingSettings['mirrorPriority']>;
   referenceSpp: number;
   hybridLobeSpp: number;
@@ -99,6 +103,15 @@ export interface Engine {
   meshTracingStats(nodeId?: string): MeshTracingStats | null;
   /** Loads a specular model in validated 12→8→3 little-endian FP32 tensor order. */
   setMeshPathModel(weights: Uint8Array): void;
+  /** Loads an immutable 8→8→1 FP32 gate in W1, b1, W2, b2 order. */
+  setMeshGridDiffuseModel(weights: Uint8Array): void;
+  /** Requests one in stride real secondary queries for the offline experiment. Zero disables. */
+  setMeshGridDiffuseCapture(seed: number, stride: number): void;
+  /** The latest completed readback. Each row has 128 words, at most 128 rows per frame. */
+  meshGridDiffuseCapture(nodeId: string): {
+    frame: number; seed: number; stride: number; width: number; height: number;
+    candidates: number; rows: Uint32Array;
+  } | null;
   /** Reads the renderer's tight, little-endian linear RGBA16F scene color. */
   captureMeshLighting(nowMs: number, traced: boolean, raw?: boolean, evidenceSeed?: number): Promise<{
     size: [number, number];

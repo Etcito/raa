@@ -2,8 +2,8 @@
 //! generation interfaces parse and type-check with naga; no GPU rendering is done here.
 use raa_sdf_trace::wgsl::{
     PROGRAM_EVAL_WGSL, VOLUME_ABI_VERSION, VOLUME_COARSE_TILE, VOLUME_MAX_AXIS, VOLUME_MIP_LEVELS,
-    VolumeUniform, composite_module, eval_module, mesh_trace_module, trace_module,
-    volume_mip_layout, volume_module,
+    VolumeUniform, composite_module, eval_module, mesh_grid_diffuse_module, mesh_trace_module,
+    trace_module, volume_mip_layout, volume_module,
 };
 use raa_sdf_trace::{
     COMPOSITE_NAME, COMPOSITE_ORDER, Instance, Source, TRACE_NAME, TRACE_ORDER, TraceProgram,
@@ -121,7 +121,7 @@ fn mesh_grid_shaders_reuse_forward_lookup_and_keep_directional_faces_private() {
     let hybrid = raa_sdf_trace::wgsl::mesh_hybrid_module();
     for source in [&mesh, &hybrid] {
         assert_eq!(source.matches(raa_shader::SPHERICAL_GI_WGSL).count(), 1);
-        assert!(source.contains("raa_spherical_diffuse_at(p, n, cell)"));
+        assert!(source.contains("raa_spherical_diffuse_at(q.position, q.normal, cell)"));
         let module = validate_with(source, naga::valid::Capabilities::SHADER_FLOAT16_IN_FLOAT32);
         let (_, lookup) = module
             .global_variables
@@ -197,8 +197,8 @@ fn mesh_grid_is_applied_after_measuring_and_shading_the_same_first_hit() {
     let step = |text| path.find(text).unwrap();
     assert!(step("var hit = first_hit") < step("record_mesh_first_hit(hit, ray)"));
     assert!(step("record_mesh_first_hit(hit, ray)") < step("if hit.object == MISS"));
-    assert!(step("sum += throughput * direct") < step("mesh_spherical_diffuse(p, n, mat)"));
-    assert!(step("sum += throughput * direct") < step("mesh_cached_diffuse(p, ng, n, mat)"));
+    assert!(step("sum += throughput * direct") < step("mesh_spherical_diffuse(query, mat)"));
+    assert!(step("sum += throughput * direct") < step("mesh_cached_diffuse(query, mat)"));
     assert!(
         step("sum += throughput * direct")
             < step("hybrid_grid_specular(p, ng, n, -ray.direction, mat)")
@@ -233,7 +233,7 @@ fn mesh_grid_is_applied_after_measuring_and_shading_the_same_first_hit() {
         .split_once("fn trace_path_from_hit")
         .unwrap()
         .0;
-    assert!(reference.contains("diffuse_output, lighting_output, MISS, terminal"));
+    assert!(reference.contains("diffuse_output, lighting_output, MISS, MISS, terminal"));
     let lookup = after("fn mesh_cached_diffuse")
         .split_once("fn terminal_surface_key")
         .unwrap()
@@ -811,4 +811,42 @@ fn empty_scene_dummy_volume_and_full_target_are_independent() {
     };
     assert_eq!(coarse(target_size(1920, 1080)), (240, 135));
     assert_eq!(coarse(target_size(2057, 1235)), (258, 155));
+}
+
+#[test]
+fn grid_diffuse_variants_preserve_the_mesh_bindings_and_parse() {
+    let weights = std::array::from_fn(|i| (i as f32 - 40.0) / 81.0);
+    let baseline = validate(&mesh_trace_module());
+    for (directional, weights) in [(false, None), (true, None), (true, Some(&weights))] {
+        let variant = validate(&mesh_grid_diffuse_module(directional, weights));
+        let bindings = |module: &naga::Module| {
+            module
+                .global_variables
+                .iter()
+                .filter_map(|(_, var)| var.binding.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bindings(&variant), bindings(&baseline));
+        assert_eq!(variant.entry_points[0].name, "trace_mesh");
+        assert_eq!(variant.entry_points[0].workgroup_size, [8, 8, 1]);
+    }
+}
+
+#[test]
+fn grid_diffuse_model_rejects_invalid_data_and_pins_the_first_valid_fit() {
+    use raa_sdf_trace::mesh::MeshTraceScene;
+
+    let mut scene = MeshTraceScene::default();
+    let weights = [0u8; 324];
+    let mut malformed = weights;
+    malformed[..4].copy_from_slice(&f32::NAN.to_le_bytes());
+    assert!(scene.set_grid_diffuse_model(&weights[..323]).is_err());
+    assert!(scene.set_grid_diffuse_model(&malformed).is_err());
+    assert!(!scene.grid_diffuse_model_ready());
+    scene.set_grid_diffuse_model(&weights).unwrap();
+    scene.set_grid_diffuse_model(&weights).unwrap();
+    assert!(scene.grid_diffuse_model_ready());
+    let mut other = weights;
+    other[..4].copy_from_slice(&0.25f32.to_le_bytes());
+    assert!(scene.set_grid_diffuse_model(&other).is_err());
 }

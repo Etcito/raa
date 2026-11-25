@@ -3,6 +3,7 @@
 // The enclosing shader declares raa_spherical_data at its own read-only binding.
 
 const RAA_SPHERICAL_TABLE: u32 = 68u;
+const RAA_SPHERICAL_SLOT_ROWS: u32 = 21u; // projected RGB and six directional faces, each with three light groups
 const RAA_SPHERICAL_EMPTY: u32 = 0xffffffffu;
 
 fn raa_spherical_hash(key: u32) -> u32 {
@@ -47,9 +48,16 @@ fn raa_spherical_supported(entry: u32, p: vec3<f32>, n: vec3<f32>) -> f32 {
         * (1.0 - smoothstep(0.7, 2.5, length(delta)));
 }
 
-fn raa_spherical_incident(entry: u32, mask: u32, channels: u32) -> vec3<f32> {
+fn raa_spherical_slot(entry: u32, mask: u32) -> u32 {
     let slot = raa_spherical_data[entry].y;
-    let base = RAA_SPHERICAL_TABLE + 3u * (mask + 1u) + 3u * slot;
+    return RAA_SPHERICAL_TABLE + 3u * (mask + 1u) + RAA_SPHERICAL_SLOT_ROWS * slot;
+}
+
+fn raa_spherical_incident(entry: u32, mask: u32, channels: u32) -> vec3<f32> {
+    return raa_spherical_channel_sum(raa_spherical_slot(entry, mask), channels);
+}
+
+fn raa_spherical_channel_sum(base: u32, channels: u32) -> vec3<f32> {
     var rgb = vec3<f32>(0.0);
     for (var i = 0u; i < 3u; i++) {
         if (channels & (1u << i)) != 0u {
@@ -97,6 +105,8 @@ fn raa_spherical_coordinate(p: vec3<f32>) -> RaaSphericalCoordinate {
 struct RaaSphericalNeighbors {
     entries: array<u32, 8>,
     weights: array<f32, 8>,
+    trilinear: array<f32, 8>,
+    support: array<f32, 8>,
     count: u32,
     total: f32,
 }
@@ -192,9 +202,12 @@ fn raa_spherical_neighbors(p: vec3<f32>, normal: vec3<f32>,
         for (var j = 0u; j < result.count; j++) { seen = seen || result.entries[j] == entry; }
         if seen { continue; }
         let w = select(vec3<f32>(1.0) - vec3<f32>(f, depth), vec3<f32>(f, depth), corner);
-        let weight = support * max(w.x * w.y * w.z, 0.01);
+        let trilinear = max(w.x * w.y * w.z, 0.01);
+        let weight = support * trilinear;
         result.entries[result.count] = entry;
         result.weights[result.count] = weight;
+        result.trilinear[result.count] = trilinear;
+        result.support[result.count] = support;
         result.total += weight;
         result.count += 1u;
     }
@@ -225,6 +238,8 @@ fn raa_spherical_neighbors(p: vec3<f32>, normal: vec3<f32>,
             let weight = 0.15 * best_support;
             result.entries[result.count] = best;
             result.weights[result.count] = weight;
+            result.trilinear[result.count] = 0.15;
+            result.support[result.count] = best_support;
             result.total += weight;
             result.count += 1u;
         }

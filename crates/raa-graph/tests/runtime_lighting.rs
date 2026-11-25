@@ -37,9 +37,15 @@ fn spherical_lookup_has_typed_fixed_wiring_and_runs_before_forward() {
         input.port == "sphericalLookup"
             && matches!(&input.source, InputSource::Link { node, port, .. } if node == "spherical" && port == "lookup")
     }));
-    let mirrors = plan.nodes.iter().find(|node| node.id == "meshReflection").unwrap();
+    let mirrors = plan
+        .nodes
+        .iter()
+        .find(|node| node.id == "meshReflection")
+        .unwrap();
     let tonemap = plan.nodes.iter().find(|node| node.id == "tonemap").unwrap();
-    assert!(consumer.order_index < mirrors.order_index && mirrors.order_index < tonemap.order_index);
+    assert!(
+        consumer.order_index < mirrors.order_index && mirrors.order_index < tonemap.order_index
+    );
     for (input, producer, output) in [
         ("sphericalLookup", "spherical", "lookup"),
         ("material", "prepass", "material"),
@@ -123,5 +129,47 @@ fn volume_probes_and_restir_keep_the_same_forward_resource_link() {
             input.port == "gi"
                 && matches!(&input.source, InputSource::Default { node, port } if node == "giScreen" && port == "gi")
         }));
+    }
+}
+
+#[test]
+fn grid_diffuse_reuses_the_spherical_reflection_route_and_preserves_saved_modes() {
+    let catalog = Catalog::build();
+    let experimental = catalog.node("mesh.grid-diffuse").unwrap();
+    let mode = experimental
+        .params
+        .iter()
+        .find(|param| param.key == "diffuseMode")
+        .unwrap();
+    assert_eq!(mode.options, &["legacy", "analytic-directional", "learned"]);
+    assert_eq!(
+        mode.default,
+        raa_graph::catalog::ParamValue::Enum("analytic-directional".into())
+    );
+
+    for mode in mode.options {
+        let mut doc = parse_graph(SPHERICAL).unwrap();
+        let node = doc
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "meshReflection")
+            .unwrap();
+        node.type_id = "mesh.grid-diffuse".into();
+        node.params
+            .push(("diffuseMode".into(), JsonValue::String((*mode).into())));
+        let plan = plan_from_json(&write_graph(&doc)).unwrap();
+        let trace = plan
+            .nodes
+            .iter()
+            .find(|node| node.id == "meshReflection")
+            .unwrap();
+        assert!(trace.inputs.iter().any(|input| {
+            input.port == "sphericalLookup"
+                && matches!(&input.source, InputSource::Link { node, port, .. } if node == "spherical" && port == "lookup")
+        }));
+        assert!(trace.params.contains(&(
+            "diffuseMode".into(),
+            raa_graph::catalog::ParamValue::Enum((*mode).into()),
+        )));
     }
 }
