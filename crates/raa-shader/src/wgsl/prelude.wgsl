@@ -324,10 +324,7 @@ struct ShadeCtx {
 
 fn raa_spherical_blend_diffuse(legacy: vec3<f32>, s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     if c.spherical_diffuse.w <= 0.0 { return legacy; }
-    // Screen AO (c.ao = min(material, ao.gtao)) attenuates the probe GI (DDGI, spherical, NRC) like the volume GI slot
-    // does, when ao.gtao opts in with indirectDiffuse (RAA_INDIRECT_DIFFUSE_AO_FEATURE); otherwise material AO only.
-    let ao = select(s.ao, c.ao, raa_feature_enabled(RAA_INDIRECT_DIFFUSE_AO_FEATURE));
-    let spherical = c.spherical_diffuse.rgb * s.base_color * (1.0 - clamp(s.metallic, 0.0, 1.0)) * ao;
+    let spherical = c.spherical_diffuse.rgb * s.base_color * (1.0 - clamp(s.metallic, 0.0, 1.0)) * s.ao;
     return mix(legacy, spherical, c.spherical_diffuse.w);
 }
 
