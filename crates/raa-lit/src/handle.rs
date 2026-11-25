@@ -1643,7 +1643,9 @@ impl LitHandle {
         self.shared.borrow().frame_bind_group.clone()
     }
 
-    pub(crate) fn lighting_view_group(&self, gpu: &GpuContext) -> Option<wgpu::BindGroup> {
+    /// Group 0 for the displayed direct-only or indirect-only lighting view.
+    /// A combined-lighting capture uses the ordinary frame group.
+    pub fn lighting_view_group(&self, gpu: &GpuContext) -> Option<wgpu::BindGroup> {
         let shared = self.shared.borrow();
         let frame = shared.lighting_view_frame.as_ref()?;
         Some(shared.camera_group(gpu, frame))

@@ -491,7 +491,10 @@ impl FeaturePass for OitPass {
         // (2) the Transparent draws append to the lists, depth-tested against the prepass
         // depth (or the `transparent.oit` depth attachment input; read-only: loaded and kept)
         {
-            let frame = self.lit.frame_bind_group();
+            let frame = self
+                .lit
+                .lighting_view_group(ctx.gpu)
+                .unwrap_or_else(|| self.lit.frame_bind_group());
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raa-oit.transparent"),
                 color_attachments: &[],
