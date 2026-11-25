@@ -21,6 +21,7 @@ mod contributor;
 mod editor;
 pub use editor::WireframeMode;
 mod extras;
+pub mod foliage_bindings;
 pub mod foliage_reference;
 pub mod foliage_resources;
 mod frame;
