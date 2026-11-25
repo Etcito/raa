@@ -123,8 +123,17 @@ fn projected_error(center: vec3<f32>, radius: f32, error: f32) -> f32 {
         }
         return pixels;
     }
-    let distance = max(length(center - view.camera_position) - radius, view.near);
-    return error * view.lod_scale / distance;
+    // Perspective divides by camera depth. At an oblique angle a displacement
+    // along the view axis also moves the projected point across the screen.
+    let vp = view.raster_view_proj;
+    let forward = vec3<f32>(vp[0].w, vp[1].w, vp[2].w);
+    let offset = center - view.camera_position;
+    let depth = dot(forward, offset);
+    let nearest_depth = max(depth - radius, view.near);
+    let lateral = length(offset - forward * depth) + radius;
+    // Upper bound of the projection Jacobian over the visible part of the sphere.
+    let slope = lateral / nearest_depth;
+    return error * view.lod_scale * sqrt(1.0 + slope * slope) / nearest_depth;
 }
 
 fn in_frustum(center: vec3<f32>, radius: f32) -> bool {
@@ -176,13 +185,18 @@ fn passes_occlusion(center: vec3<f32>, radius: f32) -> bool {
     let nearest_clip = view.occlusion_view * vec4<f32>(nearest_point, 1.0);
     let nearest = nearest_clip.z / nearest_clip.w;
 
-    // Tight projected bounds of a sphere (Mara & McGuire 2013), from its distance along the
-    // view axis and the projection's scale. The pyramid is laid out like the screen, row 0 at
-    // the top, while NDC y points up: v flips y, as the viewport transform does.
+    // Find the two tangent planes of the sphere along each screen axis. Relative
+    // to the projected centre, an extremum t satisfies
+    // t² * distance² = radius² * |row - (center_ndc + t) * forward|².
     let center_ndc = center_clip.xy / distance;
-    let center_uv = vec2<f32>(center_ndc.x * 0.5 + 0.5, 0.5 - center_ndc.y * 0.5);
-    let tan_half_angle = radius / sqrt(distance * distance - radius * radius);
-    let half = view.proj_scale * tan_half_angle * 0.5;
+    let vp = view.occlusion_view;
+    let dx = vec3<f32>(vp[0].x, vp[1].x, vp[2].x) - center_ndc.x * forward;
+    let dy = vec3<f32>(vp[0].y, vp[1].y, vp[2].y) - center_ndc.y * forward;
+    let ratio = radius * radius / ((distance - radius) * (distance + radius));
+    let shift = -ratio * vec2<f32>(dot(dx, forward), dot(dy, forward));
+    let projected_center = center_ndc + shift;
+    let center_uv = vec2<f32>(0.5 + 0.5 * projected_center.x, 0.5 - 0.5 * projected_center.y);
+    let half = 0.5 * sqrt(shift * shift + ratio * vec2<f32>(dot(dx, dx), dot(dy, dy)));
     let uv_min = clamp(center_uv - half, vec2<f32>(0.0), vec2<f32>(1.0));
     let uv_max = clamp(center_uv + half, vec2<f32>(0.0), vec2<f32>(1.0));
 

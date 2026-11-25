@@ -513,6 +513,7 @@ impl FeaturePass for VgCullPass {
             state.camera.near,
             state.settings.error_pixels,
         );
+        view.is_ortho = u32::from(state.camera.ortho_height.is_some());
         let occlusion = state.settings.occlusion && state.occlusion_history;
         view.occlusion_enabled = u32::from(occlusion);
         view.allow_software = u32::from(state.settings.software_raster);
