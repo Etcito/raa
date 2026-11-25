@@ -96,8 +96,12 @@ fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
     var vis = raa_csm_cascade(world_pos, n, frag, idx, view_depth);
     if (idx < 3u) {
         let blend = clamp((view_depth - (far_split - band_world)) / band_world, 0.0, 1.0);
-        let next_vis = raa_csm_cascade(world_pos, n, frag, idx + 1u, view_depth);
-        vis = mix(vis, next_vis, blend);
+        // Only the band pixels pay for the next cascade's PCSS: mix(vis, next, 0) is vis.
+        // The kernel uses textureLoad / textureSampleCompareLevel, valid in this branch.
+        if (blend > 0.0) {
+            let next_vis = raa_csm_cascade(world_pos, n, frag, idx + 1u, view_depth);
+            vis = mix(vis, next_vis, blend);
+        }
     } else {
         let fade = clamp((view_depth - far_split) / band_world, 0.0, 1.0);
         vis = mix(vis, 1.0, fade);
