@@ -5,7 +5,7 @@
 
 use crate::bounds::Sphere;
 use raa_math::Vec3;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 
 /// Number of clusters a group aims for.
 pub const TARGET_GROUP_SIZE: usize = 16;
@@ -15,10 +15,10 @@ pub const MAX_GROUP_SIZE: usize = 24;
 pub const MIN_GROUP_SIZE: usize = 6;
 
 /// Triangles one collect unit reads.
-const TRIANGLES_PER_UNIT: usize = 4096;
+const TRIANGLES_PER_UNIT: usize = 1024;
 /// Clusters one collect unit visits.
 const CLUSTERS_PER_UNIT: usize = 1024;
-/// Edge pairs one unit turns into links.
+/// Edge records and cluster pairs one unit turns into links.
 const PAIRS_PER_UNIT: usize = 4096;
 /// Links one unit counts into the per-cluster lists.
 const LINKS_PER_UNIT: usize = 4096;
@@ -29,9 +29,7 @@ const GROUP_CLUSTERS_PER_UNIT: usize = 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Collect,
-    SortEdges,
     BuildLinks,
-    SortLinks,
     Count,
     Done,
 }
@@ -44,13 +42,49 @@ pub struct AdjacencyState {
     phase: Phase,
     cluster: usize,
     triangle: usize,
-    edges: Vec<(u64, u32)>,
-    edge_cursor: usize,
-    links: Vec<(u32, u32)>,
-    link_cursor: usize,
-    current_link: Option<(u32, u32)>,
-    current_count: u32,
+    edges: BTreeMap<u64, EdgeClusters>,
+    edge: Option<EdgePairs>,
+    links: BTreeMap<(u32, u32), u32>,
     adjacency: Vec<Vec<(u32, u32)>>,
+}
+
+/// Most edges never leave their cluster and need no member allocation. Collection
+/// visits clusters in ascending order so duplicates are always adjacent.
+enum EdgeClusters {
+    One(u32),
+    Shared(Vec<u32>),
+}
+
+impl EdgeClusters {
+    fn insert(&mut self, cluster: u32) {
+        match self {
+            Self::One(first) if *first != cluster => *self = Self::Shared(vec![*first, cluster]),
+            Self::Shared(members) if members.last() != Some(&cluster) => members.push(cluster),
+            _ => {}
+        }
+    }
+}
+
+/// A non-manifold edge can touch many clusters; resume its pairs between units.
+struct EdgePairs {
+    members: Vec<u32>,
+    i: usize,
+    j: usize,
+}
+
+impl Iterator for EdgePairs {
+    type Item = (u32, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let b = *self.members.get(self.j)?;
+        let pair = (self.members[self.i], b);
+        self.j += 1;
+        if self.j == self.members.len() {
+            self.i += 1;
+            self.j = self.i + 1;
+        }
+        Some(pair)
+    }
 }
 
 impl AdjacencyState {
@@ -61,38 +95,26 @@ impl AdjacencyState {
             phase: Phase::Collect,
             cluster: 0,
             triangle: 0,
-            edges: Vec::new(),
-            edge_cursor: 0,
-            links: Vec::new(),
-            link_cursor: 0,
-            current_link: None,
-            current_count: 0,
+            edges: BTreeMap::new(),
+            edge: None,
+            links: BTreeMap::new(),
             adjacency: vec![Vec::new(); cluster_count],
         }
     }
 
     /// Runs one unit of the build and returns `true` when it is done. The caller keeps passing
-    /// the same `triangles` slice; one collect unit reads at most 4096 triangles.
+    /// the same `triangles` slice; one collect unit reads at most 1024 triangles.
     pub fn step(&mut self, triangles: &[Vec<[u32; 3]>]) -> bool {
         match self.phase {
             Phase::Collect => {
                 if self.collect(triangles) {
-                    self.phase = Phase::SortEdges;
+                    self.phase = Phase::BuildLinks;
                 }
-            }
-            Phase::SortEdges => {
-                self.edges.sort_unstable();
-                self.edges.dedup();
-                self.phase = Phase::BuildLinks;
             }
             Phase::BuildLinks => {
                 if self.build_links() {
-                    self.phase = Phase::SortLinks;
+                    self.phase = Phase::Count;
                 }
-            }
-            Phase::SortLinks => {
-                self.links.sort_unstable();
-                self.phase = Phase::Count;
             }
             Phase::Count => {
                 if self.count_links() {
@@ -142,7 +164,13 @@ impl AdjacencyState {
                     let a = triangle[side];
                     let b = triangle[(side + 1) % 3];
                     let key = u64::from(a.min(b)) << 32 | u64::from(a.max(b));
-                    self.edges.push((key, self.cluster as u32));
+                    let cluster = self.cluster as u32;
+                    match self.edges.entry(key) {
+                        Entry::Vacant(slot) => {
+                            slot.insert(EdgeClusters::One(cluster));
+                        }
+                        Entry::Occupied(mut slot) => slot.get_mut().insert(cluster),
+                    }
                 }
             }
             read += take;
@@ -155,67 +183,38 @@ impl AdjacencyState {
         self.cluster >= self.cluster_count
     }
 
-    /// Turns the runs of equal edges into `(a, b)` links in both directions; true when every
-    /// edge was visited.
+    /// Counts each shared edge once per pair of distinct incident clusters.
     fn build_links(&mut self) -> bool {
-        let mut visited = 0;
-        while self.edge_cursor < self.edges.len() {
-            let key = self.edges[self.edge_cursor].0;
-            let mut end = self.edge_cursor + 1;
-            while end < self.edges.len() && self.edges[end].0 == key {
-                end += 1;
+        for _ in 0..PAIRS_PER_UNIT {
+            if let Some((a, b)) = self.edge.as_mut().and_then(Iterator::next) {
+                *self.links.entry((a, b)).or_default() += 1;
+                *self.links.entry((b, a)).or_default() += 1;
+                continue;
             }
-            for i in self.edge_cursor..end {
-                for j in (i + 1)..end {
-                    let a = self.edges[i].1;
-                    let b = self.edges[j].1;
-                    self.links.push((a, b));
-                    self.links.push((b, a));
-                }
-            }
-            visited += end - self.edge_cursor;
-            self.edge_cursor = end;
-            if visited >= PAIRS_PER_UNIT {
-                break;
-            }
+            let Some((_, edge)) = self.edges.pop_first() else {
+                return true;
+            };
+            self.edge = match edge {
+                EdgeClusters::One(_) => None,
+                EdgeClusters::Shared(members) => Some(EdgePairs {
+                    members,
+                    i: 0,
+                    j: 1,
+                }),
+            };
         }
-        self.edge_cursor >= self.edges.len()
+        false
     }
 
-    /// Counts the runs of equal links into the per-cluster lists; true when every link was
-    /// counted.
+    /// Publishes the counts in the same (cluster, neighbour) order as the sorted links.
     fn count_links(&mut self) -> bool {
-        let mut visited = 0;
-        while self.link_cursor < self.links.len() && visited < LINKS_PER_UNIT {
-            let link = self.links[self.link_cursor];
-            self.link_cursor += 1;
-            visited += 1;
-            if self.current_link == Some(link) {
-                self.current_count += 1;
-            } else {
-                self.flush_link();
-                self.current_link = Some(link);
-                self.current_count = 1;
-            }
+        for _ in 0..LINKS_PER_UNIT {
+            let Some(((cluster, neighbour), count)) = self.links.pop_first() else {
+                return true;
+            };
+            self.adjacency[cluster as usize].push((neighbour, count));
         }
-        if self.link_cursor >= self.links.len() {
-            self.flush_link();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Appends the pending run of links to its cluster's list.
-    fn flush_link(&mut self) {
-        let Some((cluster, neighbour)) = self.current_link.take() else {
-            self.current_count = 0;
-            return;
-        };
-        if let Some(list) = self.adjacency.get_mut(cluster as usize) {
-            list.push((neighbour, self.current_count));
-        }
-        self.current_count = 0;
+        self.links.is_empty()
     }
 }
 
@@ -571,6 +570,27 @@ mod tests {
         assert_eq!(adjacency[0], vec![(1, 3)]);
         assert_eq!(adjacency[1], vec![(0, 3)]);
         assert_eq!(adjacency[2], Vec::new());
+    }
+
+    #[test]
+    fn large_shared_edge_resumes_pairs_without_losing_or_counting_any_twice() {
+        let count = 96;
+        let triangles = (0..count)
+            .map(|i| vec![[0, 1, i + 2], [1, 0, i + 2]])
+            .collect::<Vec<_>>();
+        let mut state = AdjacencyState::new(triangles.len());
+        assert!(!state.step(&triangles));
+        assert_eq!(state.phase, Phase::BuildLinks);
+        assert!(!state.step(&triangles));
+        assert_eq!(state.phase, Phase::BuildLinks);
+        while !state.step(&triangles) {}
+        for (cluster, adjacent) in state.finish().into_iter().enumerate() {
+            let expected: Vec<_> = (0..count)
+                .filter(|&other| other as usize != cluster)
+                .map(|other| (other, 1))
+                .collect();
+            assert_eq!(adjacent, expected);
+        }
     }
 
     #[test]

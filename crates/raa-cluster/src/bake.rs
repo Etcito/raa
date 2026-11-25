@@ -13,7 +13,7 @@ use crate::error::{ClusterError, EMPTY, NOT_FINISHED};
 use crate::hierarchy::{Hierarchy, HierarchyState};
 use crate::input::{BuildOptions, ClusterInput, InputBounds, OwnedClusterInput};
 use crate::partition::{ClusterLimits, PartitionState};
-use crate::thin::find_pieces;
+use crate::thin::FoliageSearch;
 use crate::weld::{FOLIAGE_GRID_MARGIN, WELD_BATCH, WeldState, WeldedMesh};
 
 /// Partition clusters pushed into the build list by one unit, at most this many clusters...
@@ -80,6 +80,7 @@ pub struct ClusterBake {
     limits: ClusterLimits,
     phase: Phase,
     weld: WeldState,
+    foliage: FoliageSearch,
     weld_steps: usize,
     welded: WeldedMesh,
     partition: PartitionState,
@@ -140,6 +141,7 @@ impl ClusterBake {
         let plan = 9 * (input.mesh.triangle_count() as u64).div_ceil(WELD_BATCH as u64) + 2;
         Ok(ClusterBake {
             weld: WeldState::new(&bounds, 0.0),
+            foliage: FoliageSearch::default(),
             weld_steps: 0,
             welded: WeldedMesh {
                 positions: Vec::new(),
@@ -299,18 +301,22 @@ impl ClusterBake {
         }
     }
 
-    /// The piece search over the welded mesh, one unit. Foliage made of separate pieces is welded
-    /// again with a grid margin.
+    /// Checks the welded connectivity in batches. Foliage made of enough separate pieces is
+    /// welded again with a grid margin.
     fn search_unit(&mut self) {
-        if find_pieces(&self.welded.triangles, &|_| false)
-            .pieces
-            .is_empty()
-        {
-            self.start_partition();
-        } else {
+        let Some(foliage) = self
+            .foliage
+            .step(&self.welded.triangles, self.welded.positions.len())
+        else {
+            return;
+        };
+        self.foliage = FoliageSearch::default();
+        if foliage {
             self.weld = WeldState::new(&self.bounds, FOLIAGE_GRID_MARGIN);
             self.weld_steps = 0;
             self.phase = Phase::Reweld;
+        } else {
+            self.start_partition();
         }
     }
 
@@ -334,6 +340,9 @@ impl ClusterBake {
             );
             let finished = self.partition.drain();
             self.pending.extend(finished);
+            if !self.pending.is_empty() {
+                return;
+            }
         }
         self.push_pending();
         if self.partition_done && self.pending.is_empty() {

@@ -14,7 +14,7 @@ use crate::packed::{
     pack_counts, pack_triangle,
 };
 use crate::partition::{ClusterLimits, partition_triangles};
-use crate::simplify::{Corner, Simplified, Triangle, simplify};
+use crate::simplify::{Corner, SimplifyState, Triangle};
 use crate::thin::{NEW_POSITION, find_pieces, set_aside_wide_pieces, thin};
 use crate::weld::{WeldedMesh, encode_octahedral};
 use raa_math::Vec3;
@@ -151,99 +151,168 @@ pub fn reduce_group(
     shared: &[bool],
     options: &BuildOptions,
 ) -> Option<GroupResult> {
-    let is_shared = |v: u32| shared.get(v as usize).copied().unwrap_or(false);
-    let member_clusters: Vec<&BuildCluster> = members
-        .iter()
-        .map(|&c| clusters.get(c as usize))
-        .collect::<Option<_>>()?;
-    let triangles: Vec<Triangle> = member_clusters
-        .iter()
-        .flat_map(|c| c.triangles.iter().copied())
-        .collect();
-    let target = |count: usize| ((count as f32 * options.target_ratio) as usize).max(1);
+    let mut reduction = GroupReduction::new(welded, clusters, members, shared, options)?;
+    while !reduction.step(welded, shared) {}
+    reduction.finish(welded, options)
+}
 
-    // Separate pieces, such as blades and leaves, are thinned out. Connected surfaces are
-    // simplified by edge collapse.
-    let mut found = find_pieces(&triangles, &is_shared);
-    set_aside_wide_pieces(&triangles, &mut found, &welded.positions);
-    let mut new_positions = Vec::new();
-    let mut thinning_error = 0.0f32;
-    let mut reduced = Vec::with_capacity(triangles.len());
-    if !found.pieces.is_empty() {
-        let piece_triangles = found.pieces.iter().map(Vec::len).sum();
-        let thinned = thin(
-            &triangles,
-            &found.pieces,
-            &welded.positions,
-            &welded.attributes,
-            target(piece_triangles),
-        );
-        reduced.extend(thinned.triangles);
-        new_positions = thinned.positions;
-        thinning_error = thinned.error;
-    }
-    let rest: Vec<Triangle> = if found.pieces.is_empty() {
-        triangles.clone()
-    } else {
-        found
-            .rest
+/// Group preparation and its normal-aware collapse state are kept across work units. The
+/// error budget and retry order are the same as reducing the group in one call.
+struct GroupReduction {
+    members: Vec<u32>,
+    original_count: usize,
+    lod_bounds: Sphere,
+    child_error: f32,
+    new_positions: Vec<Vec3>,
+    thinning_error: f32,
+    thinning_budget: Option<f32>,
+    reduced: Vec<Triangle>,
+    rest: Vec<Triangle>,
+    targets: [usize; 3],
+    attempt: usize,
+    simplify: Option<SimplifyState>,
+    simplified_error: f32,
+}
+
+impl GroupReduction {
+    fn new(
+        welded: &WeldedMesh,
+        clusters: &[BuildCluster],
+        members: Vec<u32>,
+        shared: &[bool],
+        options: &BuildOptions,
+    ) -> Option<Self> {
+        let member_clusters: Vec<&BuildCluster> = members
             .iter()
-            .filter_map(|&t| triangles.get(t as usize).copied())
-            .collect()
-    };
-    let mut simplified_error = 0.0f32;
-    if !rest.is_empty() {
-        let simplify_to = |count: usize| {
-            simplify(
-                &rest,
+            .map(|&c| clusters.get(c as usize))
+            .collect::<Option<_>>()?;
+        let triangles: Vec<Triangle> = member_clusters
+            .iter()
+            .flat_map(|c| c.triangles.iter().copied())
+            .collect();
+        let original_count = triangles.len();
+        let target = |count: usize| ((count as f32 * options.target_ratio) as usize).max(1);
+        let mut found = find_pieces(&triangles, &|v| {
+            shared.get(v as usize).copied().unwrap_or(false)
+        });
+        set_aside_wide_pieces(&triangles, &mut found, &welded.positions);
+
+        let mut reduced = Vec::with_capacity(triangles.len());
+        let mut new_positions = Vec::new();
+        let mut thinning_error = 0.0;
+        let thinning_budget = (!found.pieces.is_empty()).then(|| {
+            let count = found.pieces.iter().map(Vec::len).sum();
+            let thinned = thin(
+                &triangles,
+                &found.pieces,
                 &welded.positions,
                 &welded.attributes,
-                count,
-                &is_shared,
-            )
+                target(count),
+            );
+            reduced.extend(thinned.triangles);
+            new_positions = thinned.positions;
+            thinning_error = thinned.error;
+            thinning_error.max(welded.step)
+        });
+        let rest = if thinning_budget.is_none() {
+            triangles
+        } else {
+            found.rest.iter().map(|&t| triangles[t as usize]).collect()
         };
-        let mut simplified = simplify_to(target(rest.len()));
-        // A group's error is the largest of its parts'. Where thinning carries the reduction, the
-        // rest goes only as far as it can without being the coarser part, so it never holds the
-        // twigs' detail back.
-        if !found.pieces.is_empty() {
-            let budget = thinning_error.max(welded.step);
-            for ratio in [0.75, 0.9] {
-                if simplified.error <= budget {
-                    break;
-                }
-                simplified = simplify_to(((rest.len() as f32 * ratio) as usize).max(1));
-            }
-            if simplified.error > budget {
-                simplified = Simplified {
-                    triangles: rest.clone(),
-                    error: 0.0,
-                };
-            }
-        }
-        reduced.extend(simplified.triangles);
-        simplified_error = simplified.error;
+        let count = rest.len();
+        let lod_bounds = Sphere::merged_all(member_clusters.iter().map(|c| c.lod_bounds));
+        let child_error = member_clusters
+            .iter()
+            .map(|c| c.lod_error)
+            .fold(0.0, f32::max);
+        Some(Self {
+            members,
+            original_count,
+            lod_bounds,
+            child_error,
+            new_positions,
+            thinning_error,
+            thinning_budget,
+            reduced,
+            rest,
+            targets: [
+                target(count),
+                ((count as f32 * 0.75) as usize).max(1),
+                ((count as f32 * 0.9) as usize).max(1),
+            ],
+            attempt: 0,
+            simplify: None,
+            simplified_error: 0.0,
+        })
     }
 
-    if reduced.is_empty() || reduced.len() as f32 > triangles.len() as f32 * options.min_reduction {
-        return None;
+    fn step(&mut self, welded: &WeldedMesh, shared: &[bool]) -> bool {
+        if self.rest.is_empty() {
+            return true;
+        }
+        let Some(simplify) = self.simplify.as_mut() else {
+            self.simplify = Some(SimplifyState::new(&self.rest, &welded.positions, &|v| {
+                shared.get(v as usize).copied().unwrap_or(false)
+            }));
+            return false;
+        };
+        if !simplify.step(&welded.attributes, self.targets[self.attempt]) {
+            return false;
+        }
+        let simplified = self
+            .simplify
+            .take()
+            .expect("simplifier just finished")
+            .finish();
+        let within_budget = self
+            .thinning_budget
+            .is_none_or(|limit| simplified.error <= limit);
+        if !within_budget && self.attempt + 1 < self.targets.len() {
+            self.attempt += 1;
+            return false;
+        }
+        if self
+            .thinning_budget
+            .is_some_and(|limit| simplified.error > limit)
+        {
+            self.reduced.append(&mut self.rest);
+        } else {
+            self.reduced.extend(simplified.triangles);
+            self.simplified_error = simplified.error;
+        }
+        true
     }
-    // Spheres and errors grow monotonically up the DAG, which makes the runtime LOD test a
-    // consistent, hole-free cut. The small increment keeps parents strictly coarser than their
-    // children even when a collapse on a flat region costs nothing.
-    let lod_bounds = Sphere::merged_all(member_clusters.iter().map(|c| c.lod_bounds));
-    let child_error = member_clusters
-        .iter()
-        .map(|c| c.lod_error)
-        .fold(0.0, f32::max);
-    let error = child_error + simplified_error.max(thinning_error) + welded.step * 0.5;
-    Some(GroupResult {
-        members,
-        lod_bounds,
-        error,
-        triangles: reduced,
-        new_positions,
-    })
+
+    fn progress(&self) -> f32 {
+        let progress = self
+            .simplify
+            .as_ref()
+            .map_or(0.0, |s| s.progress(self.targets[self.attempt]));
+        if self.thinning_budget.is_some() {
+            (self.attempt as f32 + progress) / self.targets.len() as f32
+        } else {
+            progress
+        }
+    }
+
+    fn finish(self, welded: &WeldedMesh, options: &BuildOptions) -> Option<GroupResult> {
+        if self.reduced.is_empty()
+            || self.reduced.len() as f32 > self.original_count as f32 * options.min_reduction
+        {
+            return None;
+        }
+        // Spheres and errors grow monotonically up the DAG, so the LOD test stays hole-free.
+        // The increment keeps parents strictly coarser even on a flat region.
+        let error =
+            self.child_error + self.simplified_error.max(self.thinning_error) + welded.step * 0.5;
+        Some(GroupResult {
+            members: self.members,
+            lod_bounds: self.lod_bounds,
+            error,
+            triangles: self.reduced,
+            new_positions: self.new_positions,
+        })
+    }
 }
 
 /// Most triangles and clusters one unit of a level visits.
@@ -267,7 +336,7 @@ fn fits_unit(visited: usize, triangles: usize, next: usize) -> bool {
 
 /// One level of the DAG as a state machine: the position triangles and bounds of the active
 /// clusters are copied, grouped with [`GroupState`], the positions used by several groups are
-/// marked, and then each group is reduced, re-split and appended, one group per unit.
+/// marked, then each group is reduced over multiple units before re-splitting and appending.
 pub struct LevelState {
     active: Vec<u32>,
     level: u32,
@@ -280,6 +349,8 @@ pub struct LevelState {
     groups: Vec<Vec<u32>>,
     owner: Vec<u32>,
     shared: Vec<bool>,
+    reduction: Option<GroupReduction>,
+    ready: Option<GroupResult>,
     next_active: Vec<u32>,
     progressed: bool,
     progress: f32,
@@ -300,6 +371,8 @@ impl LevelState {
             groups: Vec::new(),
             owner: Vec::new(),
             shared: Vec::new(),
+            reduction: None,
+            ready: None,
             next_active: Vec::new(),
             progressed: false,
             progress: 0.0,
@@ -332,7 +405,12 @@ impl LevelState {
             }
             LevelPhase::Reduce => {
                 self.reduce(welded, clusters, groups, limits, options);
-                0.5 + 0.5 * self.cursor as f32 / self.groups.len().max(1) as f32
+                let group = self
+                    .reduction
+                    .as_ref()
+                    .map_or(0.0, GroupReduction::progress);
+                let group = if self.ready.is_some() { 0.99 } else { group };
+                0.5 + 0.5 * (self.cursor as f32 + group) / self.groups.len().max(1) as f32
             }
             LevelPhase::Done => 1.0,
         };
@@ -435,16 +513,31 @@ impl LevelState {
         limits: ClusterLimits,
         options: &BuildOptions,
     ) {
-        if let Some(group) = self.groups.get(self.cursor) {
+        if let Some(result) = self.ready.take() {
+            self.append(welded, clusters, groups, limits, result);
+            self.cursor += 1;
+        } else if let Some(reduction) = self.reduction.as_mut() {
+            if reduction.step(welded, &self.shared) {
+                let reduction = self.reduction.take().expect("group just finished");
+                let members = reduction.members.clone();
+                if let Some(result) = reduction.finish(welded, options) {
+                    self.ready = Some(result);
+                } else {
+                    self.next_active.extend(members);
+                    self.cursor += 1;
+                }
+            }
+        } else if let Some(group) = self.groups.get(self.cursor) {
             let members: Vec<u32> = group
                 .iter()
                 .filter_map(|&m| self.active.get(m as usize).copied())
                 .collect();
-            match reduce_group(welded, clusters, members.clone(), &self.shared, options) {
-                None => self.next_active.extend(members),
-                Some(result) => self.append(welded, clusters, groups, limits, result),
+            self.reduction =
+                GroupReduction::new(welded, clusters, members.clone(), &self.shared, options);
+            if self.reduction.is_none() {
+                self.next_active.extend(members);
+                self.cursor += 1;
             }
-            self.cursor += 1;
         }
         if self.cursor >= self.groups.len() {
             self.phase = LevelPhase::Done;

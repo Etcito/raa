@@ -16,6 +16,73 @@ pub const MAX_PIECE_SHARE: f32 = 0.125;
 /// Pieces more than this many times wider than the group's median piece are not thinned.
 pub const WIDE: f64 = 3.0;
 
+fn component_root(parent: &mut [u32], mut v: u32) -> u32 {
+    while parent[v as usize] != v {
+        parent[v as usize] = parent[parent[v as usize] as usize];
+        v = parent[v as usize];
+    }
+    v
+}
+
+/// The mesh-wide foliage probe only needs component sizes. Welded positions already have
+/// dense ids, so accumulating sizes when joining roots avoids the group's remap and triangle lists.
+#[derive(Default)]
+pub(crate) struct FoliageSearch {
+    parent: Vec<u32>,
+    mesh_sizes: Vec<usize>,
+    triangle_counted: usize,
+    root_counted: usize,
+    small: usize,
+}
+
+impl FoliageSearch {
+    /// Reads one batch of connectivity or counts one batch of components. No vertex is
+    /// locked in the mesh-wide probe before any clusters have been built.
+    pub(crate) fn step(&mut self, triangles: &[Triangle], vertices: usize) -> Option<bool> {
+        const BATCH: usize = 4096;
+        if self.parent.is_empty() {
+            self.parent.extend(0..vertices as u32);
+            self.mesh_sizes.resize(vertices, 0);
+        }
+        if self.triangle_counted < triangles.len() {
+            let end = (self.triangle_counted + BATCH).min(triangles.len());
+            for triangle in &triangles[self.triangle_counted..end] {
+                let [a, b, c] = triangle.map(|corner| corner.position);
+                let mut at = component_root(&mut self.parent, a);
+                for v in [b, c] {
+                    let mut other = component_root(&mut self.parent, v);
+                    if at == other {
+                        continue;
+                    }
+                    // Root choice is irrelevant to the count; keep the larger component
+                    // as the root to avoid long paths on strips with adversarial index order.
+                    if self.mesh_sizes[at as usize] < self.mesh_sizes[other as usize] {
+                        std::mem::swap(&mut at, &mut other);
+                    }
+                    self.parent[other as usize] = at;
+                    let merged = std::mem::take(&mut self.mesh_sizes[other as usize]);
+                    self.mesh_sizes[at as usize] += merged;
+                }
+                self.mesh_sizes[at as usize] += 1;
+            }
+            self.triangle_counted = end;
+            return None;
+        }
+        let end = (self.root_counted + BATCH).min(vertices);
+        let largest = (triangles.len() as f32 * MAX_PIECE_SHARE).max(1.0) as usize;
+        self.small += self.mesh_sizes[self.root_counted..end]
+            .iter()
+            .filter(|&&size| size > 0 && size <= largest)
+            .count();
+        self.root_counted = end;
+        if self.small >= MIN_PIECES {
+            Some(true)
+        } else {
+            (end == vertices).then_some(false)
+        }
+    }
+}
+
 /// A group's triangles sorted into separate pieces and everything else.
 pub struct Pieces {
     /// Triangle indices of each piece, in order of their first triangle.
@@ -45,17 +112,10 @@ pub fn find_pieces(triangles: &[Triangle], is_locked: &dyn Fn(u32) -> bool) -> P
         })
         .collect();
     let mut parent: Vec<u32> = (0..local.len() as u32).collect();
-    fn root(parent: &mut [u32], mut v: u32) -> u32 {
-        while parent[v as usize] != v {
-            parent[v as usize] = parent[parent[v as usize] as usize];
-            v = parent[v as usize];
-        }
-        v
-    }
     for &[a, b, c] in ids.iter().flatten() {
-        let ra = root(&mut parent, a);
+        let ra = component_root(&mut parent, a);
         for other in [b, c] {
-            let ro = root(&mut parent, other);
+            let ro = component_root(&mut parent, other);
             parent[ro as usize] = ra;
         }
     }
@@ -71,7 +131,7 @@ pub fn find_pieces(triangles: &[Triangle], is_locked: &dyn Fn(u32) -> bool) -> P
             rest.push(index as u32);
             continue;
         };
-        let id = root(&mut parent, tri_ids[0]);
+        let id = component_root(&mut parent, tri_ids[0]);
         let slot = *component.entry(id).or_insert_with(|| {
             members.push(Vec::new());
             touches_lock.push(false);

@@ -6,7 +6,7 @@
 use crate::dvec::{DVec2, DVec3};
 use raa_math::Vec3;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap, btree_map::Entry};
 
 /// Shading attributes of a welded vertex.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -196,17 +196,47 @@ pub fn distance_to_segment(point: DVec3, start: DVec3, end: DVec3) -> f64 {
 /// The barycentric weights of `point` projected onto the plane of `corners`, unclamped (a point
 /// outside the triangle has a negative weight); `None` for a degenerate triangle.
 pub fn barycentric(point: DVec3, corners: [DVec3; 3]) -> Option<[f64; 3]> {
-    let (edge_a, edge_b) = (corners[1] - corners[0], corners[2] - corners[0]);
-    let offset = point - corners[0];
-    let (aa, ab, bb) = (edge_a.dot(edge_a), edge_a.dot(edge_b), edge_b.dot(edge_b));
-    let determinant = aa * bb - ab * ab;
-    if determinant <= 1.0e-12 * aa * bb || determinant <= 0.0 {
-        return None;
+    Some(BarycentricPlane::new(corners)?.weights(point))
+}
+
+/// A moved triangle is queried once for each normal sample in the old fan.
+struct BarycentricPlane {
+    origin: DVec3,
+    edge_a: DVec3,
+    edge_b: DVec3,
+    aa: f64,
+    ab: f64,
+    bb: f64,
+    determinant: f64,
+}
+
+impl BarycentricPlane {
+    fn new(corners: [DVec3; 3]) -> Option<Self> {
+        let origin = corners[0];
+        let (edge_a, edge_b) = (corners[1] - origin, corners[2] - origin);
+        let (aa, ab, bb) = (edge_a.dot(edge_a), edge_a.dot(edge_b), edge_b.dot(edge_b));
+        let determinant = aa * bb - ab * ab;
+        if determinant <= 1.0e-12 * aa * bb || determinant <= 0.0 {
+            return None;
+        }
+        Some(Self {
+            origin,
+            edge_a,
+            edge_b,
+            aa,
+            ab,
+            bb,
+            determinant,
+        })
     }
-    let (pa, pb) = (offset.dot(edge_a), offset.dot(edge_b));
-    let v = (bb * pa - ab * pb) / determinant;
-    let w = (aa * pb - ab * pa) / determinant;
-    Some([1.0 - v - w, v, w])
+
+    fn weights(&self, point: DVec3) -> [f64; 3] {
+        let offset = point - self.origin;
+        let (pa, pb) = (offset.dot(self.edge_a), offset.dot(self.edge_b));
+        let v = (self.bb * pa - self.ab * pb) / self.determinant;
+        let w = (self.aa * pb - self.ab * pa) / self.determinant;
+        [1.0 - v - w, v, w]
+    }
 }
 
 /// Picks the attribute a corner moving onto the collapse target takes: always one of the target's
@@ -226,35 +256,85 @@ pub fn best_wedge(attributes: &[Attribute], current: u32, wedges: &[u32], wanted
             .find(|&wedge| attributes.get(wedge as usize).is_some())
             .unwrap_or(current);
     };
-    let known: Vec<(u32, &Attribute)> = wedges
-        .iter()
-        .filter_map(|&wedge| attributes.get(wedge as usize).map(|a| (wedge, a)))
-        .collect();
-    let distance = |attribute: &Attribute| DVec2::from_f32(attribute.uv).distance(wanted);
-    let same_side = known
-        .iter()
-        .filter(|(_, attribute)| attribute.normal.dot(current_normal) > 0.7)
-        .min_by(|a, b| distance(a.1).total_cmp(&distance(b.1)));
-    if let Some(&(wedge, _)) = same_side {
-        return wedge;
+    let mut nearest: Option<(u32, f64)> = None;
+    let mut aligned: Option<(u32, f32)> = None;
+    for &wedge in wedges {
+        let Some(attribute) = attributes.get(wedge as usize) else {
+            continue;
+        };
+        let dot = attribute.normal.dot(current_normal);
+        if dot > 0.7 {
+            let distance = DVec2::from_f32(attribute.uv).distance(wanted);
+            if nearest.is_none_or(|(_, old)| distance.total_cmp(&old).is_lt()) {
+                nearest = Some((wedge, distance));
+            }
+        }
+        if aligned.is_none_or(|(id, old)| dot.total_cmp(&old).then_with(|| id.cmp(&wedge)).is_gt())
+        {
+            aligned = Some((wedge, dot));
+        }
     }
-    known
-        .iter()
-        .max_by(|a, b| {
-            let (da, db) = (
-                a.1.normal.dot(current_normal),
-                b.1.normal.dot(current_normal),
-            );
-            // max_by keeps the last of equal elements; compare reversed ids so the first wins.
-            da.total_cmp(&db).then_with(|| b.0.cmp(&a.0))
-        })
-        .map_or(current, |&(wedge, _)| wedge)
+    nearest
+        .map(|(id, _)| id)
+        .or(aligned.map(|(id, _)| id))
+        .unwrap_or(current)
 }
 
-/// The collapse state of one group: welded local vertices (ids in first-use order, mapped back to
-/// input positions through `global`), their quadrics, locks, stamps and the alive triangles.
+/// The collapse state of one group with its borrowed shading attributes.
 pub struct Simplifier<'a> {
     attributes: &'a [Attribute],
+    state: SimplifyState,
+}
+
+impl<'a> Simplifier<'a> {
+    /// Builds the group's local vertices and locks its outer boundary.
+    pub fn new(
+        input: &[Triangle],
+        positions: &[Vec3],
+        attributes: &'a [Attribute],
+        is_locked: &dyn Fn(u32) -> bool,
+    ) -> Self {
+        Self {
+            attributes,
+            state: SimplifyState::new(input, positions, is_locked),
+        }
+    }
+
+    /// The vertices sharing a triangle with `v`, ascending.
+    pub fn neighbors(&self, v: u32) -> Vec<u32> {
+        self.state.neighbors(v)
+    }
+
+    /// The attribute ids `v` uses across its triangles, ascending.
+    pub fn wedges_at(&self, v: u32) -> Vec<u32> {
+        self.state.wedges_at(v)
+    }
+
+    /// Whether the collapse preserves the manifold and does not flip a triangle.
+    pub fn can_collapse(&self, from: u32, to: u32) -> bool {
+        self.state.can_collapse(from, to)
+    }
+
+    /// Whether `v` never moves. An unknown vertex counts as locked.
+    pub fn locked(&self, v: u32) -> bool {
+        self.state.locked(v)
+    }
+
+    /// The number of triangles still alive.
+    pub fn alive_triangles(&self) -> usize {
+        self.state.alive_count
+    }
+
+    /// Collapses the cheapest admissible edges until the target or exhaustion.
+    pub fn run(mut self, target_triangles: usize) -> Simplified {
+        while !self.state.step(self.attributes, target_triangles) {}
+        self.state.finish()
+    }
+}
+
+/// One group held between Level work units. Attributes remain in the welded mesh and
+/// are borrowed for each step, so both states can be owned by the bake.
+pub(crate) struct SimplifyState {
     /// Global position id per local vertex.
     global: Vec<u32>,
     positions: Vec<DVec3>,
@@ -274,18 +354,44 @@ pub struct Simplifier<'a> {
     alive_count: usize,
     heap: BinaryHeap<Candidate>,
     max_error: f64,
+    queue: Option<EdgeQueue>,
+    seeded: bool,
 }
 
-impl<'a> Simplifier<'a> {
+/// A stable topology snapshot while candidates are queued. An edge whose endpoints both
+/// occur here is queued by the smaller of the two, in both directions.
+struct EdgeQueue {
+    vertices: Vec<u32>,
+    vertex: usize,
+    neighbors: Vec<u32>,
+    edge: usize,
+}
+
+impl EdgeQueue {
+    fn new(vertices: Vec<u32>) -> Self {
+        Self {
+            vertices,
+            vertex: 0,
+            neighbors: Vec::new(),
+            edge: 0,
+        }
+    }
+}
+
+/// Batches cap both bookkeeping work and the cost of comparing incident normal fans.
+const EDGE_VISITS_PER_UNIT: usize = 32;
+const FAN_WORK_PER_UNIT: usize = 2048;
+const HEAP_POPS_PER_UNIT: usize = 64;
+
+impl SimplifyState {
     /// Welds the input to local vertex ids in first-use order and builds the quadrics. A vertex
     /// on an edge not used by exactly two triangles is locked, as is one `is_locked` names. A
     /// position id past `positions` reads as the origin.
-    pub fn new(
+    pub(crate) fn new(
         input: &[Triangle],
         positions: &[Vec3],
-        attributes: &'a [Attribute],
         is_locked: &dyn Fn(u32) -> bool,
-    ) -> Simplifier<'a> {
+    ) -> Self {
         let mut remap: BTreeMap<u32, u32> = BTreeMap::new();
         let mut global: Vec<u32> = Vec::new();
         let triangles: Vec<Triangle> = input
@@ -351,8 +457,7 @@ impl<'a> Simplifier<'a> {
         }
 
         let alive_count = triangles.len();
-        Simplifier {
-            attributes,
+        Self {
             global,
             positions: local_positions,
             locked,
@@ -366,6 +471,8 @@ impl<'a> Simplifier<'a> {
             alive_count,
             heap: BinaryHeap::new(),
             max_error: 0.0,
+            queue: Some(EdgeQueue::new((0..vertex_count as u32).collect())),
+            seeded: false,
         }
     }
 
@@ -462,20 +569,22 @@ impl<'a> Simplifier<'a> {
         self.locked.get(v as usize).copied().unwrap_or(true)
     }
 
-    /// Number of triangles not yet collapsed away.
-    pub fn alive_triangles(&self) -> usize {
-        self.alive_count
-    }
-
-    /// Collapses the cheapest admissible edge until the target or no candidate is left, then
-    /// reports the surviving triangles with their input position ids.
-    pub fn run(mut self, target_triangles: usize) -> Simplified {
-        for v in 0..self.positions.len() as u32 {
-            self.push_edges_around(v);
+    /// Queues a bounded batch, or pops a bounded batch and makes at most one collapse.
+    pub(crate) fn step(&mut self, attributes: &[Attribute], target: usize) -> bool {
+        if let Some(mut queue) = self.queue.take() {
+            if !self.queue_unit(attributes, &mut queue) {
+                self.queue = Some(queue);
+            } else {
+                self.seeded = true;
+            }
+            return false;
         }
-        while self.alive_count > target_triangles {
+        for _ in 0..HEAP_POPS_PER_UNIT {
+            if self.alive_count <= target {
+                return true;
+            }
             let Some(candidate) = self.heap.pop() else {
-                break;
+                return true;
             };
             if self.stamps[candidate.from as usize] != candidate.from_stamp
                 || self.stamps[candidate.to as usize] != candidate.to_stamp
@@ -483,19 +592,62 @@ impl<'a> Simplifier<'a> {
                 continue;
             }
             if self.can_collapse(candidate.from, candidate.to) {
-                self.collapse(candidate.from, candidate.to);
+                self.collapse(attributes, candidate.from, candidate.to);
+                return self.alive_count <= target;
             }
         }
-        self.finish()
+        false
     }
 
-    /// Queues every collapse of an unlocked vertex touching `v`, in both directions.
-    fn push_edges_around(&mut self, v: u32) {
-        for neighbor in self.neighbors(v) {
-            for (from, to) in [(v, neighbor), (neighbor, v)] {
+    pub(crate) fn progress(&self, target: usize) -> f32 {
+        if !self.seeded {
+            return 0.25
+                * self
+                    .queue
+                    .as_ref()
+                    .map_or(1.0, |q| q.vertex as f32 / q.vertices.len().max(1) as f32);
+        }
+        let removed = self.triangles.len() - self.alive_count;
+        let planned = self.triangles.len().saturating_sub(target).max(1);
+        0.25 + 0.75 * (removed as f32 / planned as f32).min(1.0)
+    }
+
+    fn queue_unit(&mut self, attributes: &[Attribute], queue: &mut EdgeQueue) -> bool {
+        let mut work = 0;
+        for _ in 0..EDGE_VISITS_PER_UNIT {
+            let Some(&v) = queue.vertices.get(queue.vertex) else {
+                return true;
+            };
+            if queue.edge == 0 && queue.neighbors.is_empty() {
+                queue.neighbors = self.neighbors(v);
+            }
+            let Some(&n) = queue.neighbors.get(queue.edge) else {
+                queue.vertex += 1;
+                queue.neighbors.clear();
+                queue.edge = 0;
+                continue;
+            };
+            if v > n && queue.vertices.binary_search(&n).is_ok() {
+                queue.edge += 1;
+                continue;
+            }
+            let fan_work = |from: u32| {
+                if self.locked(from) {
+                    0
+                } else {
+                    self.vertex_triangles[from as usize].len().pow(2)
+                }
+            };
+            let edge_work = 1 + fan_work(v) + fan_work(n);
+            if work != 0 && work + edge_work > FAN_WORK_PER_UNIT {
+                break;
+            }
+            queue.edge += 1;
+            work += edge_work;
+            for (from, to) in [(v, n), (n, v)] {
                 if !self.locked(from) {
                     let candidate = Candidate {
-                        cost: self.collapse_cost(from, to),
+                        cost: self.collapse_cost(attributes, from, to),
                         from,
                         to,
                         from_stamp: self.stamps[from as usize],
@@ -505,39 +657,28 @@ impl<'a> Simplifier<'a> {
                 }
             }
         }
+        false
     }
 
-    fn collapse_cost(&self, from: u32, to: u32) -> f64 {
+    fn collapse_cost(&self, attributes: &[Attribute], from: u32, to: u32) -> f64 {
         let mut quadric = self.quadrics[from as usize];
         quadric.add(&self.quadrics[to as usize]);
         let target = self.positions[to as usize];
         let length_squared = self.positions[from as usize].distance_squared(target);
-        let texture = self.texture_error(from, to) * TEXTURE_ERROR_WEIGHT;
-        let (shading, _) = self.normal_error(from, to);
+        let (texture, shading, _) = self.collapse_errors(attributes, from, to);
+        let texture = texture * TEXTURE_ERROR_WEIGHT;
         quadric.mean_squared_distance(target)
             + texture * texture
             + shading * shading
             + length_squared
-                * (EDGE_LENGTH_WEIGHT + NORMAL_DIFFERENCE_WEIGHT * self.normal_difference(from, to))
-    }
-
-    /// How far the texture slides across the surface if `from` collapses into `to`, in world
-    /// units, including what earlier collapses already moved at `from`.
-    fn texture_error(&self, from: u32, to: u32) -> f64 {
-        let wedges = self.wedges_at(to);
-        let worst = self.vertex_triangles[from as usize]
-            .iter()
-            .map(|&t| self.triangles[t as usize])
-            .filter(|t| !t.iter().any(|corner| corner.position == to))
-            .map(|t| self.moved_corner(&t, from, to, &wedges).1)
-            .fold(0.0, f64::max);
-        worst.max(self.seam_movement(from, to)) + self.texture_errors[from as usize]
+                * (EDGE_LENGTH_WEIGHT
+                    + NORMAL_DIFFERENCE_WEIGHT * self.normal_difference(attributes, from, to))
     }
 
     /// How far the collapse moves a UV seam. Each side's mapping can stay continuous while one
     /// side grows over the other, replacing what the surface showed there.
-    fn seam_movement(&self, from: u32, to: u32) -> f64 {
-        let seams = self.seam_neighbors(from);
+    fn seam_movement(&self, attributes: &[Attribute], from: u32, to: u32) -> f64 {
+        let seams = self.seam_neighbors(attributes, from);
         let start = self.positions[from as usize];
         let end = self.positions[to as usize];
         match seams[..] {
@@ -553,36 +694,68 @@ impl<'a> Simplifier<'a> {
     }
 
     /// The neighbours of `v` connected by an edge whose two sides use different textures.
-    fn seam_neighbors(&self, v: u32) -> Vec<u32> {
+    fn seam_neighbors(&self, attributes: &[Attribute], v: u32) -> Vec<u32> {
         let uv_of = |triangle: &Triangle, vertex: u32| {
             triangle
                 .iter()
                 .find(|corner| corner.position == vertex)
-                .and_then(|corner| self.attributes.get(corner.attribute as usize))
+                .and_then(|corner| attributes.get(corner.attribute as usize))
                 .map(|attribute| attribute.uv)
         };
-        let mut seams = self.neighbors(v);
-        seams.retain(|&n| {
-            let mut sides = self.vertex_triangles[v as usize]
-                .iter()
-                .map(|&t| &self.triangles[t as usize])
-                .filter(|t| t.iter().any(|corner| corner.position == n));
-            let (Some(first), Some(second)) = (sides.next(), sides.next()) else {
-                return false;
-            };
-            uv_of(first, v) != uv_of(second, v) || uv_of(first, n) != uv_of(second, n)
-        });
-        seams
+        // Keep the first two incident triangles in the original fan order, including seams
+        // on non-manifold input. A degenerate triangle names a neighbor at most once here.
+        let mut sides = BTreeMap::<u32, (u32, Option<u32>)>::new();
+        for &id in &self.vertex_triangles[v as usize] {
+            let [a, b, c] = self.triangles[id as usize].map(|corner| corner.position);
+            for n in [
+                Some(a),
+                (b != a).then_some(b),
+                (c != a && c != b).then_some(c),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if n != v {
+                    match sides.entry(n) {
+                        Entry::Vacant(slot) => {
+                            slot.insert((id, None));
+                        }
+                        Entry::Occupied(mut slot) if slot.get().1.is_none() => {
+                            slot.get_mut().1 = Some(id)
+                        }
+                        Entry::Occupied(_) => {}
+                    }
+                }
+            }
+        }
+        sides
+            .into_iter()
+            .filter_map(|(n, (first, second))| {
+                let (first, second) = (
+                    &self.triangles[first as usize],
+                    &self.triangles[second? as usize],
+                );
+                (uv_of(first, v) != uv_of(second, v) || uv_of(first, n) != uv_of(second, n))
+                    .then_some(n)
+            })
+            .collect()
     }
 
     /// The attribute the corner of `triangle` at `from` takes on moving to `to`, and how far the
     /// texture slides as a result. A corner the triangle does not touch moves nowhere.
-    fn moved_corner(&self, triangle: &Triangle, from: u32, to: u32, wedges: &[u32]) -> (u32, f64) {
+    fn moved_corner(
+        &self,
+        attributes: &[Attribute],
+        triangle: &Triangle,
+        from: u32,
+        to: u32,
+        wedges: &[u32],
+    ) -> (u32, f64) {
         let Some(index) = triangle.iter().position(|corner| corner.position == from) else {
             return (triangle[0].attribute, 0.0);
         };
         let current = triangle[index].attribute;
-        let uv_of = |corner: Corner| match self.attributes.get(corner.attribute as usize) {
+        let uv_of = |corner: Corner| match attributes.get(corner.attribute as usize) {
             Some(attribute) => DVec2::from_f32(attribute.uv),
             None => DVec2::new(0.0, 0.0),
         };
@@ -600,7 +773,7 @@ impl<'a> Simplifier<'a> {
         let uv_area = uv_a.perp_dot(uv_b).abs();
         if determinant <= 1.0e-12 * aa * bb || uv_area <= 0.0 {
             // No usable mapping here, as for a sliver or a mesh without UVs.
-            return (best_wedge(self.attributes, current, wedges, uv_origin), 0.0);
+            return (best_wedge(attributes, current, wedges, uv_origin), 0.0);
         }
         let along_a = (bb * offset.dot(edge_a) - ab * offset.dot(edge_b)) / determinant;
         let along_b = (aa * offset.dot(edge_b) - ab * offset.dot(edge_a)) / determinant;
@@ -608,14 +781,11 @@ impl<'a> Simplifier<'a> {
         let wanted =
             uv_origin + uv_a * along_a.clamp(-limit, limit) + uv_b * along_b.clamp(-limit, limit);
 
-        let chosen = best_wedge(self.attributes, current, wedges, wanted);
+        let chosen = best_wedge(attributes, current, wedges, wanted);
         let world_per_uv = (determinant.sqrt() / uv_area).sqrt();
-        let moved = self
-            .attributes
-            .get(chosen as usize)
-            .map_or(0.0, |attribute| {
-                DVec2::from_f32(attribute.uv).distance(wanted)
-            });
+        let moved = attributes.get(chosen as usize).map_or(0.0, |attribute| {
+            DVec2::from_f32(attribute.uv).distance(wanted)
+        });
         (chosen, moved * world_per_uv)
     }
 
@@ -627,10 +797,10 @@ impl<'a> Simplifier<'a> {
     /// between them, plus what earlier collapses already turned at the old triangle's corners, is
     /// scaled by that moved triangle's longest edge: a turned normal stretched over a longer
     /// triangle shows over more of the screen.
-    fn normal_error(&self, from: u32, to: u32) -> (f64, f64) {
+    fn collapse_errors(&self, attributes: &[Attribute], from: u32, to: u32) -> (f64, f64, f64) {
         let wedges = self.wedges_at(to);
         let normal_of = |attribute: u32| {
-            self.attributes
+            attributes
                 .get(attribute as usize)
                 .map_or(DVec3::Y, |a| DVec3::from_vec3(a.normal))
                 .normalize_or(DVec3::Y)
@@ -641,15 +811,17 @@ impl<'a> Simplifier<'a> {
                 .sum::<DVec3>()
                 .normalize_or(DVec3::Y)
         };
-        // The moved triangles: corner positions, corner normals and longest edge.
-        let mut moved: Vec<([DVec3; 3], [DVec3; 3], f64)> = Vec::new();
+        // The same wedge choice determines the texture slide and the normal of each moved corner.
+        let mut texture = 0.0f64;
+        let mut moved = Vec::new();
         let around = &self.vertex_triangles[from as usize];
         for &t in around {
             let triangle = self.triangles[t as usize];
             if triangle.iter().any(|corner| corner.position == to) {
                 continue;
             }
-            let (attribute, _) = self.moved_corner(&triangle, from, to, &wedges);
+            let (attribute, slide) = self.moved_corner(attributes, &triangle, from, to, &wedges);
+            texture = texture.max(slide);
             let corners = triangle.map(|corner| {
                 if corner.position == from {
                     (self.positions[to as usize], attribute)
@@ -662,7 +834,9 @@ impl<'a> Simplifier<'a> {
                 .map(|(a, b)| positions[a].distance(positions[b]))
                 .into_iter()
                 .fold(0.0, f64::max);
-            moved.push((positions, corners.map(|c| normal_of(c.1)), longest));
+            if let Some(plane) = BarycentricPlane::new(positions) {
+                moved.push((plane, corners.map(|c| normal_of(c.1)), longest));
+            }
         }
         let (mut worst, mut worst_chord) = (0.0f64, 0.0f64);
         for &t in around {
@@ -684,10 +858,8 @@ impl<'a> Simplifier<'a> {
                 let old = interpolate(&normals, weights);
                 // The moved triangle covering the point best: the largest smallest weight.
                 let mut best: Option<(f64, [f64; 3], usize)> = None;
-                for (m, (corners, _, _)) in moved.iter().enumerate() {
-                    let Some(local) = barycentric(point, *corners) else {
-                        continue;
-                    };
+                for (m, (plane, _, _)) in moved.iter().enumerate() {
+                    let local = plane.weights(point);
                     let lowest = local.into_iter().fold(f64::INFINITY, f64::min);
                     if best.is_none_or(|(b, _, _)| lowest > b) {
                         best = Some((lowest, local, m));
@@ -703,17 +875,19 @@ impl<'a> Simplifier<'a> {
                 worst = worst.max(NORMAL_ERROR_WEIGHT * chord * longest);
             }
         }
-        (worst, worst_chord)
+        let texture = texture.max(self.seam_movement(attributes, from, to))
+            + self.texture_errors[from as usize];
+        (texture, worst, worst_chord)
     }
 
     /// How much the shading normals disagree between the two ends, in `0..=1`.
-    fn normal_difference(&self, from: u32, to: u32) -> f64 {
+    fn normal_difference(&self, attributes: &[Attribute], from: u32, to: u32) -> f64 {
         let normal_at = |v: u32| {
             self.vertex_triangles[v as usize]
                 .iter()
                 .flat_map(|&t| self.triangles[t as usize])
                 .find(|corner| corner.position == v)
-                .and_then(|corner| self.attributes.get(corner.attribute as usize))
+                .and_then(|corner| attributes.get(corner.attribute as usize))
                 .map_or(Vec3::Y, |attribute| attribute.normal)
         };
         f64::from((1.0 - normal_at(from).dot(normal_at(to))) * 0.5)
@@ -721,13 +895,13 @@ impl<'a> Simplifier<'a> {
 
     /// Moves `from` onto `to`, merges their quadrics and textures, drops the collapsed triangles
     /// and invalidates the queued work around the changed neighbourhood.
-    fn collapse(&mut self, from: u32, to: u32) {
+    fn collapse(&mut self, attributes: &[Attribute], from: u32, to: u32) {
         let target = self.positions[to as usize];
         let mut merged = self.quadrics[to as usize];
         merged.add(&self.quadrics[from as usize]);
-        let texture_error = self.texture_error(from, to);
+        let (texture_error, normal_error, normal_chord) =
+            self.collapse_errors(attributes, from, to);
         let weighted = texture_error * TEXTURE_ERROR_WEIGHT;
-        let (normal_error, normal_chord) = self.normal_error(from, to);
         self.max_error = self
             .max_error
             .max(merged.mean_squared_distance(target))
@@ -754,7 +928,8 @@ impl<'a> Simplifier<'a> {
                     }
                 }
             } else {
-                let (attribute, _) = self.moved_corner(&corners, from, to, &target_wedges);
+                let (attribute, _) =
+                    self.moved_corner(attributes, &corners, from, to, &target_wedges);
                 for corner in &mut self.triangles[index] {
                     if corner.position == from {
                         corner.position = to;
@@ -768,17 +943,15 @@ impl<'a> Simplifier<'a> {
         // Invalidate every queued collapse touching the changed neighbourhood.
         self.stamps[from as usize] += 1;
         self.stamps[to as usize] += 1;
-        let neighbors = self.neighbors(to);
+        let mut neighbors = self.neighbors(to);
         for &n in &neighbors {
             self.stamps[n as usize] += 1;
         }
-        self.push_edges_around(to);
-        for n in neighbors {
-            self.push_edges_around(n);
-        }
+        neighbors.insert(neighbors.partition_point(|&n| n < to), to);
+        self.queue = Some(EdgeQueue::new(neighbors));
     }
 
-    fn finish(self) -> Simplified {
+    pub(crate) fn finish(self) -> Simplified {
         let triangles = self
             .triangles
             .iter()

@@ -3,7 +3,7 @@
 //! Adapted from solstice (MIT), Copyright (c) 2026 SamG-Coder:
 //! `crates/solstice-builder/src/partition.rs`, revision 7e465b5.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use raa_math::Vec3;
 
@@ -468,16 +468,15 @@ fn chunk_key(centroid: Vec3, origin: Vec3, step: f32) -> u32 {
 }
 
 /// The chunked partition of a whole mesh, advanced one unit per step: the Morton keys of the
-/// next `PARTITION_BATCH` triangles, one sort of the keyed pairs, then one chunk of at most
-/// `PARTITION_BATCH` consecutive triangles of that order partitioned on its own.
+/// next `PARTITION_BATCH` triangles, then one chunk of at most `PARTITION_BATCH` consecutive
+/// triangles in Morton key and original index order partitioned on its own.
 pub struct PartitionState {
     triangle_count: usize,
     limits: ClusterLimits,
     origin: Vec3,
     step: f32,
-    keyed: Vec<(u32, u32)>,
+    keyed: BTreeMap<u32, VecDeque<u32>>,
     next_key: usize,
-    chunk_start: usize,
     covered: usize,
     finished: Vec<Vec<u32>>,
 }
@@ -495,9 +494,8 @@ impl PartitionState {
             limits,
             origin,
             step,
-            keyed: Vec::new(),
+            keyed: BTreeMap::new(),
             next_key: 0,
-            chunk_start: 0,
             covered: 0,
             finished: Vec::new(),
         }
@@ -517,26 +515,27 @@ impl PartitionState {
                         .unwrap_or(Vec3::ZERO);
                 }
                 let key = chunk_key(sum / 3.0, self.origin, self.step);
-                self.keyed.push((key, index as u32));
+                self.keyed.entry(key).or_default().push_back(index as u32);
             }
             self.next_key = end;
-            self.keyed.sort_unstable();
-            if self.next_key < self.triangle_count {
-                return false;
-            }
+            return false;
         }
 
-        let Some(chunk_range) = self.keyed.get(self.chunk_start..) else {
-            return true;
-        };
-        if chunk_range.is_empty() {
+        let mut mesh_indices = Vec::with_capacity(PARTITION_BATCH);
+        while mesh_indices.len() < PARTITION_BATCH {
+            let Some(mut entry) = self.keyed.first_entry() else {
+                break;
+            };
+            let queue = entry.get_mut();
+            let count = (PARTITION_BATCH - mesh_indices.len()).min(queue.len());
+            mesh_indices.extend(queue.drain(..count));
+            if queue.is_empty() {
+                entry.remove_entry();
+            }
+        }
+        if mesh_indices.is_empty() {
             return true;
         }
-        let end = self.chunk_start + PARTITION_BATCH.min(chunk_range.len());
-        let Some(chunk) = self.keyed.get(self.chunk_start..end) else {
-            return true;
-        };
-        let mesh_indices: Vec<u32> = chunk.iter().map(|&(_, index)| index).collect();
         let chunk_triangles: Vec<[u32; 3]> =
             mesh_indices.iter().map(|&index| triangle(index)).collect();
         for cluster in partition_triangles(&chunk_triangles, positions, self.limits) {
@@ -551,8 +550,7 @@ impl PartitionState {
                 self.finished.push(mapped);
             }
         }
-        self.chunk_start = end;
-        self.chunk_start >= self.keyed.len()
+        self.keyed.is_empty()
     }
 
     /// The clusters finished since the last drain, as mesh triangle indices, in production order.
