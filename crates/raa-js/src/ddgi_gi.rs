@@ -46,6 +46,8 @@ impl Engine {
             put(&result, "hysteresis", s.hysteresis.into());
             put(&result, "budgetMs", s.budget_ms.into());
             put(&result, "burstMs", s.burst_ms.into());
+            put(&result, "skyTransfer", s.sky_transfer.into());
+            put(&result, "invalidation", (s.invalidation as u32).into());
             if let Some(stats) = state.stats() {
                 put(&result, "probes", stats.probes.into());
                 put(&result, "scheduled", stats.scheduled.into());
@@ -74,6 +76,21 @@ impl Engine {
                 );
                 put(&result, "screenResolve", stats.screen_resolve.into());
                 put(&result, "interval", stats.interval.into());
+                // Lighting changes: group refreshes traced and probe groups invalidated since
+                // the volume started, as [geometry + sky transfer, sun + sky residual, other].
+                let triple = |values: [u64; 3]| {
+                    let array = Array::new();
+                    for value in values {
+                        array.push(&(value as f64).into());
+                    }
+                    JsValue::from(array)
+                };
+                put(&result, "refreshed", triple(stats.refreshed));
+                put(&result, "invalidated", triple(stats.invalidated));
+                put(&result, "relights", (stats.relights as f64).into());
+                put(&result, "lightEdits", (stats.light_edits as f64).into());
+                put(&result, "lastLightProbes", stats.last_light_probes.into());
+                put(&result, "lightMasks", stats.light_masks.into());
                 if let Some((min, max)) = stats.scene_bounds {
                     let bounds = Array::new();
                     for x in min.into_iter().chain(max) {
