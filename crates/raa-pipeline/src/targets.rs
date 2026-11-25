@@ -190,6 +190,15 @@ impl HdrChain {
             .map_or_else(|| &self.dst_target().texture, |v| v.texture())
     }
 
+    /// The chain's two textures with their views, A then B, for a caller that wires its own colour
+    /// chain and wants to reuse them instead of allocating a pool (the render graph's wiring).
+    pub fn textures(&self) -> [(&wgpu::Texture, &wgpu::TextureView); 2] {
+        [
+            (&self.textures[0].texture, &self.textures[0].view),
+            (&self.textures[1].texture, &self.textures[1].view),
+        ]
+    }
+
     /// Exchanges source and destination (after a pass wrote `dst()`).
     pub fn swap(&self) {
         if !self.is_bound() {
