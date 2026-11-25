@@ -49,3 +49,22 @@ The pinned build retains 244,388 triangles, 6.5222% of the full geometry, and le
 5,612 triangles beneath the mesh RT cap. It retains all 405 primitives, 28 materials,
 72 images, 155 nodes, six cameras and 24 punctual lights. It simplifies 289 primitives
 and leaves the triangle counts of 116 unchanged. The position-only fallback was unused.
+
+## Stage the full visual sample
+
+Use the verified original assets and Pillow 12.1.1.
+
+```sh
+python3 scripts/stage-intel-sponza-sample.py
+```
+
+Serve the contents of `out/benchmark-assets/intel-sponza/web-sample-visual` under
+`/samples/intel-sponza/` beside the editor. The 76 files include the unchanged source
+glTF and BIN, all 72 referenced textures limited to 1024 × 1024 with Lanczos,
+Intel's credits and license, and `sample-edition.json`. The receipt includes the
+glTF and binary SHA-256 and the source and staged texture hashes. The only
+asset transformation is resizing the texture images. Use `--output` to stage
+a second copy and verify reproducibility with `diff -qr`.
+
+The full scene is the visual sample. Use the separate RT proxy for trace
+benchmarks constrained by the 250,000-triangle limit.
