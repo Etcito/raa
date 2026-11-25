@@ -149,9 +149,21 @@ impl NodeFamily for Ddgi {
                 "",
                 Rebuild::Resources,
             ),
-            count("cascadeCountX", "Coarse cascade probes X", d.cascade_counts[0]),
-            count("cascadeCountY", "Coarse cascade probes Y (up)", d.cascade_counts[1]),
-            count("cascadeCountZ", "Coarse cascade probes Z", d.cascade_counts[2]),
+            count(
+                "cascadeCountX",
+                "Coarse cascade probes X",
+                d.cascade_counts[0],
+            ),
+            count(
+                "cascadeCountY",
+                "Coarse cascade probes Y (up)",
+                d.cascade_counts[1],
+            ),
+            count(
+                "cascadeCountZ",
+                "Coarse cascade probes Z",
+                d.cascade_counts[2],
+            ),
             far,
             flag(
                 "screenAo",
@@ -317,7 +329,8 @@ impl NodeFamily for Ddgi {
                 param: Some("probeCountX".into()),
                 link: None,
                 message: error.message().into(),
-                fix: "Use 1 to 3 cascades and at most 32768 probes in all, 2 to 128 per axis.".into(),
+                fix: "Use 1 to 3 cascades and at most 32768 probes in all, 2 to 128 per axis."
+                    .into(),
             });
         }
     }

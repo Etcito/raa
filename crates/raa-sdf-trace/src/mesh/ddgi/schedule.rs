@@ -507,7 +507,11 @@ mod tests {
         let xs: Vec<i32> = jobs
             .chunks(2)
             .map(|j| (j[0] & 0xffff) as i32)
-            .map(|slot| (-4..4).find(|&x| s.slot(0, [x, 0, 0]) == slot as u32).unwrap())
+            .map(|slot| {
+                (-4..4)
+                    .find(|&x| s.slot(0, [x, 0, 0]) == slot as u32)
+                    .unwrap()
+            })
             .collect();
         // Influence reaches 1.75 cells behind the eye: x = 0 and -1 count as visible too,
         // nearest first (x = 1 and x = -1 tie).
@@ -540,8 +544,18 @@ mod cascade_tests {
     fn coarse_probes_under_the_fine_cascade_are_not_scheduled() {
         // Cascade 0: 8 cells of 1 m on x, cascade 1: 8 cells of 2 m, both starting at x = 0 m.
         let cascades = vec![
-            CascadeLayout { counts: [8, 1, 1], spacing: 1.0, offset: 0, probes: 8 },
-            CascadeLayout { counts: [8, 1, 1], spacing: 2.0, offset: 8, probes: 8 },
+            CascadeLayout {
+                counts: [8, 1, 1],
+                spacing: 1.0,
+                offset: 0,
+                probes: 8,
+            },
+            CascadeLayout {
+                counts: [8, 1, 1],
+                spacing: 2.0,
+                offset: 8,
+                probes: 8,
+            },
         ];
         let mut s = Schedule::default();
         s.reset(&cascades);
@@ -557,8 +571,18 @@ mod cascade_tests {
         assert_eq!(picked, (0..16).collect::<Vec<_>>());
         // A long fine cascade (40 cells): coarse probes at 6..30 m are inside it, not needed.
         let cascades = vec![
-            CascadeLayout { counts: [40, 1, 1], spacing: 1.0, offset: 0, probes: 40 },
-            CascadeLayout { counts: [24, 1, 1], spacing: 2.0, offset: 40, probes: 24 },
+            CascadeLayout {
+                counts: [40, 1, 1],
+                spacing: 1.0,
+                offset: 0,
+                probes: 40,
+            },
+            CascadeLayout {
+                counts: [24, 1, 1],
+                spacing: 2.0,
+                offset: 40,
+                probes: 24,
+            },
         ];
         s.reset(&cascades);
         s.scroll(&[[0, 0, 0], [0, 0, 0]], &[closed, closed]);
@@ -569,7 +593,10 @@ mod cascade_tests {
             .filter(|&slot| slot >= 40)
             .map(|slot| 2 * (slot as i32 - 40))
             .collect();
-        assert!(coarse.iter().all(|&x| x - 2 < 3 || x + 2 > 36), "{coarse:?}");
+        assert!(
+            coarse.iter().all(|&x| x - 2 < 3 || x + 2 > 36),
+            "{coarse:?}"
+        );
         assert!(coarse.contains(&0) && coarse.contains(&46));
         // Closing the fine cascade's low x side drops the coarse probes there too.
         s.scroll(&[[0, 0, 0], [0, 0, 0]], &[closed | 1, closed]);

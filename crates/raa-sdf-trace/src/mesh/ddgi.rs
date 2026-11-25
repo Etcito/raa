@@ -948,13 +948,9 @@ impl FeaturePass for DdgiPass {
         };
         let converge_age = converge_age(settings.hysteresis);
         let mut jobs = Vec::with_capacity(burst as usize);
-        let (visibility, bursting, refreshed) = self.schedule.plan(
-            Some(&camera),
-            converge_age,
-            budget,
-            burst,
-            &mut jobs,
-        );
+        let (visibility, bursting, refreshed) =
+            self.schedule
+                .plan(Some(&camera), converge_age, budget, burst, &mut jobs);
         if !jobs.is_empty() {
             self.idle_frames = 0;
         }
@@ -1467,7 +1463,12 @@ impl DdgiGpu {
             let b = bases[k];
             push_u32(
                 &mut header,
-                [b[0] as u32, b[1] as u32, b[2] as u32, c.offset | (closed[k] << 16)],
+                [
+                    b[0] as u32,
+                    b[1] as u32,
+                    b[2] as u32,
+                    c.offset | (closed[k] << 16),
+                ],
             );
             push_u32(
                 &mut header,
@@ -1549,7 +1550,10 @@ mod tests {
         assert_eq!(cascades[1].offset, 24 * 12 * 16);
         assert_eq!(cascades[1].spacing, 3.0);
         assert_eq!(settings.probe_count(), 24 * 12 * 16 + 16 * 8 * 12);
-        assert!(settings.probe_count() < 1 << 16, "a job carries a 16-bit slot");
+        assert!(
+            settings.probe_count() < 1 << 16,
+            "a job carries a 16-bit slot"
+        );
         // Intel Sponza's measured bounds: the coarse cascade spans x and z whole (both sides
         // closed); cascade 0 at the V1 camera stops 3.5 m short of the far end of the nave (+x
         // open) while its -x side is clamped to the bounds (closed).
