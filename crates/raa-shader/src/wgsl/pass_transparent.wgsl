@@ -174,14 +174,18 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) {
     let shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
     let ao = raa_slot_ao(in.frag_coord);
     let c = raa_pass_shade_ctx(s, in, ao, shadow);
-    let lit = s.emissive
-        + raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
-            raa_directional_radiance(raa_frame.sun_color.rgb) * shadow)
-        + raa_slot_ambient(s, c)
-        + raa_slot_indirect(s, c)
-        + raa_local_lighting(s, c)
-        + raa_slot_transmission(s, c);
+    let direct = raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
+        raa_directional_radiance(raa_frame.sun_color.rgb) * shadow);
+    let local = raa_local_lighting(s, c);
+    let indirect = raa_slot_ambient(s, c) + raa_slot_indirect(s, c);
+    let lit = s.emissive + direct + local + indirect + raa_slot_transmission(s, c);
     let shaded = raa_slot_fog(lit, in.position, c);
-    let color = select(shaded, s.base_color + s.emissive, raa_pass_unlit(in.record));
+    let unlit = raa_pass_unlit(in.record);
+    var color = select(shaded, s.base_color + s.emissive, unlit);
+    if raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
+        color = select(s.emissive + direct + local, s.base_color + s.emissive, unlit);
+    } else if raa_feature_enabled(RAA_INDIRECT_ONLY_FEATURE) {
+        color = select(indirect, vec3<f32>(0.0), unlit);
+    }
     raa_pass_oit_append(in.frag_coord, color, clamp(s.opacity, 0.0, 1.0));
 }

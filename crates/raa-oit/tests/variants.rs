@@ -233,10 +233,11 @@ fn assert_weather_boundary(wgsl: &str, label: &str, csm: bool) {
     let calls = wgsl.matches("raa_cloud_shadow(world_pos)").count();
     assert_eq!(
         calls,
-        if csm { 2 } else { 1 },
+        if csm { 3 } else { 1 },
         "{label}: shadow result paths"
     );
     if csm {
+        assert!(wgsl.contains("let cloud = raa_cloud_shadow(world_pos);"), "{label}");
         assert!(
             wgsl.contains("return contact * raa_cloud_shadow(world_pos);"),
             "{label}"
@@ -258,7 +259,11 @@ fn shared_lighting_preserves_transmission_fog_and_oit() {
     ] {
         assert!(pass.find(term).expect(term) < pass.find("raa_slot_fog(lit,").unwrap());
     }
-    assert!(pass.contains("select(shaded, s.base_color + s.emissive, raa_pass_unlit(in.record))"));
+    assert!(pass.contains("select(shaded, s.base_color + s.emissive, unlit)"));
+    assert!(pass.contains("if raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE)"));
+    assert!(pass.contains("select(s.emissive + direct + local, s.base_color + s.emissive, unlit)"));
+    assert!(pass.contains("if raa_feature_enabled(RAA_INDIRECT_ONLY_FEATURE)"));
+    assert!(pass.contains("select(indirect, vec3<f32>(0.0), unlit)"));
     assert!(pass.contains("raa_pass_oit_append(in.frag_coord, color, clamp(s.opacity, 0.0, 1.0))"));
     assert!(pass.contains("atomicAdd(&raa_oit_counter, 1u)"));
     assert!(pass.contains("index >= raa_oit_params.capacity"));
