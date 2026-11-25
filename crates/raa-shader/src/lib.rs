@@ -74,7 +74,11 @@ pub const NEAR_MIRROR_WGSL: &str = include_str!("wgsl/near_mirror.wgsl");
 pub const PASS_PREPASS_WGSL: &str = include_str!("wgsl/pass_prepass.wgsl");
 /// Forward entry points: `vs_main` and `fs_main` writing the S11 final colour to the HDR
 /// target (location 0).
-pub const PASS_FORWARD_WGSL: &str = include_str!("wgsl/pass_forward.wgsl");
+pub const PASS_FORWARD_WGSL: &str = concat!(
+    include_str!("wgsl/opaque_lighting.wgsl"),
+    "\n",
+    include_str!("wgsl/pass_forward.wgsl")
+);
 /// Shadow caster entry point `vs_main` (no fragment stage); the light view-projection is a
 /// group-2 uniform.
 pub const PASS_SHADOW_WGSL: &str = include_str!("wgsl/pass_shadow.wgsl");
@@ -90,7 +94,11 @@ pub const PASS_FURSHELL_WGSL: &str = include_str!("wgsl/pass_furshell.wgsl");
 pub const PASS_VG_GBUFFER_WGSL: &str = include_str!("wgsl/pass_vg_gbuffer.wgsl");
 /// Virtualized-geometry shade entry points: a fullscreen `vs_main` with no vertex input and
 /// `fs_main` writing the S11 opaque final colour and `@builtin(frag_depth)`.
-pub const PASS_VG_SHADE_WGSL: &str = include_str!("wgsl/pass_vg_shade.wgsl");
+pub const PASS_VG_SHADE_WGSL: &str = concat!(
+    include_str!("wgsl/opaque_lighting.wgsl"),
+    "\n",
+    include_str!("wgsl/pass_vg_shade.wgsl")
+);
 
 /// Post-material instance tint of a composed module (S23). `InstanceExtraGpu` keeps its
 /// 128-byte layout: `mat_instance_tint_set` reads the spare lane `reserved.x` (1 after

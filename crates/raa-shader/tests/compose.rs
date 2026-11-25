@@ -187,7 +187,7 @@ fn cloud_shadow_is_attached_once_before_the_providers() {
 fn directional_boundary_is_declared_once_and_called_by_the_lit_passes() {
     let reg = MaterialFnRegistry::new();
     let composer = stub_composer();
-    for pass in PassKind::ALL {
+    for pass in PassKind::ALL.into_iter().chain(PassKind::VG) {
         let wgsl = composer.compose(&reg, &key(pass)).expect("compose");
         // The prelude owns the boundary and the weather record it reads.
         assert_eq!(
@@ -202,14 +202,14 @@ fn directional_boundary_is_declared_once_and_called_by_the_lit_passes() {
         );
         let lit = matches!(
             pass,
-            PassKind::Forward | PassKind::Transparent | PassKind::FurShell
+            PassKind::Forward | PassKind::VgShade | PassKind::Transparent | PassKind::FurShell
         );
         let call = "raa_directional_radiance(raa_frame.sun_color.rgb)";
         assert_eq!(wgsl.matches(call).count(), usize::from(lit), "{pass:?}");
         if lit {
             // The raw frame radiance stays the only input, before the Flat/UNLIT select.
             assert!(
-                wgsl.find(call).unwrap() < wgsl.find("raa_pass_unlit(in.record)").unwrap(),
+                wgsl.find(call).unwrap() < wgsl.find("let color = select(").unwrap(),
                 "{pass:?}"
             );
         }

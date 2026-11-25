@@ -6,11 +6,18 @@ use raa_lit::{
 };
 use raa_math::Mat4;
 use raa_scene::{RenderList, Scene, Transform};
-use raa_shader::{Composer, PassKind};
+use raa_shader::{Composer, MaterialFnId, MaterialFnRegistry, PassKind, VariantKey};
+#[path = "../src/slots.rs"]
+mod slots;
 use std::collections::HashMap;
 
 #[test]
 fn pass_selection_preserves_shared_tangent_handedness() {
+    let mut composer = Composer::new();
+    for slot in slots::default_slot_providers() {
+        composer.add_slot(slot).unwrap();
+    }
+    let materials = MaterialFnRegistry::new();
     for pass in [
         PassKind::Prepass,
         PassKind::Forward,
@@ -39,15 +46,18 @@ fn pass_selection_preserves_shared_tangent_handedness() {
                 assert!(entry.contains("out.uv = v1.uv"));
                 assert!(entry.contains("out.color = v1.color"));
             }
-            let source = format!("{}\n{}\n{}\n{}\n{}\n{}\n{}", raa_shader::PRELUDE_WGSL,
-                raa_shader::LIB_WGSL, raa_shader::CLOUD_SHADOW_WGSL,
-                include_str!("../src/wgsl/slots_default.wgsl"),
-                raa_shader::LOCAL_LIGHTING_WGSL,
-                "const RAA_MSAA: u32 = 1u; const RAA_VARIANT_FLAGS: u32 = 0u;
-                fn material_main(in: MaterialInput) -> MaterialOutput { return raa_default_output(in); }
-                fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput {
-                    return VertexMaterialOutput(in.local_position, in.normal);
-                }", entry);
+            let key = VariantKey {
+                material_fn: MaterialFnId::STANDARD,
+                pass,
+                msaa: 1,
+                flags: 0,
+            };
+            let source = composer.compose(&materials, &key).unwrap();
+            let source = if posed {
+                raa_lit::skin_draw::posed_module(&source).unwrap()
+            } else {
+                source
+            };
             Composer::validate(&source)
                 .unwrap_or_else(|e| panic!("{pass:?}, posed={posed}: {e:?}"));
         }

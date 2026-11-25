@@ -309,6 +309,17 @@ fn both_vg_kinds_compose_validate_and_stay_within_budget() {
                 .position(|e| e.name == "fs_main")
                 .expect("fs_main");
             let usage = info.get_entry_point(fragment);
+            if pass == PassKind::VgShade {
+                let (lookup, _) = module
+                    .global_variables
+                    .iter()
+                    .find(|(_, var)| var.name.as_deref() == Some("raa_spherical_data"))
+                    .expect("VG shading must bind the same spherical GI grid as forward shading");
+                assert!(
+                    usage[lookup].contains(GlobalUse::READ),
+                    "{k:?}: inactive grid lookup"
+                );
+            }
             let (mut textures, mut buffers) = (0, 0);
             for (handle, var) in module.global_variables.iter() {
                 if !usage[handle].contains(GlobalUse::READ) {
