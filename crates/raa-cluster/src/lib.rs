@@ -17,6 +17,7 @@ pub mod packed;
 pub mod partition;
 pub mod simplify;
 pub mod store;
+mod surface_error;
 pub mod thin;
 pub mod weld;
 
@@ -31,3 +32,6 @@ pub use packed::{
     PackedVertex, ROOT_PARENT_ERROR, pack_counts, pack_triangle, unpack_triangle,
 };
 pub use store::{ClusterSource, ClusterState, ClusterStore, MeshClusterStatus};
+
+/// Revision of the generated hierarchy and error metadata. The S30 wire is unchanged.
+pub const CLUSTER_BAKE_REVISION: u32 = 2;

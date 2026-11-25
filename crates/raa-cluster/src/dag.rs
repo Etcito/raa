@@ -15,6 +15,7 @@ use crate::packed::{
 };
 use crate::partition::{ClusterLimits, partition_triangles};
 use crate::simplify::{Corner, SimplifyState, Triangle};
+use crate::surface_error::SurfaceError;
 use crate::thin::{NEW_POSITION, find_pieces, set_aside_wide_pieces, thin};
 use crate::weld::{WeldedMesh, encode_octahedral};
 use raa_math::Vec3;
@@ -152,15 +153,15 @@ pub fn reduce_group(
     options: &BuildOptions,
 ) -> Option<GroupResult> {
     let mut reduction = GroupReduction::new(welded, clusters, members, shared, options)?;
-    while !reduction.step(welded, shared) {}
-    reduction.finish(welded, options)
+    while !reduction.step(welded, shared, options) {}
+    reduction.finish(welded)
 }
 
 /// Group preparation and its normal-aware collapse state are kept across work units. The
 /// error budget and retry order are the same as reducing the group in one call.
 struct GroupReduction {
     members: Vec<u32>,
-    original_count: usize,
+    original: Vec<Triangle>,
     lod_bounds: Sphere,
     child_error: f32,
     new_positions: Vec<Vec3>,
@@ -172,6 +173,7 @@ struct GroupReduction {
     attempt: usize,
     simplify: Option<SimplifyState>,
     simplified_error: f32,
+    surface: Option<SurfaceError>,
 }
 
 impl GroupReduction {
@@ -190,7 +192,6 @@ impl GroupReduction {
             .iter()
             .flat_map(|c| c.triangles.iter().copied())
             .collect();
-        let original_count = triangles.len();
         let target = |count: usize| ((count as f32 * options.target_ratio) as usize).max(1);
         let mut found = find_pieces(&triangles, &|v| {
             shared.get(v as usize).copied().unwrap_or(false)
@@ -215,7 +216,7 @@ impl GroupReduction {
             thinning_error.max(welded.step)
         });
         let rest = if thinning_budget.is_none() {
-            triangles
+            triangles.clone()
         } else {
             found.rest.iter().map(|&t| triangles[t as usize]).collect()
         };
@@ -227,7 +228,7 @@ impl GroupReduction {
             .fold(0.0, f32::max);
         Some(Self {
             members,
-            original_count,
+            original: triangles,
             lod_bounds,
             child_error,
             new_positions,
@@ -243,10 +244,32 @@ impl GroupReduction {
             attempt: 0,
             simplify: None,
             simplified_error: 0.0,
+            surface: None,
         })
     }
 
-    fn step(&mut self, welded: &WeldedMesh, shared: &[bool]) -> bool {
+    fn step(&mut self, welded: &WeldedMesh, shared: &[bool], options: &BuildOptions) -> bool {
+        if let Some(surface) = self.surface.as_mut() {
+            return surface.step();
+        }
+        if !self.step_reduction(welded, shared) {
+            return false;
+        }
+        if self.reduced.is_empty()
+            || self.reduced.len() as f32 > self.original.len() as f32 * options.min_reduction
+        {
+            return true;
+        }
+        self.surface = Some(SurfaceError::new(
+            &self.original,
+            &self.reduced,
+            welded,
+            &self.new_positions,
+        ));
+        false
+    }
+
+    fn step_reduction(&mut self, welded: &WeldedMesh, shared: &[bool]) -> bool {
         if self.rest.is_empty() {
             return true;
         }
@@ -295,16 +318,15 @@ impl GroupReduction {
         }
     }
 
-    fn finish(self, welded: &WeldedMesh, options: &BuildOptions) -> Option<GroupResult> {
-        if self.reduced.is_empty()
-            || self.reduced.len() as f32 > self.original_count as f32 * options.min_reduction
-        {
-            return None;
-        }
-        // Spheres and errors grow monotonically up the DAG, so the LOD test stays hole-free.
-        // The increment keeps parents strictly coarser even on a flat region.
-        let error =
-            self.child_error + self.simplified_error.max(self.thinning_error) + welded.step * 0.5;
+    fn finish(self, welded: &WeldedMesh) -> Option<GroupResult> {
+        let surface = self.surface?;
+        // The two surface bounds compose by the triangle inequality. Keep the existing
+        // shading and UV estimates in the LOD criterion, and preserve strict ordering.
+        let local_error = surface
+            .error()
+            .max(self.simplified_error)
+            .max(self.thinning_error);
+        let error = self.child_error + local_error + welded.step * 0.5;
         Some(GroupResult {
             members: self.members,
             lod_bounds: self.lod_bounds,
@@ -517,10 +539,10 @@ impl LevelState {
             self.append(welded, clusters, groups, limits, result);
             self.cursor += 1;
         } else if let Some(reduction) = self.reduction.as_mut() {
-            if reduction.step(welded, &self.shared) {
+            if reduction.step(welded, &self.shared, options) {
                 let reduction = self.reduction.take().expect("group just finished");
                 let members = reduction.members.clone();
-                if let Some(result) = reduction.finish(welded, options) {
+                if let Some(result) = reduction.finish(welded) {
                     self.ready = Some(result);
                 } else {
                     self.next_active.extend(members);
@@ -1065,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn group_of_separate_quads_returns_new_positions() {
+    fn group_of_separate_quads_preserves_foliage_thinning_and_bounds_removed_pieces() {
         let mut positions = Vec::new();
         let mut indices = Vec::new();
         for q in 0..40u32 {
@@ -1085,6 +1107,11 @@ mod tests {
         let shared = vec![false; mesh.positions.len()];
         let result = reduce_group(&mesh, &clusters, members, &shared, &BuildOptions::default())
             .expect("separate quads thin");
+        assert_eq!(result.triangles.len(), 40);
+        assert!(
+            result.error > 0.5,
+            "removed foliage must contribute to error"
+        );
         assert!(!result.new_positions.is_empty());
         assert!(
             result

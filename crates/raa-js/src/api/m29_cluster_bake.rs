@@ -859,6 +859,12 @@ mod web {
         ]))
     }
 
+    /// Revision of the bake recipe, independent of the S30 wire version.
+    #[wasm_bindgen(js_name = clusterBakeRevision)]
+    pub fn cluster_bake_revision() -> u32 {
+        raa_cluster::CLUSTER_BAKE_REVISION
+    }
+
     /// `bakeClusters(input)`: bakes one single-material mesh to the end (S31).
     #[wasm_bindgen(js_name = bakeClusters)]
     pub fn bake_clusters(input: JsValue) -> Result<JsValue, JsValue> {

@@ -181,6 +181,8 @@ export interface Engine {
 
 /** The cluster-bake functions of the module (S31); they need no engine and run in Node. */
 export interface RaaModule {
+  /** Revision of generated cluster data, independent of S30 section compatibility. */
+  clusterBakeRevision(): number;
   /**
    * Bakes one mesh to the end and returns its section (S29 limits, S31 options).
    * @throws RaaError `vg.invalid`, `vg.mesh_empty` or `vg.mesh_too_large`; nothing is changed.
