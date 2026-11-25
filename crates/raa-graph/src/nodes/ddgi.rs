@@ -17,7 +17,7 @@ use crate::validate::ValidateCtx;
 
 pub(crate) const DDGI_TYPE: &str = "pass.gi.ddgi";
 const SOURCE: &str = "crates/raa-sdf-trace/src/mesh/ddgi.rs";
-const DEBUG_OPTIONS: &[&str] = &["off", "irradiance", "coverage", "resolve"];
+const DEBUG_OPTIONS: &[&str] = &["off", "irradiance", "coverage", "resolve", "probes"];
 const INVALIDATION_OPTIONS: &[&str] = &["tracked", "all", "none"];
 const FAR_OPTIONS: &[&str] = &["clamp", "ambient"];
 
@@ -393,6 +393,7 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> DdgiSetti
                     "irradiance" => DdgiDebug::Irradiance,
                     "coverage" => DdgiDebug::Coverage,
                     "resolve" => DdgiDebug::Resolve,
+                    "probes" => DdgiDebug::Probes,
                     _ => DdgiDebug::Off,
                 }
             }

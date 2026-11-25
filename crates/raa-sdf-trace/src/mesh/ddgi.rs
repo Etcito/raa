@@ -109,6 +109,9 @@ pub enum DdgiDebug {
     Coverage = 2,
     /// Green where forward used the screen resolve, red where it fell back to the full lookup.
     Resolve = 3,
+    /// Weight per cascade (red: cascade 0, green: coarser), blue where inactive probes filled a
+    /// hole; black where no probe was usable.
+    Probes = 4,
 }
 
 /// What a surface gets where the finer cascades do not cover it.
