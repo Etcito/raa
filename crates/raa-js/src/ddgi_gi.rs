@@ -73,6 +73,13 @@ impl Engine {
                     stats.update_ms.map_or(JsValue::NULL, JsValue::from),
                 );
                 put(&result, "screenResolve", stats.screen_resolve.into());
+                if let Some((min, max)) = stats.scene_bounds {
+                    let bounds = Array::new();
+                    for x in min.into_iter().chain(max) {
+                        bounds.push(&x.into());
+                    }
+                    put(&result, "sceneBounds", bounds.into());
+                }
             }
             Ok(result.into())
         })

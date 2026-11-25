@@ -172,20 +172,33 @@ fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32>
     return vec4<f32>(root * root * v.intensity, edge * saturate(4.0 * coverage));
 }
 
-// The screen-resolved value of a forward pixel (row 9: first row, width, height, enabled) when it
-// was resolved for this surface (camera distances within 1%), else the full eight-probe lookup.
+// The screen-resolved value at a forward pixel (row 9: first row, width, height, scale): a
+// joint-bilateral blend of the four nearest resolve texels, keeping those resolved for a surface
+// at this camera distance (within 2%); the full eight-probe lookup when none was.
 fn raa_ddgi_screen_or_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>, frag: vec2<f32>,
                              eye: vec3<f32>) -> vec4<f32> {
     let screen = raa_ddgi_word(9u);
-    let pixel = vec2<u32>(max(frag, vec2<f32>(0.0)));
-    if screen.w != 0u && pixel.x < screen.y && pixel.y < screen.z {
-        let row = raa_ddgi_word(screen.x + pixel.y * screen.y + pixel.x);
+    if screen.w != 0u {
         let distance = length(p - eye);
-        let resolved = bitcast<f32>(row.z);
-        if row.w != 0u && abs(resolved - distance) <= 0.01 * distance + 0.002 {
+        let at = frag / f32(screen.w) - 0.5;
+        let corner = floor(at);
+        let f = at - corner;
+        let size = vec2<i32>(i32(screen.y), i32(screen.z));
+        var sum = vec4<f32>(0.0);
+        var total = 0.0;
+        for (var i = 0u; i < 4u; i++) {
+            let o = vec2<u32>(i & 1u, i >> 1u);
+            let texel = clamp(vec2<i32>(corner) + vec2<i32>(o), vec2<i32>(0), size - 1);
+            let row = raa_ddgi_word(screen.x + u32(texel.y) * screen.y + u32(texel.x));
+            if row.w == 0u || abs(bitcast<f32>(row.z) - distance) > 0.02 * distance + 0.002 {
+                continue;
+            }
+            let w = select(1.0 - f.x, f.x, o.x == 1u) * select(1.0 - f.y, f.y, o.y == 1u) + 1e-3;
             let ba = unpack2x16float(row.y);
-            return vec4<f32>(unpack2x16float(row.x), ba.x, ba.y);
+            sum += w * vec4<f32>(unpack2x16float(row.x), ba.x, ba.y);
+            total += w;
         }
+        if total > 0.0 { return sum / total; }
     }
     return raa_ddgi_sample(p, n, view_dir);
 }

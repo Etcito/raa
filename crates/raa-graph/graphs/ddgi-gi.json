@@ -48,16 +48,7 @@
     },
     {
       "id": "ddgi",
-      "type": "pass.gi.ddgi",
-      "params": {
-        "probeCountX": 16,
-        "probeCountY": 8,
-        "probeCountZ": 16,
-        "probeSpacing": 1.5,
-        "raysPerProbe": 64,
-        "hysteresis": 0.97,
-        "updateFraction": 0.25
-      }
+      "type": "pass.gi.ddgi"
     },
     {
       "id": "skyCloudScreen",

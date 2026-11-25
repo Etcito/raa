@@ -84,7 +84,8 @@ impl Default for DdgiSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            counts: [16, 8, 16],
+            // Covers an Intel Sponza sized interior (36 x 18 x 18 m) without scrolling.
+            counts: [24, 12, 12],
             spacing: 1.5,
             rays_per_probe: 64,
             hysteresis: 0.97,
@@ -155,6 +156,8 @@ pub struct DdgiStats {
     pub recycled: u64,
     pub base: [i32; 3],
     pub gpu_bytes: u64,
+    /// World bounds of the traced geometry the volume is kept inside.
+    pub scene_bounds: Option<([f32; 3], [f32; 3])>,
 }
 
 pub type DdgiHandle = Rc<RefCell<DdgiState>>;
@@ -240,6 +243,7 @@ fn volume_base(
 }
 
 struct Staged {
+    bounds: Option<([f32; 3], [f32; 3])>,
     jobs: Vec<u32>,
     recycled: u32,
     burst: bool,
@@ -251,6 +255,11 @@ struct Staged {
 
 /// Starting cost model before the first timestamp readback (RTX 3090, Sponza, 64 rays).
 const INITIAL_MS_PER_PROBE: f64 = 0.0033;
+/// Smallest update batch: below it the dispatch no longer fills the GPU and costs about the
+/// same time, so a per-probe cost measured on it would shrink the next budget in a spiral.
+const MIN_BATCH: u32 = 128;
+/// The screen resolve runs at 1/RESOLVE_SCALE of the frame on each axis.
+const RESOLVE_SCALE: u32 = 2;
 
 /// GPU timestamps around the update dispatch; one readback in flight at a time.
 struct UpdateTimer {
@@ -459,10 +468,14 @@ impl FeaturePass for DdgiPass {
             return Ok(());
         };
         let probes = settings.probe_count();
-        // One row per pixel inside the forward's one storage binding.
-        let rows = layout(probes).rows + u64::from(ctx.size.0) * u64::from(ctx.size.1);
+        // One row per resolve texel inside the forward's one storage binding.
+        let resolve_size = (
+            ctx.size.0.div_ceil(RESOLVE_SCALE),
+            ctx.size.1.div_ceil(RESOLVE_SCALE),
+        );
+        let rows = layout(probes).rows + u64::from(resolve_size.0) * u64::from(resolve_size.1);
         let fits = 16 * rows <= u64::from(ctx.gpu.limits().max_storage_buffer_binding_size);
-        let screen = (settings.screen_resolve && fits).then_some(ctx.size);
+        let screen = (settings.screen_resolve && fits).then_some(resolve_size);
         if self.gpu.as_ref().is_none_or(|gpu| {
             gpu.counts != settings.counts || gpu.revision != revision || gpu.screen != screen
         }) {
@@ -475,7 +488,7 @@ impl FeaturePass for DdgiPass {
         }
         if let Some((jobs, ms)) = self.timer.as_mut().and_then(UpdateTimer::poll) {
             self.update_ms = Some(ms);
-            if jobs >= 16 && ms > 0.0 {
+            if jobs >= MIN_BATCH && ms > 0.0 {
                 let sample = (ms / f64::from(jobs)).clamp(1e-5, 0.1);
                 self.ms_per_probe += 0.25 * (sample - self.ms_per_probe);
             }
@@ -484,9 +497,11 @@ impl FeaturePass for DdgiPass {
         let bounds = mesh.geometry.world_bounds().map(|b| (b.min, b.max));
         let base = volume_base(camera.eye, settings.counts, settings.spacing, bounds);
         let recycled = self.schedule.scroll(base);
-        let probes_for = |ms: f32| ((f64::from(ms) / self.ms_per_probe) as u32).clamp(1, probes);
+        let floor = MIN_BATCH.min(probes);
+        let probes_for =
+            |ms: f32| ((f64::from(ms) / self.ms_per_probe) as u32).clamp(floor, probes);
         let cap = ((probes as f32 * settings.update_fraction).ceil() as u32).clamp(1, probes);
-        let budget = probes_for(settings.budget_ms).min(cap);
+        let budget = probes_for(settings.budget_ms).min(cap.max(floor));
         let burst = probes_for(settings.burst_ms).max(budget);
         let converge_age = converge_age(settings.hysteresis);
         let mut jobs = Vec::with_capacity(burst as usize);
@@ -573,6 +588,7 @@ impl FeaturePass for DdgiPass {
         let job_bytes: Vec<u8> = jobs.iter().flat_map(|slot| slot.to_le_bytes()).collect();
         queue.write_buffer(&gpu.jobs, 0, &job_bytes);
         self.staged = Some(Staged {
+            bounds,
             jobs,
             recycled,
             burst: bursting,
@@ -679,6 +695,7 @@ impl FeaturePass for DdgiPass {
             ms_per_probe: self.ms_per_probe,
             update_ms: self.update_ms,
             screen_resolve: staged.screen.is_some(),
+            scene_bounds: staged.bounds,
             update_frames: previous.update_frames + 1,
             recycled: previous.recycled + u64::from(staged.recycled),
             base: self.schedule.base.unwrap_or_default(),
@@ -856,7 +873,7 @@ impl DdgiGpu {
         );
         // Distance moments saturate at one and a half probe diagonals.
         push_f32(&mut header, [1.5 * 3f32.sqrt() * spacing, 0.0, 0.0, 0.0]);
-        // Screen resolve rows: first row, width, height, enabled.
+        // Screen resolve rows: first row, width, height, pixels per texel side (0 = off).
         let (width, height) = self.screen.unwrap_or((0, 0));
         push_u32(
             &mut header,
@@ -864,7 +881,11 @@ impl DdgiGpu {
                 rows.rows as u32,
                 width,
                 height,
-                u32::from(self.screen.is_some()),
+                if self.screen.is_some() {
+                    RESOLVE_SCALE
+                } else {
+                    0
+                },
             ],
         );
         header.resize(16 * HEADER_ROWS as usize, 0);

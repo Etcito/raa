@@ -348,25 +348,25 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
     }
 }
 
-// Screen resolve: the volume interpolated once per pixel of the prepass depth and normal, so the
-// forward shader reads one row per pixel instead of eight probes. A row holds rgb and the blend
-// weight (f16) and the camera distance of the surface it was resolved for (f32): forward falls
-// back to the full lookup when its own surface differs (MSAA edges, surfaces absent from the
-// prepass).
+// Screen resolve: the volume interpolated once per resolve texel (row 9: first row, width, height,
+// scale; a texel covers scale x scale pixels and samples the prepass at its first pixel), so the
+// forward shader reads up to four rows instead of eight probes. A row holds rgb and the blend
+// weight (f16) and the camera distance of the surface it was resolved for (f32); forward keeps
+// the texels resolved for its own surface and falls back to the full lookup when none was.
 @compute @workgroup_size(8, 8, 1)
 fn ddgi_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let screen = raa_ddgi_word(9u);
     if id.x >= screen.y || id.y >= screen.z { return; }
     let row = screen.x + id.y * screen.y + id.x;
-    let pixel = vec2<i32>(id.xy);
-    let z = textureLoad(depth, pixel, 0);
-    let normal_view = textureLoad(normals, pixel, 0).xyz;
+    let full = textureDimensions(depth);
+    let pixel = min(id.xy * screen.w, full - 1u);
+    let z = textureLoad(depth, vec2<i32>(pixel), 0);
+    let normal_view = textureLoad(normals, vec2<i32>(pixel), 0).xyz;
     if z >= 1.0 || dot(normal_view, normal_view) <= 0.0 {
         ddgi_probes[row] = vec4<u32>(0u);
         return;
     }
-    let dims = vec2<f32>(f32(screen.y), f32(screen.z));
-    let p = world_at((vec2<f32>(id.xy) + 0.5) / dims, z);
+    let p = world_at((vec2<f32>(pixel) + 0.5) / vec2<f32>(full), z);
     let n = normalize((frame.inv_view * vec4<f32>(normal_view, 0.0)).xyz);
     let to_eye = frame.camera_pos.xyz - p;
     let distance = length(to_eye);
