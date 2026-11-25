@@ -203,6 +203,22 @@ pub(super) struct LightChange {
     after: Option<SphericalLight>,
 }
 
+impl LightChange {
+    /// The light after the change when it may now reach surfaces it did not: added, switched
+    /// on, moved or reshaped (range, cone, size). These need the reach test.
+    pub(super) fn reach_target(&self) -> Option<SphericalLight> {
+        let after = self.after?;
+        match self.before {
+            Some(before) if before.influence == after.influence => None,
+            _ => Some(after),
+        }
+    }
+}
+
+pub(super) fn find_light_by_id(lights: &[SphericalLight], id: u64) -> Option<SphericalLight> {
+    find_light(lights, id)
+}
+
 pub(super) fn light_changes(
     before: &[SphericalLight],
     after: &[SphericalLight],
@@ -229,6 +245,8 @@ pub(super) fn light_changes(
 pub(super) struct FaceLighting {
     faces: u8,
     hit_bounds: [Option<Bounds>; 6],
+    /// Contributors reported by each face, so a light edit can reset single faces.
+    face_contributors: [Vec<u64>; 6],
     pub(super) contributors: Vec<u64>,
 }
 
@@ -247,11 +265,99 @@ impl FaceLighting {
             return false;
         }
         self.faces |= face;
-        self.hit_bounds[face.trailing_zeros() as usize] = hit_bounds;
+        let index = face.trailing_zeros() as usize;
+        self.hit_bounds[index] = hit_bounds;
+        let own = &mut self.face_contributors[index];
+        own.clear();
+        own.extend_from_slice(contributors);
+        own.sort_unstable();
+        own.dedup();
         self.contributors.extend_from_slice(contributors);
         self.contributors.sort_unstable();
         self.contributors.dedup();
         true
+    }
+
+    /// Drop the metadata of the faces in `bits` (they are being recaptured).
+    pub(super) fn forget(&mut self, bits: u8) {
+        for index in 0..6 {
+            if bits & (1 << index) != 0 {
+                self.hit_bounds[index] = None;
+                self.face_contributors[index].clear();
+            }
+        }
+        self.faces &= !bits;
+        self.contributors.clear();
+        for index in 0..6 {
+            if self.faces & (1 << index) != 0 {
+                self.contributors
+                    .extend_from_slice(&self.face_contributors[index]);
+            }
+        }
+        self.contributors.sort_unstable();
+        self.contributors.dedup();
+    }
+
+    /// Faces (of `ready`) whose light a change can alter, per face. A face that reported a
+    /// change's old light holds it; a face without metadata yet is conservative over the
+    /// scene bounds. A light that is added or whose influence changed (moved, range, cone)
+    /// is NOT tested here: the GPU reach test (`spherical_reach_test`) finds the faces whose
+    /// stored hits it reaches. Colour or intensity alone cannot make an occluded or
+    /// out-of-range light visible (the masks hold any non-zero contribution).
+    pub(super) fn affected_faces(
+        &self,
+        ready: u8,
+        changes: &[LightChange],
+        scene_bounds: Option<Bounds>,
+    ) -> u8 {
+        let mut bits = 0;
+        for index in 0..6u8 {
+            let bit = 1 << index;
+            if ready & bit == 0 {
+                continue;
+            }
+            let known = self.faces & bit != 0;
+            let hit = changes.iter().any(|change| {
+                change.before.is_some_and(|before| {
+                    if known {
+                        self.face_contributors[usize::from(index)]
+                            .binary_search(&before.id)
+                            .is_ok()
+                    } else {
+                        scene_bounds.is_some_and(|bounds| before.may_light(bounds))
+                    }
+                })
+            });
+            if hit {
+                bits |= bit;
+            }
+        }
+        bits
+    }
+
+    /// Fallback of the reach test: faces whose own hit bounds the light may reach.
+    pub(super) fn faces_in_bounds(
+        &self,
+        ready: u8,
+        light: SphericalLight,
+        scene_bounds: Option<Bounds>,
+    ) -> u8 {
+        let mut bits = 0;
+        for index in 0..6 {
+            let bit = 1 << index;
+            if ready & bit == 0 {
+                continue;
+            }
+            let bounds = if self.faces & bit != 0 {
+                self.hit_bounds[index]
+            } else {
+                scene_bounds
+            };
+            if bounds.is_some_and(|bounds| light.may_light(bounds)) {
+                bits |= bit;
+            }
+        }
+        bits
     }
 
     pub(super) fn affected_by(
@@ -294,6 +400,49 @@ impl FaceLighting {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn light_edits_reset_only_the_faces_that_reported_the_light() {
+        let point = |id, position: [f32; 3], rgb: [f32; 3]| SphericalLight {
+            id,
+            rgb,
+            influence: Influence::Point(LocalRange {
+                position,
+                range: 4.0,
+            }),
+        };
+        let bounds = Bounds {
+            min: [0.0; 3],
+            max: [1.0; 3],
+        };
+        let mut lighting = FaceLighting::default();
+        for face in 0..6u8 {
+            let ids: &[u64] = if face == 2 { &[7] } else { &[] };
+            assert!(lighting.record(1 << face, Some(bounds), ids));
+        }
+        let red = point(7, [0.5; 3], [1.0, 0.0, 0.0]);
+        // A colour change resets only face 2 (the one whose capture saw light 7).
+        let recolour = light_changes(&[red], &[point(7, [0.5; 3], [0.0, 0.0, 1.0])]);
+        assert_eq!(lighting.affected_faces(ALL_FACES, &recolour, None), 1 << 2);
+        assert!(recolour[0].reach_target().is_none());
+        // A move resets face 2 now and asks the reach test about the new position.
+        let moved = light_changes(&[red], &[point(7, [2.5; 3], [1.0, 0.0, 0.0])]);
+        assert_eq!(lighting.affected_faces(ALL_FACES, &moved, None), 1 << 2);
+        assert_eq!(moved[0].reach_target().map(SphericalLight::id), Some(7));
+        // An added light resets nothing here: only the reach test can find its faces.
+        let added = light_changes(&[red], &[red, point(9, [0.5; 3], [1.0; 3])]);
+        assert_eq!(lighting.affected_faces(ALL_FACES, &added, None), 0);
+        assert_eq!(added[0].reach_target().map(SphericalLight::id), Some(9));
+        // Forgetting face 2 drops its contributors from the union.
+        lighting.forget(1 << 2);
+        assert!(lighting.contributors.is_empty());
+        assert!(!lighting.is_known());
+        // Without metadata a face is conservative over the scene bounds.
+        assert_eq!(
+            lighting.affected_faces(ALL_FACES, &recolour, Some(bounds)),
+            1 << 2
+        );
+    }
 
     #[test]
     fn spot_and_area_candidate_bounds_cover_their_capture_support() {

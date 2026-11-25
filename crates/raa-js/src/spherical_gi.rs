@@ -4,7 +4,7 @@ use js_sys::{Array, Object, Reflect};
 use raa_core::RaaError;
 use raa_sdf_trace::mesh::{
     MeshTraceHandle, SPHERICAL_GI_NAME, SphericalGiDebug, SphericalGiFeature, SphericalGiHandle,
-    SphericalGiSettings,
+    SphericalGiSettings, SphericalSunRefresh,
 };
 use wasm_bindgen::{JsCast, prelude::*};
 
@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 19] = [
+const OPTIONS: [&str; 25] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
@@ -44,6 +44,12 @@ const OPTIONS: [&str; 19] = [
     "directSunRange",
     "autoRange",
     "screenAo",
+    "sunRefresh",
+    "sunFaces",
+    "skyTransfer",
+    "lightReach",
+    "lightThreshold",
+    "insideCapture",
 ];
 
 fn invalid(key: &str, reason: &str) -> RaaError {
@@ -154,6 +160,39 @@ fn read_patch(
                 }
                 settings.direct_sun_range = range as f32;
             }
+            "sunRefresh" => {
+                settings.sun_refresh = match value.as_string().as_deref() {
+                    Some("reshade") => SphericalSunRefresh::Reshade,
+                    Some("recapture") => SphericalSunRefresh::Recapture,
+                    _ => return Err(invalid(&name, "expected reshade or recapture")),
+                };
+            }
+            "sunFaces" => {
+                let count = number()?;
+                if count.fract() != 0.0 || !(6.0..=24576.0).contains(&count) {
+                    return Err(invalid(&name, "expected an integer from 6 to 24576"));
+                }
+                settings.sun_faces = count as u32;
+            }
+            "skyTransfer" | "lightReach" | "insideCapture" => {
+                let on = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(&name, "expected a boolean"))?;
+                if name == "skyTransfer" {
+                    settings.sky_transfer = on;
+                } else if name == "insideCapture" {
+                    settings.scheduler.inside_capture = on;
+                } else {
+                    settings.light_reach = on;
+                }
+            }
+            "lightThreshold" => {
+                let threshold = number()?;
+                if !(0.0..=1000.0).contains(&threshold) {
+                    return Err(invalid(&name, "expected a luma from 0 to 1000"));
+                }
+                settings.light_threshold = threshold as f32;
+            }
             "autoRange" => {
                 settings.scheduler.auto_range = value
                     .as_bool()
@@ -258,6 +297,20 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
     put(&result, "directSunRange", settings.direct_sun_range.into());
     put(&result, "autoRange", settings.scheduler.auto_range.into());
     put(&result, "screenAo", settings.screen_ao.into());
+    let refresh = match settings.sun_refresh {
+        SphericalSunRefresh::Reshade => "reshade",
+        SphericalSunRefresh::Recapture => "recapture",
+    };
+    put(&result, "sunRefresh", refresh.into());
+    put(&result, "sunFaces", settings.sun_faces.into());
+    put(&result, "skyTransfer", settings.sky_transfer.into());
+    put(&result, "lightReach", settings.light_reach.into());
+    put(&result, "lightThreshold", settings.light_threshold.into());
+    put(
+        &result,
+        "insideCapture",
+        settings.scheduler.inside_capture.into(),
+    );
     result.into()
 }
 
@@ -349,6 +402,13 @@ impl Engine {
                 ("cachedCells", scheduler.cached_cells as f64),
                 ("adoptedCells", scheduler.adopted_cells as f64),
                 ("slotBytes", stats.slot_bytes as f64),
+                ("reshadedFaces", stats.reshaded_faces as f64),
+                ("reshadeFrames", stats.reshade_frames as f64),
+                ("reshadePending", stats.reshade_pending as f64),
+                ("relights", stats.relights as f64),
+                ("reachTests", stats.reach_tests as f64),
+                ("reachFaces", stats.reach_faces as f64),
+                ("reachFallbackFaces", stats.reach_fallback_faces as f64),
             ] {
                 put(&result, name, value.into());
             }

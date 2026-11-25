@@ -835,12 +835,22 @@ fn probes_are_pushed_off_triangles_through_the_cell_centre() {
     // A wall through the PosX shell-0 centre (radius 1.5).
     let wall = [[1.5, -4.0, -4.0], [1.5, 4.0, -4.0], [1.5, 0.0, 6.0]];
     update_geometry(&mut scene, &[triangle(1, &wall)]);
-    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        inside_capture: false,
+        ..config()
+    })
+    .unwrap();
     scheduler.update(&scene, [0.0; 3], 0);
     let cell = scheduler.progress(key(0, CubeFace::PosX)).unwrap();
     assert_eq!(cell.center, [1.5, 0.0, 0.0]);
     assert!((cell.probe[0] - 1.5).abs() > 0.05, "probe {:?}", cell.probe);
     assert_eq!(scheduler.grid().key_at(cell.probe), Some(cell.key));
+    // With insideCapture (default) the probe keeps the cell centre: its capture skips the
+    // surfaces met from behind instead.
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    scheduler.update(&scene, [0.0; 3], 0);
+    let cell = scheduler.progress(key(0, CubeFace::PosX)).unwrap();
+    assert_eq!(cell.probe, cell.center);
 }
 
 #[test]
