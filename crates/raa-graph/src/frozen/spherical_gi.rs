@@ -392,6 +392,18 @@ pub fn plan() -> crate::plan::GraphPlan {
                         crate::catalog::ParamValue::Int(0),
                     ),
                     (
+                        "parallaxRange".to_string(),
+                        crate::catalog::ParamValue::Number(0.0),
+                    ),
+                    (
+                        "sphereDirect".to_string(),
+                        crate::catalog::ParamValue::Bool(false),
+                    ),
+                    (
+                        "directSunRange".to_string(),
+                        crate::catalog::ParamValue::Number(12.0),
+                    ),
+                    (
                         "autoRange".to_string(),
                         crate::catalog::ParamValue::Bool(true),
                     ),

@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 16] = [
+const OPTIONS: [&str; 18] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
@@ -40,6 +40,8 @@ const OPTIONS: [&str; 16] = [
     "skySamples",
     "lightSamples",
     "parallaxRange",
+    "sphereDirect",
+    "directSunRange",
     "autoRange",
 ];
 
@@ -139,6 +141,18 @@ fn read_patch(
                 }
                 settings.parallax_range = range as f32;
             }
+            "sphereDirect" => {
+                settings.sphere_direct = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(&name, "expected a boolean"))?;
+            }
+            "directSunRange" => {
+                let range = number()?;
+                if !(0.0..=10000.0).contains(&range) {
+                    return Err(invalid(&name, "expected metres from 0 to 10000"));
+                }
+                settings.direct_sun_range = range as f32;
+            }
             "autoRange" => {
                 settings.scheduler.auto_range = value
                     .as_bool()
@@ -234,6 +248,8 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
     put(&result, "skySamples", settings.sky_samples.into());
     put(&result, "lightSamples", settings.light_samples.into());
     put(&result, "parallaxRange", settings.parallax_range.into());
+    put(&result, "sphereDirect", settings.sphere_direct.into());
+    put(&result, "directSunRange", settings.direct_sun_range.into());
     put(&result, "autoRange", settings.scheduler.auto_range.into());
     result.into()
 }

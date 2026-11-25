@@ -33,7 +33,8 @@ const CHANNELS: usize = 3;
 const LEGACY_SLOT_ROWS: usize = CHANNELS * (1 + FACE_COUNT);
 const PATCH_ROWS: usize = 3 * 4 * FACE_COUNT;
 const MOMENT_ROWS: usize = 16 * FACE_COUNT / 2;
-const SLOT_ROWS: usize = LEGACY_SLOT_ROWS + PATCH_ROWS + MOMENT_ROWS + 1;
+/// Info row, then one light row (sun visibility, two local light indices and visibilities).
+const SLOT_ROWS: usize = LEGACY_SLOT_ROWS + PATCH_ROWS + MOMENT_ROWS + 2;
 const MAX_FACES_PER_BUDGET: u32 = 4096;
 pub const MAX_CAPTURE_MS: f32 = 50.0;
 pub const MAX_CAPTURE_SAMPLES: u32 = 64;
@@ -69,6 +70,12 @@ pub struct SphericalGiSettings {
     /// six-face irradiance instead of its 24 parallax patches, blended over the next
     /// half of that distance; 0 always evaluates the patches.
     pub parallax_range: f32,
+    /// Sphere-only direct lighting (phase 2): forward skips its local lights and, beyond
+    /// `direct_sun_range` metres from the camera, the cascaded sun shadow. The resolve adds
+    /// each probe pair's two strongest local lights, evaluated at the receiver with the
+    /// probes' visibility, and the probes' sun visibility replaces the far shadow.
+    pub sphere_direct: bool,
+    pub direct_sun_range: f32,
     pub intensity: f32,
     pub debug: SphericalGiDebug,
     /// Bit 0 selects sky, bit 1 sun and bit 2 other.
@@ -86,6 +93,8 @@ impl Default for SphericalGiSettings {
             sky_samples: 1,
             light_samples: 0,
             parallax_range: 0.0,
+            sphere_direct: false,
+            direct_sun_range: 12.0,
             intensity: 1.0,
             debug: SphericalGiDebug::Off,
             channels: 7,
@@ -94,6 +103,12 @@ impl Default for SphericalGiSettings {
 }
 
 impl SphericalGiSettings {
+    /// What the probe projection depends on: the channel mask and the sphere-direct light
+    /// rows. A change reprojects every published probe from its captured faces.
+    pub fn projection_key(&self) -> u32 {
+        self.channels | (u32::from(self.sphere_direct) << 8)
+    }
+
     pub fn validate(self) -> Result<Self, RaaError> {
         if !self.intensity.is_finite()
             || !(0.0..=16.0).contains(&self.intensity)
@@ -106,11 +121,13 @@ impl SphericalGiSettings {
             || self.light_samples > MAX_CAPTURE_SAMPLES
             || !self.parallax_range.is_finite()
             || !(0.0..=1.0e4).contains(&self.parallax_range)
+            || !self.direct_sun_range.is_finite()
+            || !(0.0..=1.0e4).contains(&self.direct_sun_range)
         {
             return Err(RaaError::FrameGraph {
                 code: "gi.spherical.invalid_settings",
                 message: format!(
-                    "expected intensity in [0, 16], channel mask in [0, 7], face budgets in [0, {MAX_FACES_PER_BUDGET}], capture times in [0, {MAX_CAPTURE_MS}] ms, sample counts in [0, {MAX_CAPTURE_SAMPLES}] and parallaxRange in [0, 10000] m"
+                    "expected intensity in [0, 16], channel mask in [0, 7], face budgets in [0, {MAX_FACES_PER_BUDGET}], capture times in [0, {MAX_CAPTURE_MS}] ms, sample counts in [0, {MAX_CAPTURE_SAMPLES}] and parallaxRange, directSunRange in [0, 10000] m"
                 ),
             });
         }
@@ -481,7 +498,8 @@ impl FeaturePass for SphericalPass {
         let Some(scheduler) = &state.scheduler else {
             return Ok(());
         };
-        if !self.staged.jobs.is_empty() || gpu.projected_channels != state.settings.channels {
+        let projection = state.settings.projection_key();
+        if !self.staged.jobs.is_empty() || gpu.projected_channels != projection {
             let mut mesh = self.mesh.borrow_mut();
             let Some(frame) = mesh.frame.clone() else {
                 return Ok(());
@@ -500,7 +518,7 @@ impl FeaturePass for SphericalPass {
                 &texture_atlas,
                 mesh.geometry.count(),
                 mesh.sky_diffuse,
-                state.settings.channels,
+                projection,
                 [state.settings.sky_samples, state.settings.light_samples],
             );
         }
@@ -638,6 +656,7 @@ struct SphericalGpu {
     capture: wgpu::ComputePipeline,
     project: wgpu::ComputePipeline,
     bins: wgpu::ComputePipeline,
+    lights: wgpu::ComputePipeline,
     /// Half-resolution screen resolve of the lookup (rows after the slots, forward reads them).
     resolve: wgpu::ComputePipeline,
     /// Resolve size this frame, when it fits the storage binding.
@@ -708,6 +727,7 @@ impl SphericalGpu {
             capture: pipeline("spherical_capture"),
             project: pipeline("spherical_project"),
             bins: pipeline("spherical_bins"),
+            lights: pipeline("spherical_lights"),
             resolve,
             screen: None,
             resolve_rows: 0,
@@ -809,6 +829,7 @@ impl SphericalGpu {
                     buffer_entry(0, frame),
                     image_entry(6, &depth),
                     image_entry(7, &normal),
+                    buffer_entry(13, ctx.lighting.local_lights_buffer()),
                     buffer_entry(crate::wgsl::MESH_SPHERICAL_BINDING, &self.lookup),
                 ],
             });
@@ -873,6 +894,10 @@ impl SphericalGpu {
             rows[4 + usize::from(index)] =
                 [shell.inner, shell.center, shell.outer, 0.0].map(f32::to_bits);
         }
+        // Row 4 w: sphere-only direct near-sun radius (0 = off, else at least 1e-6 m).
+        if settings.sphere_direct {
+            rows[4][3] = settings.direct_sun_range.max(1e-6).to_bits();
+        }
         for cell in scheduler.cells() {
             let key = encode_key(cell.key);
             let mut hash = hash_key(key) & mask;
@@ -933,10 +958,12 @@ impl SphericalGpu {
         texture_atlas: &wgpu::TextureView,
         triangle_count: u32,
         sky_diffuse: f32,
-        channels: u32,
+        projection: u32,
         samples: [u32; 2],
     ) {
         let device = ctx.gpu.device();
+        let channels = projection & 7;
+        let direct = projection & 0x100 != 0;
         self.work_bytes.clear();
         for &job in jobs {
             write_work(&mut self.work_bytes, job.slot, job.probe, job.face as u32);
@@ -961,7 +988,7 @@ impl SphericalGpu {
             *mask |= bit;
         }
         // A channel-mask change reprojects every published probe from its faces.
-        if channels != self.projected_channels {
+        if projection != self.projected_channels {
             for cell in scheduler.cells() {
                 if cell.published && cell.is_ready() && !projected_slots.contains(&cell.slot) {
                     let index = slot_index(self.lookup_rows.len(), cell.slot);
@@ -969,7 +996,7 @@ impl SphericalGpu {
                     projected += 1;
                 }
             }
-            self.projected_channels = channels;
+            self.projected_channels = projection;
         }
         if jobs.is_empty() && projected == 0 {
             return;
@@ -1043,6 +1070,9 @@ impl SphericalGpu {
         }
         if projected > 0 {
             self.record_projection(ctx, projected, &stamps);
+            if direct {
+                self.record_lights(ctx, projected, frame, geometry);
+            }
         }
         if clock.is_some() {
             let faces = jobs.len() as u32;
@@ -1087,6 +1117,43 @@ impl SphericalGpu {
             pass.set_bind_group(0, &group, &[]);
             pass.dispatch_workgroups(1, 1, projected * groups);
         }
+    }
+
+    /// Sphere-only direct: per projected probe, the sun visibility and the two strongest
+    /// local lights at the probe with their visibility (16 shadow rays each).
+    fn record_lights(
+        &self,
+        ctx: &mut RecordCtx<'_>,
+        projected: u32,
+        frame: &Buffer,
+        geometry: &[Buffer; 3],
+    ) {
+        let group = ctx
+            .gpu
+            .device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gi.spherical.lights"),
+                layout: &self.lights.get_bind_group_layout(0),
+                entries: &[
+                    buffer_entry(0, frame),
+                    buffer_entry(1, &self.options),
+                    buffer_entry(2, &geometry[0]),
+                    buffer_entry(3, &geometry[1]),
+                    buffer_entry(4, &geometry[2]),
+                    buffer_entry(13, ctx.lighting.local_lights_buffer()),
+                    buffer_entry(21, &self.work),
+                    buffer_entry(23, &self.lookup),
+                ],
+            });
+        let mut pass = ctx
+            .encoder
+            .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("gi.spherical.lights"),
+                ..Default::default()
+            });
+        pass.set_pipeline(&self.lights);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(1, 1, projected);
     }
 
     fn record_light_feedback(&self, ctx: &mut RecordCtx<'_>) -> Option<LightFeedback> {
@@ -1432,17 +1499,20 @@ const RESOLVE_SCALE: u32 = 2;
 /// lookup buffer read-write (it reads probes and writes its own rows), with the shared lookup.
 fn spherical_resolve_module() -> String {
     let mesh = include_str!("../wgsl/mesh_trace.wgsl");
-    let start = mesh
-        .find("struct Frame {")
-        .expect("mesh trace frame struct");
-    let end = start + mesh[start..].find("\n}\n").expect("frame struct end") + 3;
+    let block = |name: &str| {
+        let start = mesh.find(name).expect("mesh trace struct");
+        let end = start + mesh[start..].find("\n}\n").expect("struct end") + 3;
+        &mesh[start..end]
+    };
     format!(
-        "{}\n@group(0) @binding(0) var<uniform> frame: Frame;\n\
+        "{}{}\n@group(0) @binding(0) var<uniform> frame: Frame;\n\
+         @group(0) @binding(13) var<uniform> lights: array<Light, 256>;\n\
          @group(0) @binding(6) var depth: texture_depth_2d;\n\
          @group(0) @binding(7) var normals: texture_2d<f32>;\n\
          @group(0) @binding({}) var<storage, read_write> raa_spherical_data: array<vec4<u32>>;\n\
          {}{}{}",
-        &mesh[start..end],
+        block("struct Frame {"),
+        block("struct Light {"),
         crate::wgsl::MESH_SPHERICAL_BINDING,
         raa_shader::SPHERICAL_CUBE_WGSL,
         raa_shader::SPHERICAL_GI_WGSL,
@@ -1612,10 +1682,12 @@ mod tests {
 
     #[test]
     fn slot_rows_match_the_shared_lookup_layout() {
-        assert_eq!(SLOT_ROWS, 142);
-        assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_SLOT_ROWS: u32 = 142u;"));
+        assert_eq!(SLOT_ROWS, 143);
+        assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_SLOT_ROWS: u32 = 143u;"));
+        assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_LIGHT_ROW: u32 = 142u;"));
         let module = spherical_module();
         assert!(module.contains("SPHERICAL_INFO_ROW: u32 = 141u;"));
+        assert!(module.contains("SPHERICAL_LIGHT_ROW: u32 = 142u;"));
     }
 
     #[test]

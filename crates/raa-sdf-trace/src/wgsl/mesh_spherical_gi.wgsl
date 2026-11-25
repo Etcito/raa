@@ -186,7 +186,7 @@ var<workgroup> spherical_miss_patches: atomic<u32>;
 
 // Slot row layout after the 21 legacy rows (keep in sync with spherical_gpu.rs and
 // RAA_SPHERICAL_* in spherical_gi.wgsl): 24 patches x 3 rows, 96 depth-moment bins
-// two per row, then one probe information row. Everything is f32 so consumers
+// two per row, then one probe information row and one light row (sphere-only direct). Everything is f32 so consumers
 // validate without the float16-in-float32 capability.
 const SPHERICAL_PATCH_ROW: u32 = 21u;
 const SPHERICAL_MOMENT_ROW: u32 = 93u;
@@ -378,5 +378,115 @@ fn spherical_bins(@builtin(local_invocation_id) id: vec3<u32>,
             if k == 0u { moments = vec4<f32>(m, moments.zw); } else { moments = vec4<f32>(moments.xy, m); }
         }
         spherical_lookup[slot_base + SPHERICAL_MOMENT_ROW + 8u * face + pair] = bitcast<vec4<u32>>(moments);
+    }
+}
+
+// Sphere-only direct lighting (phase 2). One 64-thread workgroup per projected probe
+// writes the light row: x sun visibility (16 jittered shadow rays from the probe),
+// y two local light indices (low, high 16 bits; 0xffff none), z and w their visibility
+// (16 rays toward a 5 cm jittered emitter). Lights are ranked by their unshadowed
+// irradiance at the probe; a spot outside its cone keeps a tenth of it so receivers
+// inside the cone near the probe are still served.
+const SPHERICAL_LIGHT_ROW: u32 = 142u;
+const SPHERICAL_NO_LIGHT: u32 = 0xffffu;
+var<workgroup> spherical_light_best: array<vec2<f32>, 128>;
+var<workgroup> spherical_light_pick: vec2<u32>;
+var<workgroup> spherical_light_hits: array<atomic<u32>, 3>;
+
+fn spherical_light_importance(i: u32, p: vec3<f32>) -> f32 {
+    let light = lights[i];
+    let lum = dot(light.radiance.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if lum <= 0.0 { return 0.0; }
+    if light.kind == 2u { return lum; }
+    let delta = light.position_range.xyz - p;
+    let d = length(delta);
+    if d >= light.position_range.w { return 0.0; }
+    let window = saturate(1.0 - pow(d / light.position_range.w, 4.0));
+    var w = window * window / max(d * d, 0.04);
+    if light.kind == 1u {
+        let cone = smoothstep(light.direction_outer.w, light.inner,
+            dot(light.direction_outer.xyz, -delta / max(d, EPS)));
+        w *= max(cone, 0.1);
+    }
+    return lum * w;
+}
+
+// Offsets on a 4x4 grid in [-1, 1]^2 across the plane normal to `axis`.
+fn spherical_light_jitter(lane: u32, axis: vec3<f32>) -> vec3<f32> {
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(axis.y) > 0.9);
+    let t = normalize(cross(up, axis));
+    let b = cross(axis, t);
+    let uv = (vec2<f32>(f32(lane & 3u), f32(lane >> 2u)) + 0.5) * 0.5 - 1.0;
+    return t * uv.x + b * uv.y;
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn spherical_lights(@builtin(local_invocation_index) t: u32,
+                    @builtin(workgroup_id) group: vec3<u32>) {
+    let work = spherical_work[options[0].y + group.z];
+    let p = work.position.xyz;
+    if t < 3u { atomicStore(&spherical_light_hits[t], 0u); }
+    var b0 = vec2<f32>(0.0, -1.0);
+    var b1 = vec2<f32>(0.0, -1.0);
+    for (var i = t; i < min(256u, frame.light_info.x); i += 64u) {
+        let w = spherical_light_importance(i, p);
+        if w > b0.x {
+            b1 = b0;
+            b0 = vec2<f32>(w, f32(i));
+        } else if w > b1.x {
+            b1 = vec2<f32>(w, f32(i));
+        }
+    }
+    spherical_light_best[2u * t] = b0;
+    spherical_light_best[2u * t + 1u] = b1;
+    workgroupBarrier();
+    if t == 0u {
+        var c0 = vec2<f32>(0.0, -1.0);
+        var c1 = vec2<f32>(0.0, -1.0);
+        for (var k = 0u; k < 128u; k++) {
+            let c = spherical_light_best[k];
+            if c.x > c0.x {
+                c1 = c0;
+                c0 = c;
+            } else if c.x > c1.x {
+                c1 = c;
+            }
+        }
+        spherical_light_pick = vec2<u32>(select(SPHERICAL_NO_LIGHT, u32(c0.y), c0.y >= 0.0),
+            select(SPHERICAL_NO_LIGHT, u32(c1.y), c1.y >= 0.0));
+    }
+    let pick = workgroupUniformLoad(&spherical_light_pick);
+    let lane = t & 15u;
+    let which = t >> 4u;
+    if which == 0u {
+        let sun = -frame.sun_dir.xyz;
+        let dir = normalize(sun + 0.02 * spherical_light_jitter(lane, sun));
+        if any(frame.sun_color.rgb > vec3<f32>(0.0))
+            && closest(Ray(p, dir), frame.clip.y, true).object == MISS {
+            atomicAdd(&spherical_light_hits[0], 1u);
+        }
+    } else if which <= 2u {
+        let index = select(pick.x, pick.y, which == 2u);
+        if index != SPHERICAL_NO_LIGHT {
+            let light = lights[index];
+            var dir = -light.direction_outer.xyz;
+            var distance = frame.clip.y;
+            if light.kind != 2u {
+                let axis = normalize(light.position_range.xyz - p);
+                let delta = light.position_range.xyz + 0.05 * spherical_light_jitter(lane, axis) - p;
+                distance = length(delta);
+                dir = delta / max(distance, EPS);
+            }
+            if closest(Ray(p, dir), distance - 2.0 * EPS, true).object == MISS {
+                atomicAdd(&spherical_light_hits[which], 1u);
+            }
+        }
+    }
+    workgroupBarrier();
+    if t == 0u {
+        let hits = vec3<f32>(f32(atomicLoad(&spherical_light_hits[0])),
+            f32(atomicLoad(&spherical_light_hits[1])), f32(atomicLoad(&spherical_light_hits[2]))) / 16.0;
+        spherical_lookup[work.ids.y + SPHERICAL_LIGHT_ROW] = vec4<u32>(bitcast<u32>(hits.x),
+            pick.x | (pick.y << 16u), bitcast<u32>(hits.y), bitcast<u32>(hits.z));
     }
 }

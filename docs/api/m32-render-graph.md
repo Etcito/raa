@@ -127,6 +127,11 @@ not a graph is set.
   recenter; `skySamples` and `lightSamples` set the sky rays and the stratified local lights per hit.
   `parallaxRange` (metres, 0 = off) switches receivers beyond it from the 24 parallax patches to
   the probe's six-face irradiance, blended over the next half of that distance (a cheaper far field).
+  Forward reads the lookup through a half-resolution screen resolve run by the pass (four texels,
+  camera-distance bilateral). `sphereDirect` (phase 2) makes local lights reach the scene only
+  through the probes (each probe pair's two strongest lights, evaluated at the receiver with the
+  probes' visibility, diffuse only) and replaces the cascaded sun shadow beyond `directSunRange`
+  metres with the probes' sun visibility; forward then skips its light loop.
   Node presence enables capture. Set `zMax` above `clipStart`. The `spherical_gi` frozen graph
   uses the same pass and handles.
 - Probes float in free space: each occupied cell captures from its centre pushed away from

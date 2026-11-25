@@ -8,17 +8,20 @@
 // 2 clipStart, zMax, frame, channel mask; 3 x = table row of the centre probe (0 none),
 // y = parallax range (f32 metres, 0 = always parallax patches), z = first screen-resolve
 // row (0 none), w = resolve width | height << 16;
-// 4.. shell inner, centre, outer. Entry rows: key, slot, first publication frame,
+// 4.. shell inner, centre, outer (row 4 w: sphere-only direct near-sun radius in metres as
+// f32, 0 = off). Entry rows: key, slot, first publication frame,
 // light hash; probe xyz + spacing; reserved xyz + published.
 
 const RAA_SPHERICAL_TABLE: u32 = 68u;
 // 21 legacy rows (uniform average, six world-axis faces, three light groups each),
 // 24 parallax patches x 3 rows (hit centroid + R², intensity + coherence, miss flux +
-// octahedral mean normal), 96 depth-moment bins two per row, one information row.
-const RAA_SPHERICAL_SLOT_ROWS: u32 = 142u;
+// octahedral mean normal), 96 depth-moment bins two per row, one information row, one
+// light row (sphere-only direct: sun visibility, two light indices, their visibility).
+const RAA_SPHERICAL_SLOT_ROWS: u32 = 143u;
 const RAA_SPHERICAL_PATCH_ROW: u32 = 21u;
 const RAA_SPHERICAL_MOMENT_ROW: u32 = 93u;
 const RAA_SPHERICAL_INFO_ROW: u32 = 141u;
+const RAA_SPHERICAL_LIGHT_ROW: u32 = 142u;
 const RAA_SPHERICAL_EMPTY: u32 = 0xffffffffu;
 const RAA_SPHERICAL_CENTER: u32 = 0xffffu;
 const RAA_SPHERICAL_FADE_FRAMES: f32 = 8.0;
@@ -292,7 +295,18 @@ fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult
 // the four nearest resolve texels, keeping those resolved for a surface at this camera
 // distance (within 2%), else any resolved neighbour; no resolve gives no spherical light.
 // Forward never runs the probe lookup itself (its registers and ~150 loads per pixel).
+// Also sets raa_spherical_sun_visibility (the probes' sun visibility, sphere-only direct).
+var<private> raa_spherical_sun_visibility: f32;
+
+// Sphere-only direct lighting: forward skips local lights, and the cascaded sun shadow
+// beyond this radius (metres; < 0 when the mode is off).
+fn raa_spherical_direct_range() -> f32 {
+    let range = bitcast<f32>(raa_spherical_data[4].w);
+    return select(-1.0, range, raa_spherical_data[1].x != 0u && range > 0.0);
+}
+
 fn raa_spherical_screen(p: vec3<f32>, frag: vec2<f32>, eye: vec3<f32>) -> RaaSphericalResult {
+    raa_spherical_sun_visibility = 1.0;
     let screen = raa_spherical_data[3];
     if screen.z == 0u { return RaaSphericalResult(); }
     let size = vec2<i32>(i32(screen.w & 0xffffu), i32(screen.w >> 16u));
@@ -304,28 +318,35 @@ fn raa_spherical_screen(p: vec3<f32>, frag: vec2<f32>, eye: vec3<f32>) -> RaaSph
     var total = 0.0;
     var any_sum = vec4<f32>(0.0);
     var any_total = 0.0;
+    var sun = vec2<f32>(0.0);
+    var any_sun = vec2<f32>(0.0);
     var flags = 0u;
     for (var i = 0u; i < 4u; i++) {
         let o = vec2<u32>(i & 1u, i >> 1u);
         let texel = clamp(vec2<i32>(corner) + vec2<i32>(o), vec2<i32>(0), size - 1);
         let row = raa_spherical_data[screen.z + u32(texel.y * size.x + texel.x)];
-        // Row layout: see mesh_spherical_resolve.wgsl (rgb f32, distance | blend | flags).
+        // Row layout: see mesh_spherical_resolve.wgsl (rgb f32; distance | blend | sun | flags).
         if (row.w & 1u) == 0u { continue; }
         flags |= row.w & 3u;
         let w = select(1.0 - f.x, f.x, o.x == 1u) * select(1.0 - f.y, f.y, o.y == 1u) + 1e-3;
-        let value = vec4<f32>(bitcast<vec3<f32>>(row.xyz), f32((row.w >> 2u) & 1023u) / 1023.0);
+        let value = vec4<f32>(bitcast<vec3<f32>>(row.xyz), f32((row.w >> 8u) & 255u) / 255.0);
+        let visibility = f32((row.w >> 2u) & 63u) / 63.0;
         any_sum += w * value;
         any_total += w;
-        if abs(bitcast<f32>(row.w & 0xfffff000u) - distance) <= 0.02 * distance + 0.002 {
+        any_sun += vec2<f32>(w * visibility, w);
+        if abs(bitcast<f32>(row.w & 0xffff0000u) - distance) <= 0.02 * distance + 0.002 {
             sum += w * value;
             total += w;
+            sun += vec2<f32>(w * visibility, w);
         }
     }
     var value = vec4<f32>(0.0);
     if total > 0.0 {
         value = sum / total;
+        raa_spherical_sun_visibility = sun.x / sun.y;
     } else if any_total > 0.0 {
         value = any_sum / any_total;
+        raa_spherical_sun_visibility = any_sun.x / any_sun.y;
     }
     if (flags & 2u) != 0u { return RaaSphericalResult(vec4<f32>(0.0), value); }
     return RaaSphericalResult(value, vec4<f32>(0.0));

@@ -34,22 +34,37 @@ fn raa_pass_shade_ctx(s: MaterialOutput, in: MaterialInput, ao: f32, shadow: f32
 }
 
 fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
-    let shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
-    var ao = 1.0;
     let capture = raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE);
+    let unlit = raa_pass_unlit(in.record);
+    // Screen-resolved by gi.spherical (half resolution); see raa_spherical_screen.
+    var spherical = RaaSphericalResult();
+    var sphere_direct = false;
+    var sun_far = 0.0;
+    if !capture && !unlit && raa_feature_enabled(RAA_SPHERICAL_GI_FEATURE)
+        && !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
+        spherical = raa_spherical_screen(in.position, in.frag_coord.xy, raa_frame.camera_pos.xyz);
+        // Sphere-only direct (spherical GI phase 2, `sphereDirect`): local lights come only
+        // through the probes (in spherical.diffuse) and, beyond directSunRange, the probes'
+        // sun visibility replaces the cascaded shadow, so neither is evaluated here.
+        let range = raa_spherical_direct_range();
+        sphere_direct = range >= 0.0;
+        if sphere_direct {
+            sun_far = smoothstep(range, 1.25 * range + 0.01,
+                length(in.position - raa_frame.camera_pos.xyz));
+        }
+    }
+    var shadow = 1.0;
+    if sun_far < 1.0 {
+        shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
+    }
+    shadow = mix(shadow, raa_spherical_sun_visibility, sun_far);
+    var ao = 1.0;
     if !capture {
         ao = raa_slot_ao(in.frag_coord);
     }
     var c = raa_pass_shade_ctx(s, in, ao, shadow);
-    let unlit = raa_pass_unlit(in.record);
-    var spherical_debug = vec4<f32>(0.0);
-    if !capture && !unlit && raa_feature_enabled(RAA_SPHERICAL_GI_FEATURE)
-        && !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
-        // Screen-resolved by gi.spherical (half resolution); see raa_spherical_screen.
-        let spherical = raa_spherical_screen(c.position, c.frag.xy, raa_frame.camera_pos.xyz);
-        spherical_debug = spherical.debug;
-        c.spherical_diffuse = spherical.diffuse;
-    }
+    let spherical_debug = spherical.debug;
+    c.spherical_diffuse = spherical.diffuse;
     let direct = raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
             raa_directional_radiance(raa_frame.sun_color.rgb) * shadow);
     let ambient = raa_slot_ambient(s, c);
@@ -60,7 +75,10 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
             indirect *= 1.0 - c.spherical_diffuse.w;
         }
     }
-    let local = raa_local_lighting(s, c);
+    var local = vec3<f32>(0.0);
+    if !sphere_direct {
+        local = raa_local_lighting(s, c);
+    }
     if spherical_debug.a > 0.0 { return spherical_debug; }
     if raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
         return vec4<f32>(select(s.emissive + direct + local, s.base_color + s.emissive, unlit), 1.0);
