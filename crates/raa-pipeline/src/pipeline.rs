@@ -217,6 +217,9 @@ pub struct PipelineConfig {
     passes: Vec<PassEntry>,
     /// Contributor entries sorted by order (stable for equal orders).
     contributors: Vec<ContributorEntry>,
+    /// Counts every change of the entry list or its order (add, remove, reorder, contributor
+    /// add), so a reader that compared the order once can skip the comparison until it moves.
+    order_generation: u64,
 }
 
 impl PipelineConfig {
@@ -279,6 +282,7 @@ impl PipelineConfig {
         }
         check_overlay_order(&names, &overlays, true)?;
         let required = pass.required();
+        self.order_generation += 1;
         self.passes.insert(
             at,
             PassEntry {
@@ -310,6 +314,7 @@ impl PipelineConfig {
             .iter()
             .position(|c| c.order > order)
             .unwrap_or(self.contributors.len());
+        self.order_generation += 1;
         self.contributors.insert(
             at,
             ContributorEntry {
@@ -463,6 +468,7 @@ impl PipelineConfig {
         // every pass name is in `names` exactly once (checked by `check_order_names`)
         self.passes
             .sort_unstable_by_key(|p| names.iter().position(|n| *n == p.name));
+        self.order_generation += 1;
         Ok(())
     }
 
@@ -493,6 +499,7 @@ impl PipelineConfig {
                 format!("`{name}` is a required pass and cannot be removed"),
             ));
         }
+        self.order_generation += 1;
         Ok(self.passes.remove(at).pass)
     }
 }
@@ -600,6 +607,7 @@ pub struct Pipeline {
     /// Created at the first prepare, recreated when the size changes.
     targets: Option<Targets>,
     scene_size: Option<(u32, u32)>,
+    display_readable: bool,
     /// Bumped each time the targets are (re)created; passes resized for an older generation
     /// get `resize` before their next prepare.
     targets_generation: u64,
@@ -632,6 +640,7 @@ impl Pipeline {
             lighting: LightingResources::new(gpu),
             targets: None,
             scene_size: None,
+            display_readable: true,
             targets_generation: 0,
             surface_format,
             surface_is_srgb,
@@ -835,6 +844,19 @@ impl Pipeline {
         self.config.passes()
     }
 
+    /// Counter that moves whenever the entry list or its order changes (not the enabled flags).
+    pub fn order_generation(&self) -> u64 {
+        self.config.order_generation
+    }
+
+    /// Whether a graph reads the `tonemap.color` / `overlay.color` images (`view.*` nodes). While
+    /// no graph frame is added the value is ignored; it defaults to `true`. With `false` and no
+    /// scene size, a graph frame run writes the backbuffer directly, like the fixed pipeline, and
+    /// skips the display target and the `Output` copy.
+    pub fn set_display_readable(&mut self, readable: bool) {
+        self.display_readable = readable;
+    }
+
     /// Enables or disables an entry; a pass also gets `set_enabled(enabled, lighting)` so a
     /// disabled feature returns its group-1 resources to the dummies. Refusals:
     /// `pipeline.unknown_pass`, `pipeline.required_pass`.
@@ -945,7 +967,9 @@ impl Pipeline {
     ) -> Result<(), RaaError> {
         if this.borrow().view_rects.is_empty() {
             let mut pipeline = this.borrow_mut();
-            if pipeline.graph_frames.is_empty() && pipeline.scene_size.is_none() {
+            if pipeline.scene_size.is_none()
+                && (pipeline.graph_frames.is_empty() || !pipeline.display_readable)
+            {
                 pipeline.record_single(ctx, false)?;
             } else {
                 pipeline.record_display_target(ctx)?;
