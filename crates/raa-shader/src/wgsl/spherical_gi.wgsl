@@ -141,9 +141,9 @@ fn raa_spherical_support_gates(entry: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f
 }
 
 // EVAL ONLY (lookup variants): parallaxRange >= 9000 selects variant bits (value - 9000);
-// the parallax range is then effectively infinite (patches everywhere). Bit 0: small
-// normal/view offset of the lookup point, bit 1: large offset, bit 2: sharp backface
-// weight, bit 3: bilinear Chebyshev moments.
+// the parallax range is then effectively infinite (patches everywhere). Bit 0: normal
+// offset of the lookup point (0.3 x smallest spacing), bit 1: normal + view offset, bit 2:
+// sharp backface weight, bit 3: bilinear Chebyshev moments, bit 4: continuous ring.
 fn raa_spherical_variant() -> u32 {
     let range = bitcast<f32>(raa_spherical_data[3].y);
     return select(0u, u32(range - 9000.0), range >= 9000.0);
@@ -547,7 +547,7 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
         let to_eye = anchor - p;
         let eye = length(to_eye);
         let v = select(normal, to_eye / max(eye, 1e-6), eye > 1e-4);
-        let k = select(vec2<f32>(0.2, 0.2), vec2<f32>(0.45, 0.25), (variant & 2u) != 0u);
+        let k = select(vec2<f32>(0.3, 0.0), vec2<f32>(0.3, 0.15), (variant & 2u) != 0u);
         q = p + raa_spherical_spacing(cell_at_p) * (k.x * normal + k.y * v);
         let moved = raa_spherical_coordinate(q);
         if moved.desc.x != 0u { cell = moved; }
@@ -594,18 +594,40 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
         var ring_sum = vec3<f32>(0.0);
         var ring_total = 0.0;
         let center = vec2<i32>(floor(cell.angular));
-        for (var k = 0u; k < 10u; k++) {
-            // k == 0 visits the centre probe, then the 3x3 columns of this shell.
-            let m = i32(max(k, 1u) - 1u);
-            let ij = center + vec2<i32>(m % 3 - 1, m / 3 - 1);
-            let key = select(raa_spherical_key(cell.shell, cell.face, ij, cell.desc.x),
+        let smooth_ring = (variant & 16u) != 0u;
+        let layers = select(1u, select(2u, 1u, interpolation.shell0 == interpolation.shell1), smooth_ring);
+        for (var k = 0u; k < select(10u, 1u + 16u * layers, smooth_ring); k++) {
+            var ij: vec2<i32>;
+            var shell = cell.shell;
+            var tent = 1.0;
+            if smooth_ring {
+                // k == 0 visits the centre probe, then the 4x4 columns around the trilinear
+                // corners on both radial layers, weighted by a tent of radius two cells
+                // (radial: the trilinear fraction), so a probe enters and leaves the ring at
+                // zero weight and the ring has no cell edges.
+                let m = max(k, 1u) - 1u;
+                let layer = m / 16u;
+                ij = interpolation.base + vec2<i32>(i32(m % 4u) - 1, i32((m / 4u) % 4u) - 1);
+                let d = abs(cell.angular - (vec2<f32>(ij) + 0.5));
+                let t = max(vec2<f32>(0.0), 1.0 - 0.5 * d);
+                shell = select(interpolation.shell0, interpolation.shell1, layer == 1u);
+                let radial = select(1.0 - interpolation.fraction.z, interpolation.fraction.z, layer == 1u);
+                tent = t.x * t.y * select(radial, 1.0, layers == 1u);
+                if k > 0u && tent <= 0.0 { continue; }
+            } else {
+                // k == 0 visits the centre probe, then the 3x3 columns of this shell.
+                let m = i32(max(k, 1u) - 1u);
+                ij = center + vec2<i32>(m % 3 - 1, m / 3 - 1);
+            }
+            let key = select(raa_spherical_key(shell, cell.face, ij, cell.desc.x),
                 raa_spherical_key(RAA_SPHERICAL_CENTER, 0u, vec2<i32>(0), cell.desc.x), k == 0u);
             let entry = raa_spherical_find(key, mask);
             if !raa_spherical_published(entry) { continue; }
             let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
             let offset = probe.xyz - p;
             let spacing2 = probe.w * probe.w;
-            let distance_weight = 0.25 * spacing2 / (dot(offset, offset) + spacing2);
+            var distance_weight = 0.25 * spacing2 / (dot(offset, offset) + spacing2);
+            if smooth_ring && k > 0u { distance_weight = 0.25 * tent; }
             let gates = raa_spherical_support_gates_at(entry, p, normal, q, variant);
             coverage += distance_weight * gates.z;
             let w = distance_weight * raa_spherical_support(gates, sharp);
@@ -629,11 +651,11 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
     return vec4<f32>(intensity * sum / total, blend);
 }
 
-// Probe spacing at a grid coordinate: the larger of the shell thickness and the angular
-// cell width (the same measure as a probe's stored spacing).
+// Smallest probe spacing at a grid coordinate: the shell thickness or the angular cell
+// width at the face centre, whichever is smaller.
 fn raa_spherical_spacing(cell: RaaSphericalCoordinate) -> f32 {
     let angular = 2.0 * cell.radius / f32(max(cell.desc.x, 1u));
-    return max(cell.bounds.z - cell.bounds.x, angular);
+    return min(cell.bounds.z - cell.bounds.x, angular);
 }
 
 // Corner support from its gates. Sharp: facing x visibility below 0.2 is crushed
