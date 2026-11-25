@@ -1703,7 +1703,7 @@ fn spherical_resolve_module() -> String {
 }
 
 /// Rows after the screen resolve rows written by the diagnostic trace (traceTexel).
-const TRACE_ROWS: usize = 8 + 4 * 24;
+const TRACE_ROWS: usize = 8 + 4 * 24 + 2 * 24;
 
 fn spherical_module() -> String {
     format!(

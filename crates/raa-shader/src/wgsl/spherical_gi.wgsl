@@ -576,6 +576,50 @@ struct RaaSphericalFront {
 // lookup is read-only and the trace is a no-op.
 var<private> raa_spherical_tracing: bool;
 var<private> raa_spherical_trace_count: u32;
+var<private> raa_spherical_trace_best: u32;
+var<private> raa_spherical_trace_best_w: f32;
+
+// Trace rows 104..151: the 24 parallax patches of the strongest probe at (p, n): centroid
+// and R^2, then the luminance each light group adds at p (misses in the sky term) and cos_n.
+fn raa_spherical_trace_patches(entry: u32, p: vec3<f32>, n: vec3<f32>) {
+    let mask = raa_spherical_data[1].z;
+    let slot = raa_spherical_slot(entry, mask);
+    let base = slot + RAA_SPHERICAL_PATCH_ROW;
+    let misses = raa_spherical_data[slot + RAA_SPHERICAL_INFO_ROW].w;
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722) * 0.31830988;
+    for (var k = 0u; k < 24u; k++) {
+        let row = base + RAA_SPHERICAL_PATCH_STRIDE * k;
+        let r0 = bitcast<vec4<f32>>(raa_spherical_data[row]);
+        var sun = 0.0;
+        var sky = 0.0;
+        var other = 0.0;
+        var cos_n = 0.0;
+        if r0.w >= 0.0 {
+            let delta = r0.xyz - p;
+            let d2 = dot(delta, delta);
+            let w = delta * inverseSqrt(max(d2, 1e-10));
+            cos_n = dot(n, w);
+            if cos_n > 0.0 {
+                let r1 = bitcast<vec4<f32>>(raa_spherical_data[row + 1u]);
+                let normal = raa_spherical_oct_decode(unpack2x16snorm(raa_spherical_data[row + 2u].w));
+                let cos_h = mix(1.0, max(0.0, -dot(normal, w)), r1.w);
+                let g = cos_h * cos_n / (d2 + r0.w);
+                sun = dot(luma, raa_spherical_sun_scale() * r1.xyz * g);
+                let r3 = raa_spherical_data[row + 3u];
+                sky = dot(luma, raa_spherical_sky_scale() * raa_spherical_rgb9e5(r3.x) * g);
+                other = dot(luma, raa_spherical_rgb9e5(r3.y) * g);
+            }
+        }
+        if (misses & (1u << k)) != 0u {
+            let miss = bitcast<vec3<f32>>(raa_spherical_data[row + 2u].xyz);
+            let corner = vec2<f32>(f32(k & 1u), f32((k >> 1u) & 1u)) - 0.5;
+            let d = normalize(raa_spherical_face_direction(k / 4u, corner));
+            sky += dot(luma, raa_spherical_sky_scale() * miss * max(0.0, dot(n, d)));
+        }
+        raa_spherical_trace(104u + 2u * k, raa_spherical_data[row]);
+        raa_spherical_trace(105u + 2u * k, bitcast<vec4<u32>>(vec4<f32>(sun, sky, other, cos_n)));
+    }
+}
 fn raa_spherical_trace(row: u32, value: vec4<u32>) {}
 
 fn raa_spherical_front_add(acc: ptr<function, RaaSphericalFront>, entry: u32, kernel: f32,
@@ -603,6 +647,10 @@ fn raa_spherical_front_add(acc: ptr<function, RaaSphericalFront>, entry: u32, ke
             w * visibility, length(to_probe))));
         raa_spherical_trace(row + 3u, bitcast<vec4<u32>>(vec4<f32>(value, validity)));
         raa_spherical_trace_count += 1u;
+        if w * visibility > raa_spherical_trace_best_w {
+            raa_spherical_trace_best_w = w * visibility;
+            raa_spherical_trace_best = entry;
+        }
     }
     if w <= 1e-6 { return; }
     (*acc).front += w;
@@ -711,6 +759,7 @@ fn raa_spherical_diffuse_front(p: vec3<f32>, normal: vec3<f32>,
         raa_spherical_trace(5u, bitcast<vec4<u32>>(corners));
         raa_spherical_trace(6u, bitcast<vec4<u32>>(vec4<f32>(at, kernel)));
         raa_spherical_trace(7u, raa_spherical_data[0]);
+        if raa_spherical_trace_best_w > 0.0 { raa_spherical_trace_patches(raa_spherical_trace_best, p, normal); }
     }
     if fallback > 0.0 {
         value = mix(value, corners, fallback);
