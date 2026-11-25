@@ -1491,6 +1491,7 @@ impl LitRenderer {
             write_frame_flags(&mut preview, &params);
             gpu.queue().write_buffer(buffer, 0, &preview);
         } else {
+            s.lighting_view_groups = None;
             s.lighting_view_frame = None;
         }
         stats.uploaded_bytes = s.store.last_uploaded_bytes();

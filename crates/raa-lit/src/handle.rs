@@ -417,6 +417,8 @@ pub(crate) struct LitShared {
     frame_buffer: wgpu::Buffer,
     /// Forward preview uniform while a lighting contribution is selected.
     pub(crate) lighting_view_frame: Option<wgpu::Buffer>,
+    /// Base group identifies all shared resources, including atlas and instance buffer replacements.
+    pub(crate) lighting_view_groups: Option<(wgpu::BindGroup, wgpu::BindGroup)>,
     /// `SurfaceMaterialGpu` array, `max_materials` x 256 B.
     material_buffer: wgpu::Buffer,
     /// Persistent S1 instance records, group-0 binding 7.
@@ -586,6 +588,7 @@ impl LitShared {
             id_buffer,
             frame_buffer,
             lighting_view_frame: None,
+            lighting_view_groups: None,
             material_buffer,
             instance_storage,
             previous_storage,
@@ -1646,9 +1649,16 @@ impl LitHandle {
     /// Group 0 for the displayed direct-only or indirect-only lighting view.
     /// A combined-lighting capture uses the ordinary frame group.
     pub fn lighting_view_group(&self, gpu: &GpuContext) -> Option<wgpu::BindGroup> {
-        let shared = self.shared.borrow();
+        let mut shared = self.shared.borrow_mut();
         let frame = shared.lighting_view_frame.as_ref()?;
-        Some(shared.camera_group(gpu, frame))
+        if let Some((base, view)) = &shared.lighting_view_groups
+            && base == &shared.frame_bind_group
+        {
+            return Some(view.clone());
+        }
+        let view = shared.camera_group(gpu, frame);
+        shared.lighting_view_groups = Some((shared.frame_bind_group.clone(), view.clone()));
+        Some(view)
     }
 
     /// The render pipeline of shader variant `key` with the fixed-function state `spec`:
