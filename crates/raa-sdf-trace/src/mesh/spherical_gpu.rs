@@ -31,10 +31,10 @@ const SUN_SCALE_ROW: usize = 68;
 const SKY_SCALE_ROW: usize = 69;
 const LOOKUP_ENTRY: usize = 3;
 const CHANNELS: usize = 3;
-/// Legacy projected rows, then 24 parallax patches of five rows, 96 depth-moment
+/// Legacy projected rows, then 24 parallax patches of four rows, 96 depth-moment
 /// bins two per row, and one probe information row (see mesh_spherical_gi.wgsl).
 const LEGACY_SLOT_ROWS: usize = CHANNELS * (1 + FACE_COUNT);
-const PATCH_ROWS: usize = 5 * 4 * FACE_COUNT;
+const PATCH_ROWS: usize = 4 * 4 * FACE_COUNT;
 const MOMENT_ROWS: usize = 16 * FACE_COUNT / 2;
 /// Info row, then one light row (sun visibility, two local light indices and visibilities).
 const SLOT_ROWS: usize = LEGACY_SLOT_ROWS + PATCH_ROWS + MOMENT_ROWS + 2;
@@ -1777,16 +1777,16 @@ mod tests {
 
     #[test]
     fn slot_rows_match_the_shared_lookup_layout() {
-        assert_eq!(SLOT_ROWS, 191);
+        assert_eq!(SLOT_ROWS, 167);
         assert_eq!(LOOKUP_HEADER, 70);
         assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_TABLE: u32 = 70u;"));
         assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_SUN_SCALE_ROW: u32 = 68u;"));
         assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_SKY_SCALE_ROW: u32 = 69u;"));
-        assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_SLOT_ROWS: u32 = 191u;"));
-        assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_LIGHT_ROW: u32 = 190u;"));
+        assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_SLOT_ROWS: u32 = 167u;"));
+        assert!(raa_shader::SPHERICAL_GI_WGSL.contains("RAA_SPHERICAL_LIGHT_ROW: u32 = 166u;"));
         let module = spherical_module();
-        assert!(module.contains("SPHERICAL_INFO_ROW: u32 = 189u;"));
-        assert!(module.contains("SPHERICAL_LIGHT_ROW: u32 = 190u;"));
+        assert!(module.contains("SPHERICAL_INFO_ROW: u32 = 165u;"));
+        assert!(module.contains("SPHERICAL_LIGHT_ROW: u32 = 166u;"));
     }
 
     #[test]

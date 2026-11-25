@@ -22,16 +22,23 @@ const RAA_SPHERICAL_TABLE: u32 = 70u;
 const RAA_SPHERICAL_SUN_SCALE_ROW: u32 = 68u;
 const RAA_SPHERICAL_SKY_SCALE_ROW: u32 = 69u;
 // 21 legacy rows (uniform average, six world-axis faces, three light groups each),
-// 24 parallax patches x 5 rows (hit centroid + R², sun intensity + coherence, sky miss
-// flux + octahedral mean normal, sky intensity, other intensity), 96 depth-moment bins
+// 24 parallax patches x 4 rows (hit centroid + R², sun intensity + coherence, sky miss
+// flux + octahedral mean normal, x = sky intensity and y = other intensity as rgb9e5,
+// z w spare for a sky transfer), 96 depth-moment bins
 // two per row, one information row, one light row (sphere-only direct: sun visibility,
 // two light indices, their visibility).
-const RAA_SPHERICAL_SLOT_ROWS: u32 = 191u;
+const RAA_SPHERICAL_SLOT_ROWS: u32 = 167u;
 const RAA_SPHERICAL_PATCH_ROW: u32 = 21u;
-const RAA_SPHERICAL_PATCH_STRIDE: u32 = 5u;
-const RAA_SPHERICAL_MOMENT_ROW: u32 = 141u;
-const RAA_SPHERICAL_INFO_ROW: u32 = 189u;
-const RAA_SPHERICAL_LIGHT_ROW: u32 = 190u;
+const RAA_SPHERICAL_PATCH_STRIDE: u32 = 4u;
+const RAA_SPHERICAL_MOMENT_ROW: u32 = 117u;
+const RAA_SPHERICAL_INFO_ROW: u32 = 165u;
+const RAA_SPHERICAL_LIGHT_ROW: u32 = 166u;
+
+// Shared-exponent rgb (9-bit mantissas, 5-bit exponent, bias 15), unsigned.
+fn raa_spherical_rgb9e5(v: u32) -> vec3<f32> {
+    let scale = exp2(f32(i32(v >> 27u) - 24));
+    return vec3<f32>(f32(v & 511u), f32((v >> 9u) & 511u), f32((v >> 18u) & 511u)) * scale;
+}
 const RAA_SPHERICAL_EMPTY: u32 = 0xffffffffu;
 const RAA_SPHERICAL_CENTER: u32 = 0xffffu;
 const RAA_SPHERICAL_FADE_FRAMES: f32 = 8.0;
@@ -192,8 +199,9 @@ fn raa_spherical_probe_irradiance(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f
                 let cos_h = mix(1.0, max(0.0, -dot(normal, w)), r1.w);
                 let g = cos_h * cos_n / (d2 + r0.w);
                 e_sun += r1.xyz * g;
-                e_sky += bitcast<vec3<f32>>(raa_spherical_data[row + 3u].xyz) * g;
-                e_other += bitcast<vec3<f32>>(raa_spherical_data[row + 4u].xyz) * g;
+                let r3 = raa_spherical_data[row + 3u];
+                e_sky += raa_spherical_rgb9e5(r3.x) * g;
+                e_other += raa_spherical_rgb9e5(r3.y) * g;
             }
         }
         if (misses & (1u << k)) != 0u {
