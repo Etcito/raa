@@ -654,19 +654,38 @@ fn raa_shadow_blockers(layer: i32, uv: vec2<f32>, depth: f32, search_texels: f32
     return vec2<f32>(blocker_sum / blocker_count, blocker_count);
 }
 
+// Probe taps of raa_shadow_pcf: the centre and eight outer Poisson positions, one per 45 degree
+// sector (indices 0, 30, 28, 14, 31, 29, 21, 19, 11), as a bit mask over RAA_CSM_POISSON.
+const RAA_PCF_PROBE_COUNT: f32 = 9.0;
+const RAA_PCF_PROBE_MASK: u32 = (1u << 0u) | (1u << 30u) | (1u << 28u) | (1u << 14u) | (1u << 31u)
+    | (1u << 29u) | (1u << 21u) | (1u << 19u) | (1u << 11u);
+
+fn raa_shadow_pcf_tap(layer: i32, uv: vec2<f32>, depth: f32, radius_texels: f32, res: f32,
+    rotation: f32, i: u32) -> f32 {
+    let offset = raa_csm_rotate(RAA_CSM_POISSON[i], rotation) * radius_texels;
+    let coord = clamp(uv + offset / res, vec2<f32>(0.0), vec2<f32>(1.0));
+    return textureSampleCompareLevel(raa_shadow_map, raa_shadow_cmp, coord, layer, depth);
+}
+
 // Mean of the rotated 32-tap Poisson PCF comparisons of `uv` at `depth`, in [0, 1].
+// The nine probe taps run first: when they all agree (the whole kernel lit, or the whole
+// kernel in umbra) their common value is returned and the other 23 taps are skipped;
+// otherwise the remaining taps complete the same 32-tap mean.
 fn raa_shadow_pcf(layer: i32, uv: vec2<f32>, depth: f32, radius_texels: f32, res: f32, rotation: f32) -> f32 {
-    var pcf = 0.0;
+    var probe = 0.0;
     for (var i = 0u; i < 32u; i = i + 1u) {
-        let offset = raa_csm_rotate(RAA_CSM_POISSON[i], rotation) * radius_texels;
-        let coord = clamp(uv + offset / res, vec2<f32>(0.0), vec2<f32>(1.0));
-        pcf = pcf + textureSampleCompareLevel(
-            raa_shadow_map,
-            raa_shadow_cmp,
-            coord,
-            layer,
-            depth
-        );
+        if ((RAA_PCF_PROBE_MASK >> i) & 1u) != 0u {
+            probe = probe + raa_shadow_pcf_tap(layer, uv, depth, radius_texels, res, rotation, i);
+        }
+    }
+    if (probe == 0.0 || probe == RAA_PCF_PROBE_COUNT) {
+        return probe / RAA_PCF_PROBE_COUNT;
+    }
+    var pcf = probe;
+    for (var i = 0u; i < 32u; i = i + 1u) {
+        if ((RAA_PCF_PROBE_MASK >> i) & 1u) == 0u {
+            pcf = pcf + raa_shadow_pcf_tap(layer, uv, depth, radius_texels, res, rotation, i);
+        }
     }
     return pcf / 32.0;
 }
