@@ -110,8 +110,13 @@ fn raa_spherical_moments(slot: u32, face: u32, bin: vec2<u32>) -> vec2<f32> {
 // on the wall behind it (sphB-dense V2, left of the fountain).
 fn raa_spherical_visibility(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f32>) -> f32 {
     let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
-    let biased = p + n * max(0.02, 0.05 * probe.w);
-    let offset = biased - probe.xyz;
+    return raa_spherical_chebyshev(entry, mask, p + n * max(0.02, 0.05 * probe.w));
+}
+
+// Chebyshev visibility of point x from the probe (no surface bias).
+fn raa_spherical_chebyshev(entry: u32, mask: u32, x: vec3<f32>) -> f32 {
+    let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
+    let offset = x - probe.xyz;
     let distance = length(offset);
     if distance < 1e-5 { return 1.0; }
     let face_uv = raa_spherical_face_uv(offset);
@@ -229,6 +234,70 @@ fn raa_spherical_probe_irradiance(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f
     }
     let e = raa_spherical_sun_scale() * e_sun + raa_spherical_sky_scale() * e_sky + e_other;
     return e * 0.31830988;
+}
+
+// Front lookup variant of raa_spherical_probe_irradiance: each patch is also occluded by
+// what lies between the receiver and the patch centroid, tested in the probe's own depth
+// (Chebyshev visibility from the probe of the points at 1/3 and 2/3 of the segment p -> h,
+// light-field-probe style). The plain patch model lights p with everything the probe sees:
+// on the V3 back wall the probe 3.8 m in front saw the sunlit courtyard below the gallery
+// floor (patches 9-17 m away, 87% of p's irradiance), which the wall cannot see (sphS2).
+fn raa_spherical_patch_occlusion(entry: u32, mask: u32, p: vec3<f32>, h: vec3<f32>) -> f32 {
+    let a = raa_spherical_chebyshev(entry, mask, mix(p, h, 1.0 / 3.0));
+    let b = raa_spherical_chebyshev(entry, mask, mix(p, h, 2.0 / 3.0));
+    return min(a, b);
+}
+
+fn raa_spherical_probe_irradiance_seen(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let slot = raa_spherical_slot(entry, mask);
+    let base = slot + RAA_SPHERICAL_PATCH_ROW;
+    let misses = raa_spherical_data[slot + RAA_SPHERICAL_INFO_ROW].w;
+    let lo = n < vec3<f32>(-0.82);
+    let hi = n > vec3<f32>(0.82);
+    let culled = select(0u, 0xfu, lo.x) | select(0u, 0xf0u, hi.x) | select(0u, 0xf00u, lo.y)
+        | select(0u, 0xf000u, hi.y) | select(0u, 0xf0000u, lo.z) | select(0u, 0xf00000u, hi.z);
+    var e_sun = vec3<f32>(0.0);
+    var e_sky = vec3<f32>(0.0);
+    var e_other = vec3<f32>(0.0);
+    for (var k = 0u; k < 24u; k++) {
+        if ((culled >> k) & 1u) != 0u {
+            continue;
+        }
+        let row = base + RAA_SPHERICAL_PATCH_STRIDE * k;
+        let r0 = bitcast<vec4<f32>>(raa_spherical_data[row]);
+        if r0.w >= 0.0 {
+            let delta = r0.xyz - p;
+            let d2 = dot(delta, delta);
+            let w = delta * inverseSqrt(max(d2, 1e-10));
+            let cos_n = dot(n, w);
+            if cos_n > 0.0 {
+                let r1 = bitcast<vec4<f32>>(raa_spherical_data[row + 1u]);
+                let normal = raa_spherical_oct_decode(unpack2x16snorm(raa_spherical_data[row + 2u].w));
+                let cos_h = mix(1.0, max(0.0, -dot(normal, w)), r1.w);
+                let g = cos_h * cos_n / (d2 + r0.w) * raa_spherical_patch_occlusion(entry, mask, p, r0.xyz);
+                e_sun += r1.xyz * g;
+                let r3 = raa_spherical_data[row + 3u];
+                e_sky += raa_spherical_rgb9e5(r3.x) * g;
+                e_other += raa_spherical_rgb9e5(r3.y) * g;
+            }
+        }
+        if (misses & (1u << k)) != 0u {
+            let miss = bitcast<vec3<f32>>(raa_spherical_data[row + 2u].xyz);
+            let corner = vec2<f32>(f32(k & 1u), f32((k >> 1u) & 1u)) - 0.5;
+            let d = normalize(raa_spherical_face_direction(k / 4u, corner));
+            e_sky += miss * max(0.0, dot(n, d));
+        }
+    }
+    let e = raa_spherical_sun_scale() * e_sun + raa_spherical_sky_scale() * e_sky + e_other;
+    return e * 0.31830988;
+}
+
+fn raa_spherical_probe_value_seen(entry: u32, mask: u32, p: vec3<f32>, normal: vec3<f32>,
+                                  far: f32) -> vec3<f32> {
+    var value = vec3<f32>(0.0);
+    if far < 1.0 { value += (1.0 - far) * raa_spherical_probe_irradiance_seen(entry, mask, p, normal); }
+    if far > 0.0 { value += far * raa_spherical_probe_cube(entry, mask, normal); }
+    return value;
 }
 
 // Far-field irradiance / pi of one probe from its six world-axis face averages (the
@@ -617,7 +686,9 @@ fn raa_spherical_trace_patches(entry: u32, p: vec3<f32>, n: vec3<f32>) {
             sky += dot(luma, raa_spherical_sky_scale() * miss * max(0.0, dot(n, d)));
         }
         raa_spherical_trace(104u + 2u * k, raa_spherical_data[row]);
-        raa_spherical_trace(105u + 2u * k, bitcast<vec4<u32>>(vec4<f32>(sun, sky, other, cos_n)));
+        var occlusion = 0.0;
+        if r0.w >= 0.0 { occlusion = raa_spherical_patch_occlusion(entry, mask, p, r0.xyz); }
+        raa_spherical_trace(105u + 2u * k, bitcast<vec4<u32>>(vec4<f32>(sun, sky + other, occlusion, cos_n)));
     }
 }
 fn raa_spherical_trace(row: u32, value: vec4<u32>) {}
@@ -638,7 +709,7 @@ fn raa_spherical_front_add(acc: ptr<function, RaaSphericalFront>, entry: u32, ke
     let w = kernel * front * live;
     if raa_spherical_tracing && raa_spherical_trace_count < 24u {
         let visibility = raa_spherical_visibility(entry, mask, p, n);
-        let value = raa_spherical_probe_value(entry, mask, p, n, far);
+        let value = raa_spherical_probe_value_seen(entry, mask, p, n, far);
         let row = 8u + 4u * raa_spherical_trace_count;
         raa_spherical_trace(row, raa_spherical_data[entry + 1u]);
         raa_spherical_trace(row + 1u, vec4<u32>(raa_spherical_data[entry].x, bitcast<u32>(kernel),
@@ -656,7 +727,7 @@ fn raa_spherical_front_add(acc: ptr<function, RaaSphericalFront>, entry: u32, ke
     (*acc).front += w;
     let seen = w * raa_spherical_visibility(entry, mask, p, n);
     if seen <= 1e-6 { return; }
-    (*acc).sum += seen * raa_spherical_probe_value(entry, mask, p, n, far);
+    (*acc).sum += seen * raa_spherical_probe_value_seen(entry, mask, p, n, far);
     (*acc).total += seen;
 }
 
