@@ -57,6 +57,9 @@ pub struct NrcSettings {
     pub ema: f32,
     /// Online training on or off (off renders a frozen cache, e.g. a loaded checkpoint).
     pub train: bool,
+    /// Alternate frames between tracing the training rays and the Adam step (single-step
+    /// budgets only): halves the average training cost.
+    pub interleave: bool,
     /// Resolution divisor of the cache queries: 1, 2, 4 or 8.
     pub divisor: u32,
     /// 0 queries the cache at the visible point; 1 traces one cosine bounce first.
@@ -75,6 +78,7 @@ impl Default for NrcSettings {
             learning_rate: 2e-3,
             ema: 0.99,
             train: true,
+            interleave: true,
             divisor: 4,
             bounces: 0,
             temporal_blend: 0.2,
@@ -340,6 +344,9 @@ impl NrcFeature {
 }
 
 struct Staged {
+    /// Training steps whose rays are traced this frame.
+    trace_steps: u32,
+    /// Adam steps applied this frame.
     train_steps: u32,
     /// Origin buffer the first training step reads; steps alternate.
     origin: usize,
@@ -480,7 +487,13 @@ impl FeaturePass for NrcPass {
         if !traceable {
             return Ok(());
         }
-        let train_steps = if settings.train { steps_per_frame } else { 0 };
+        // Interleaved training traces on even frames and learns from those samples on odd ones.
+        let interleaved = settings.interleave && steps_per_frame == 1;
+        let (trace_steps, train_steps) = match (settings.train, interleaved) {
+            (false, _) => (0, 0),
+            (true, false) => (steps_per_frame, steps_per_frame),
+            (true, true) => ((1 - (ctx.frame & 1)) as u32, (ctx.frame & 1) as u32),
+        };
         let queue = ctx.gpu.queue();
         let env = ctx.lighting.environment_diffuse_sh().is_some();
         let limit = 1.0e4f32;
@@ -492,7 +505,7 @@ impl FeaturePass for NrcPass {
         push_u32(&mut options, [1, 0, 0, 0]);
         queue.write_buffer(&gpu.options, 0, &options);
         let seed = (ctx.frame as u32).wrapping_mul(MAX_STEPS + 1);
-        for step in 0..=train_steps.min(MAX_STEPS) {
+        for step in 0..=trace_steps.max(train_steps).min(MAX_STEPS) {
             // Slot 0 drives the render pass, slots 1.. the training steps.
             let mut params = Vec::with_capacity(48);
             push_u32(
@@ -525,6 +538,7 @@ impl FeaturePass for NrcPass {
         push_f32(&mut resolve, [settings.temporal_blend, 1.0, 0.0, 0.0]);
         queue.write_buffer(&gpu.resolve_params, 0, &resolve);
         self.staged = Some(Staged {
+            trace_steps,
             train_steps,
             origin: (self.steps & 1) as usize,
             render: true,
@@ -585,27 +599,32 @@ impl FeaturePass for NrcPass {
 
         // 1. Online training: paths with a self-trained tail, then Adam steps.
         let layers = gpu.hidden + 1;
-        for step in 0..staged.train_steps as usize {
-            let mut entries = scene.clone();
-            entries.push(buffer_entry(30, &gpu.params[step + 1]));
-            entries.push(buffer_entry(32, &gpu.samples));
-            entries.push(image_entry(6, &depth));
-            entries.push(image_entry(7, &normal));
-            let origin = (staged.origin + step) & 1;
-            entries.push(buffer_entry(34, &gpu.origins[origin]));
-            entries.push(buffer_entry(35, &gpu.origins[1 - origin]));
-            let paths = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("gi.nrc.paths"),
-                layout: &gpu.paths.get_bind_group_layout(0),
-                entries: &entries,
-            });
-            compute(
-                ctx.encoder,
-                "gi.nrc.paths",
-                &gpu.paths,
-                &paths,
-                (gpu.batch.div_ceil(64), 1),
-            );
+        for step in 0..staged.trace_steps.max(staged.train_steps) as usize {
+            if step < staged.trace_steps as usize {
+                let mut entries = scene.clone();
+                entries.push(buffer_entry(30, &gpu.params[step + 1]));
+                entries.push(buffer_entry(32, &gpu.samples));
+                entries.push(image_entry(6, &depth));
+                entries.push(image_entry(7, &normal));
+                let origin = (staged.origin + step) & 1;
+                entries.push(buffer_entry(34, &gpu.origins[origin]));
+                entries.push(buffer_entry(35, &gpu.origins[1 - origin]));
+                let paths = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("gi.nrc.paths"),
+                    layout: &gpu.paths.get_bind_group_layout(0),
+                    entries: &entries,
+                });
+                compute(
+                    ctx.encoder,
+                    "gi.nrc.paths",
+                    &gpu.paths,
+                    &paths,
+                    (gpu.batch.div_ceil(64), 1),
+                );
+            }
+            if step >= staged.train_steps as usize {
+                continue;
+            }
             let learn = |pipeline: &wgpu::ComputePipeline, partial: bool| {
                 let mut entries = vec![
                     buffer_entry(1, &gpu.trained),

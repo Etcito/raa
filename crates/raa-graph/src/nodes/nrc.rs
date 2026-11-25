@@ -139,6 +139,15 @@ impl NodeFamily for Nrc {
                 None,
                 Rebuild::None,
             ),
+            param(
+                "interleave",
+                "Alternate rays and learning",
+                ParamKind::Bool,
+                ParamValue::Bool(d.interleave),
+                None,
+                None,
+                Rebuild::None,
+            ),
             scale,
             param(
                 "bounces",
@@ -240,6 +249,7 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> NrcSettin
             ("learningRate", ParamValue::Number(x)) => s.learning_rate = *x as f32,
             ("ema", ParamValue::Number(x)) => s.ema = *x as f32,
             ("train", ParamValue::Bool(b)) => s.train = *b,
+            ("interleave", ParamValue::Bool(b)) => s.interleave = *b,
             ("scale", ParamValue::Enum(name)) => {
                 s.divisor = match name.as_str() {
                     "full" => 1,

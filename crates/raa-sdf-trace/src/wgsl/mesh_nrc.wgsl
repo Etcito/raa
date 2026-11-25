@@ -66,19 +66,29 @@ fn nrc_surface(ray: Ray, limit: f32) -> NrcSurface {
     return s;
 }
 
-// Outgoing diffuse radiance of a surface from emission, the sun and the local lights.
-fn nrc_direct(s: NrcSurface, v: vec3<f32>, seed: ptr<function, u32>) -> vec3<f32> {
+// Outgoing diffuse radiance of a surface from emission, the sun and the local lights. With
+// `one_shadow_ray` the sun or one local light is chosen at random (training targets: one
+// shadow ray of latency instead of two or more, same expectation).
+fn nrc_direct(s: NrcSurface, v: vec3<f32>, seed: ptr<function, u32>, one_shadow_ray: bool) -> vec3<f32> {
     var rgb = s.mat.emission_metallic.rgb;
     if s.unlit { return rgb + s.mat.base_roughness.rgb; }
-    rgb += mesh_sun_at_hit(s.p, s.ng, s.n, v, s.mat, true);
     let origin = s.p + s.ng * (2.0 * EPS);
     let count = min(256u, frame.light_info.x);
+    if one_shadow_ray {
+        if count == 0u { return rgb + mesh_sun_at_hit(s.p, s.ng, s.n, v, s.mat, true); }
+        if random(seed) < 0.5 { return rgb + 2.0 * mesh_sun_at_hit(s.p, s.ng, s.n, v, s.mat, true); }
+        let i = min(u32(random(seed) * f32(count)), count - 1u);
+        var light_seed = *seed;
+        return rgb + 2.0 * f32(count)
+            * mesh_local_at_hit(i, origin, s.p, s.ng, s.n, v, s.mat, &light_seed, true, false);
+    }
+    rgb += mesh_sun_at_hit(s.p, s.ng, s.n, v, s.mat, true);
     if count <= nrc_params.counts.w {
         for (var i = 0u; i < count; i++) {
             var light_seed = *seed;
             rgb += mesh_local_at_hit(i, origin, s.p, s.ng, s.n, v, s.mat, &light_seed, true, false);
         }
-    } else {
+    } else if count > 0u {
         // One uniformly chosen light, weighted by the light count.
         let i = min(u32(random(seed) * f32(count)), count - 1u);
         var light_seed = *seed;
@@ -113,7 +123,7 @@ fn nrc_store(index: u32, p: vec3<f32>, n: vec3<f32>, wanted: vec3<f32>, valid: b
 
 // One training sample per invocation: an origin x (a random visible pixel for even threads, a
 // surface reached by last frame's rays for odd threads, so the cache also learns what the
-// tails query off screen), one cosine bounce to y, direct light at y and the cache at y as the
+// tails query off screen), one cosine bounce to y, direct light at y (one shadow ray) and the cache at y as the
 // tail (self-training). The sample learns R(x) = L_o(y). Each pair of threads hands one hit to
 // the next frame. A thread traces one closest-hit ray and its shadow rays: the pass costs about
 // one ray of latency.
@@ -159,7 +169,7 @@ fn nrc_paths(@builtin(global_invocation_id) id: vec3<u32>) {
     let y = nrc_surface(Ray(p + n * bias, d), limit);
     var wanted = nrc_sky(d);
     if y.hit {
-        wanted = nrc_direct(y, -d, &seed);
+        wanted = nrc_direct(y, -d, &seed, true);
         if !y.unlit { wanted += diffuse(y.mat) * nrc_cached(y); }
     }
     nrc_store(id.x, p, n, wanted, true);
@@ -200,7 +210,7 @@ fn nrc_render(@builtin(global_invocation_id) id: vec3<u32>) {
     var value = nrc_sky(d);
     var length = limit;
     if s.hit {
-        value = nrc_direct(s, -d, &seed);
+        value = nrc_direct(s, -d, &seed, false);
         if !s.unlit { value += diffuse(s.mat) * nrc_cached(s); }
         length = s.t;
     }
