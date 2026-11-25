@@ -9,6 +9,10 @@
 //! uses the linear rule.
 
 use crate::textures::quantize;
+use std::sync::LazyLock;
+
+static LINEAR_CHANNELS: LazyLock<[f32; 256]> =
+    LazyLock::new(|| std::array::from_fn(|i| srgb_to_linear(i as u8)));
 
 /// The rgba bytes of texel `(x, y)` of a `width`-texel-wide image; `[0; 4]` out of range.
 fn texel(src: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
@@ -39,11 +43,13 @@ fn linear_to_srgb(l: f32) -> f32 {
 
 /// One output texel from its four taps: the linear rule for every channel, or the sRGB rule
 /// for r, g and b when `srgb` is set (alpha stays linear).
-fn average(taps: [[u8; 4]; 4], srgb: bool) -> [u8; 4] {
+fn average(taps: [[u8; 4]; 4], linear_channels: Option<&[f32; 256]>) -> [u8; 4] {
     let mut out = [0; 4];
     for (channel, value) in out.iter_mut().enumerate() {
-        *value = if srgb && channel < 3 {
-            let sum: f32 = taps.iter().map(|t| srgb_to_linear(t[channel])).sum();
+        *value = if let Some(table) = linear_channels
+            && channel < 3
+        {
+            let sum: f32 = taps.iter().map(|t| table[usize::from(t[channel])]).sum();
             quantize(linear_to_srgb(sum / 4.0))
         } else {
             let sum: u32 = taps.iter().map(|t| u32::from(t[channel])).sum();
@@ -70,6 +76,7 @@ pub fn downsample_rgba8(src: &[u8], width: u32, height: u32, srgb: bool) -> (Vec
     if width == 0 || height == 0 || src.len() < len {
         return (Vec::new(), out_width, out_height);
     }
+    let linear_channels = srgb.then(|| LazyLock::force(&LINEAR_CHANNELS));
     let (w, h) = (width as usize, height as usize);
     let mut out = Vec::with_capacity(out_width as usize * out_height as usize * 4);
     for j in 0..out_height as usize {
@@ -84,7 +91,7 @@ pub fn downsample_rgba8(src: &[u8], width: u32, height: u32, srgb: bool) -> (Vec
                 texel(src, w, x0, y1),
                 texel(src, w, x1, y1),
             ];
-            out.extend_from_slice(&average(taps, srgb));
+            out.extend_from_slice(&average(taps, linear_channels));
         }
     }
     (out, out_width, out_height)
