@@ -181,7 +181,15 @@ impl NodeFamily for Nrc {
             side_effect: true,
             required_in_graph: false,
             inputs: vec![],
-            outputs: vec![],
+            // Resolved signal for a denoiser or an explicit `pass.forward.gi` link: rgb = indirect
+            // irradiance / pi, alpha = view depth (0 without a surface).
+            outputs: vec![super::ao_stages::image_out(
+                "gi",
+                "Indirect diffuse",
+                crate::catalog::GraphFormat::Rgba16Float,
+                crate::catalog::SizeSpec::Scale(1.0),
+                1,
+            )],
             params,
             budgets: vec![StageBudget {
                 stage: ShaderStage::Compute,
