@@ -25,11 +25,18 @@ and the bundled credits. The full ZIP remains alongside these files. The manifes
 the exact source hashes and scene inventory. Run the same stage command with `--offline`
 to verify an existing ZIP and extraction byte for byte without connecting to Intel.
 
-## Generate the RT proxy
+## Full-scene ray geometry
 
-The full scene has 3,747,018 triangles. The RAA mesh trace geometry limit is 250,000 triangles
-per view. The separate **Intel Sponza Base — RT proxy (245k target)** benchmark uses a
-245,000-triangle whole-scene budget, leaving room for additional traced geometry.
+The original export has 3,747,018 triangles. RAA's indexed ray geometry sizes the
+mesh and BVH storage bindings against the device limits. On the original source,
+CPU packing produced 133,337,580 bytes of indexed geometry and 67,108,832 bytes of
+BVH data for all 3,738,878 opaque triangles. The 8,140 BLEND triangles use raster
+transparency.
+
+## Reproduce the historical RT proxy
+
+The separate **Intel Sponza Base — RT proxy (245k target)** benchmark used a
+245,000-triangle whole-scene budget for the former 250,000-triangle RAA limit.
 
 ```sh
 node scripts/build-intel-sponza-rt-proxy.mjs
@@ -46,7 +53,7 @@ the simplifier implementation hash and the original and generated asset checksum
 `main_sponza/NewSponza_Main_glTF_003.gltf` for the complete source row.
 
 The pinned build retains 244,388 triangles, 6.5222% of the full geometry, and leaves
-5,612 triangles beneath the mesh RT cap. It retains all 405 primitives, 28 materials,
+5,612 triangles beneath the former mesh RT cap. It retains all 405 primitives, 28 materials,
 72 images, 155 nodes, six cameras and 24 punctual lights. It simplifies 289 primitives
 and leaves the triangle counts of 116 unchanged. The position-only fallback was unused.
 
@@ -66,5 +73,5 @@ glTF and binary SHA-256 and the source and staged texture hashes. The only
 asset transformation is resizing the texture images. Use `--output` to stage
 a second copy and verify reproducibility with `diff -qr`.
 
-The full scene is the visual sample. Use the separate RT proxy for trace
-benchmarks constrained by the 250,000-triangle limit.
+The full scene is the visual sample and the input for current Sponza benchmarks.
+The proxy is available to reproduce the historical benchmark.
