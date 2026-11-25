@@ -138,6 +138,15 @@ fn raa_spherical_probe_irradiance(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f
     let misses = raa_spherical_data[slot + RAA_SPHERICAL_INFO_ROW].w;
     var e = vec3<f32>(0.0);
     for (var k = 0u; k < 24u; k++) {
+        // Faces +X, -X, +Y, -Y, +Z, -Z: no direction of a face whose axis is more than
+        // ~145 degrees from n (axis component below -0.82) can light the receiver from
+        // the probe, so its four patches are skipped (a floor never reads the -Y face).
+        let face = k / 4u;
+        let axis = select(n[face / 2u], -n[face / 2u], (face & 1u) != 0u);
+        if axis < -0.82 {
+            k += 3u;
+            continue;
+        }
         let r0 = bitcast<vec4<f32>>(raa_spherical_data[base + 3u * k]);
         if r0.w >= 0.0 {
             let delta = r0.xyz - p;

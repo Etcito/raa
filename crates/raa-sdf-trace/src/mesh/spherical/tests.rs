@@ -874,7 +874,7 @@ fn snapped_origin_lies_on_the_tolerance_lattice() {
 }
 
 #[test]
-fn view_order_is_bijective_and_shell_ranges_exclude_other_shells() {
+fn view_capture_rank_puts_the_view_cone_first_and_is_a_permutation() {
     for (forward, cos) in [
         ([1.0, 0.0, 0.0], 0.99),
         ([1.0, 1.0, 0.0], 0.75),
@@ -886,18 +886,68 @@ fn view_order_is_bijective_and_shell_ranges_exclude_other_shells() {
         })
         .unwrap();
         let order = ViewOrder::new(&grid, None, forward, cos).unwrap();
-        let total = grid.cells_per_shell() * u32::from(grid.shell_count());
-        for rank in 0..total {
-            assert_eq!(order.rank(&grid, order.key(&grid, rank)), rank);
-        }
-        let ranks: Vec<_> = order.shell_ranges(1..2).into_iter().flatten().collect();
-        assert_eq!(ranks.len() as u32, grid.cells_per_shell());
-        assert!(
-            ranks
-                .into_iter()
-                .all(|rank| order.key(&grid, rank).shell == 1)
-        );
+        let mut ranks: Vec<_> = (0..grid.cells_per_shell())
+            .map(|index| order.capture_rank(&grid, grid.key(index)))
+            .collect();
+        let classes: Vec<_> = ranks.iter().map(|rank| rank.0).collect();
+        ranks.sort_unstable_by_key(|rank| rank.2);
+        assert!(ranks.windows(2).all(|pair| pair[0].2 + 1 == pair[1].2));
+        // Angular rank orders the whole view cone first.
+        assert!(ranks.windows(2).all(|pair| pair[0].0 == 0 || pair[1].0 != 0));
+        assert!(classes.contains(&0));
     }
+}
+
+#[test]
+fn rotating_in_place_never_moves_evicts_or_recaptures_probes() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(
+        &mut scene,
+        &[
+            triangle(1, &facing_x(1.5)),
+            triangle(2, &facing_x(-1.5)),
+            triangle(
+                3,
+                &[[-0.1, -0.1, -5.0], [0.1, -0.1, -5.0], [0.0, 0.1, -5.0]],
+            ),
+            triangle(4, &[[-0.1, -0.1, 5.0], [0.1, -0.1, 5.0], [0.0, 0.1, 5.0]]),
+        ],
+    );
+    // Capacity below the occupied cells: residency must still not follow the view.
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        max_cells: 3,
+        center_probe: true,
+        ..config()
+    })
+    .unwrap();
+    let camera = [0.05, 0.0, 0.0];
+    for _ in 0..8 {
+        scheduler.update(&scene, camera, 0);
+        for job in scheduler.take_jobs_shared(64) {
+            assert!(scheduler.complete(job));
+        }
+    }
+    let snapshot = |scheduler: &SphericalScheduler| {
+        let mut cells: Vec<_> = scheduler.cells().copied().collect();
+        cells.sort_by_key(|cell| cell.key);
+        cells
+    };
+    let before = snapshot(&scheduler);
+    assert_eq!(before.len(), 3);
+    assert!(before.iter().all(|cell| cell.is_ready() && cell.published));
+    scheduler.take_released_slots();
+    let epoch = scheduler.stats().origin_epoch;
+    let mut recaptures = 0;
+    for step in 0..=72 {
+        let angle = step as f32 * std::f32::consts::TAU / 72.0;
+        scheduler.set_view_priority([angle.sin(), 0.0, -angle.cos()], 0.8);
+        scheduler.update(&scene, camera, 0);
+        recaptures += scheduler.take_jobs_shared(64).len();
+    }
+    assert_eq!(snapshot(&scheduler), before);
+    assert_eq!(recaptures, 0);
+    assert!(scheduler.take_released_slots().is_empty());
+    assert_eq!(scheduler.stats().origin_epoch, epoch);
 }
 
 fn reflected_scene() -> MeshTraceScene {

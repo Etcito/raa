@@ -317,23 +317,17 @@ impl SphericalScheduler {
         })
     }
 
-    /// Prioritize columns that can enter the primary view. The cosine is for
-    /// the half-angle of a cone enclosing the view frustum, such as the diagonal FOV.
-    /// A change to the view order preserves the anchor and existing face epochs.
+    /// Prioritize capture of columns that can enter the primary view. The cosine is
+    /// for the half-angle of a cone enclosing the view frustum, such as the diagonal
+    /// FOV. The grid is anchored on world axes and residency is shell-major in world
+    /// order, so a view change only reorders capture: probe positions, slots, valid
+    /// faces and residency never depend on the camera orientation.
     pub fn set_view_priority(&mut self, forward: [f32; 3], half_fov_cos: f32) {
-        let Some(order) =
+        if let Some(order) =
             ViewOrder::new(&self.grid, self.view_order.as_ref(), forward, half_fov_cos)
-        else {
-            return;
-        };
-        self.resident_order = self
-            .cells
-            .keys()
-            .filter(|key| !key.is_center() && !self.reflected_cells.contains(key))
-            .map(|&key| (order.rank(&self.grid, key), key))
-            .collect();
-        self.view_order = Some(order);
-        self.restart_scan();
+        {
+            self.view_order = Some(order);
+        }
     }
 
     /// Replace reflected receiver demand from a current primary-grid snapshot.
@@ -1138,17 +1132,13 @@ impl SphericalScheduler {
         (target > current || target * std::f64::consts::SQRT_2 < current).then_some(quantised)
     }
 
+    /// Residency rank: shell-major in fixed world order, independent of the view.
     fn priority_rank(&self, key: CellKey) -> u32 {
-        self.view_order.as_ref().map_or_else(
-            || self.grid.ordinal(key),
-            |order| order.rank(&self.grid, key),
-        )
+        self.grid.ordinal(key)
     }
 
     fn priority_key(&self, rank: u32) -> CellKey {
-        self.view_order
-            .as_ref()
-            .map_or_else(|| self.grid.key(rank), |order| order.key(&self.grid, rank))
+        self.grid.key(rank)
     }
 
     fn before_capacity_cutoff(&self, rank: u32) -> bool {
@@ -1190,13 +1180,8 @@ impl SphericalScheduler {
                 f64::from(self.grid.radial_shell(i).expect("valid shell").inner) <= max_radius
             })? + 1;
             let shells = u32::from(first)..u32::from(end);
-            let keys = self.view_order.as_ref().map_or_else(
-                || {
-                    let columns = self.grid.cells_per_shell();
-                    [shells.start * columns..shells.end * columns, 0..0]
-                },
-                |order| order.shell_ranges(shells.clone()),
-            );
+            let columns = self.grid.cells_per_shell();
+            let keys = [shells.start * columns..shells.end * columns, 0..0];
             self.dirty = Some(DirtyScan { bounds, keys });
         }
     }
