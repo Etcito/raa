@@ -164,6 +164,7 @@ fn conservative_candidates_keep_zero_scores_and_stable_indices() {
         "candidate_scores[lane] = tile_score(light, near)",
         "vec3<f32>(0.2126, 0.7152, 0.0722)",
         "min(raw, 3.402823466e38)",
+        "if any(light.color_inv_range_sq.rgb != vec3<f32>(0.0)) && tile_reaches(",
     ] {
         assert!(LIGHT_TILES_WGSL.contains(required), "{required}");
     }

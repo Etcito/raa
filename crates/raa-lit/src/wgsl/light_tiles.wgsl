@@ -15,6 +15,9 @@ var<workgroup> farthest_bits: atomic<u32>;
 var<workgroup> qualifying_count: atomic<u32>;
 // Handoff to fixed-network selection: one lane per dense handle-ordered GPU index.
 // Eligibility is independent of score; zero-score conservative candidates survive.
+// A light with zero radiance (authored off: colour x intensity is black) is never listed:
+// raa_local_contribution returns black for it before any other work, so listing it only
+// cost every covered pixel a tile-word and a light-record load per off light.
 var<workgroup> candidate_eligible: array<u32, MAX_LOCAL_LIGHTS>;
 var<workgroup> candidate_scores: array<f32, MAX_LOCAL_LIGHTS>;
 var<workgroup> candidate_indices: array<u32, MAX_LOCAL_LIGHTS>;
@@ -130,7 +133,7 @@ fn light_tiles(@builtin(workgroup_id) group: vec3<u32>,
         let near = tile_world(centre, nearest);
         let far = tile_world(centre, farthest);
         let light = tile_lights[lane];
-        if tile_reaches(light, lo, hi, near, far) {
+        if any(light.color_inv_range_sq.rgb != vec3<f32>(0.0)) && tile_reaches(light, lo, hi, near, far) {
             candidate_eligible[lane] = 1u;
             candidate_scores[lane] = tile_score(light, near);
             atomicAdd(&qualifying_count, 1u);
