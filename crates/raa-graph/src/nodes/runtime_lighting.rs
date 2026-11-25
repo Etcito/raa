@@ -112,6 +112,30 @@ impl NodeFamily for RuntimeLighting {
                 &[][..],
                 Rebuild::None,
             ),
+            (
+                "probeCache",
+                "Cached probes",
+                ParamKind::Int,
+                Some((0.0, 4096.0)),
+                &[][..],
+                Rebuild::Resources,
+            ),
+            (
+                "skySamples",
+                "Sky samples per texel",
+                ParamKind::Int,
+                Some((0.0, 64.0)),
+                &[][..],
+                Rebuild::None,
+            ),
+            (
+                "lightSamples",
+                "Local light samples per texel",
+                ParamKind::Int,
+                Some((0.0, 64.0)),
+                &[][..],
+                Rebuild::None,
+            ),
         ];
         vec![NodeTypeSpec {
             id: SPHERICAL_TYPE,

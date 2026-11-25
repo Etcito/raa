@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 11] = [
+const OPTIONS: [&str; 14] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
@@ -36,6 +36,9 @@ const OPTIONS: [&str; 11] = [
     "captureFaces",
     "captureMs",
     "burstMs",
+    "probeCache",
+    "skySamples",
+    "lightSamples",
 ];
 
 fn invalid(key: &str, reason: &str) -> RaaError {
@@ -127,6 +130,21 @@ fn read_patch(
                     settings.burst_ms = ms as f32;
                 }
             }
+            "probeCache" | "skySamples" | "lightSamples" => {
+                let count = number()?;
+                let max = if name == "probeCache" { 4096.0 } else { 64.0 };
+                if !(0.0..=max).contains(&count) || count.fract() != 0.0 {
+                    return Err(invalid(
+                        &name,
+                        &format!("expected an integer from 0 to {max}"),
+                    ));
+                }
+                match name.as_str() {
+                    "probeCache" => settings.scheduler.cache_cells = count as u32,
+                    "skySamples" => settings.sky_samples = count as u32,
+                    _ => settings.light_samples = count as u32,
+                }
+            }
             "debug" => {
                 settings.debug = match value.as_string().as_deref() {
                     Some("off") => SphericalGiDebug::Off,
@@ -198,6 +216,9 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
     put(&result, "captureFaces", settings.budget.near.into());
     put(&result, "captureMs", settings.capture_ms.into());
     put(&result, "burstMs", settings.burst_ms.into());
+    put(&result, "probeCache", settings.scheduler.cache_cells.into());
+    put(&result, "skySamples", settings.sky_samples.into());
+    put(&result, "lightSamples", settings.light_samples.into());
     result.into()
 }
 
@@ -286,6 +307,9 @@ impl Engine {
                 ),
                 ("faceBudget", stats.face_budget as f64),
                 ("captureGpuMs", f64::from(stats.capture_gpu_ms)),
+                ("cachedCells", scheduler.cached_cells as f64),
+                ("adoptedCells", scheduler.adopted_cells as f64),
+                ("slotBytes", stats.slot_bytes as f64),
             ] {
                 put(&result, name, value.into());
             }

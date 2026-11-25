@@ -385,6 +385,12 @@ pub fn plan() -> crate::plan::GraphPlan {
                         "burstMs".to_string(),
                         crate::catalog::ParamValue::Number(4.0),
                     ),
+                    ("probeCache".to_string(), crate::catalog::ParamValue::Int(0)),
+                    ("skySamples".to_string(), crate::catalog::ParamValue::Int(1)),
+                    (
+                        "lightSamples".to_string(),
+                        crate::catalog::ParamValue::Int(0),
+                    ),
                 ],
                 inputs: vec![],
                 compute: None,

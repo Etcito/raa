@@ -18,6 +18,9 @@ pub(crate) const SPHERICAL_KEYS: &[&str] = &[
     "captureFaces",
     "captureMs",
     "burstMs",
+    "probeCache",
+    "skySamples",
+    "lightSamples",
     "enabled",
 ];
 
@@ -41,6 +44,9 @@ pub(crate) fn spherical_get(settings: SphericalGiSettings, key: &str) -> Option<
         "captureFaces" => ParamValue::Int(i64::from(settings.budget.near)),
         "captureMs" => ParamValue::Number(f64::from(settings.capture_ms)),
         "burstMs" => ParamValue::Number(f64::from(settings.burst_ms)),
+        "probeCache" => ParamValue::Int(i64::from(settings.scheduler.cache_cells)),
+        "skySamples" => ParamValue::Int(i64::from(settings.sky_samples)),
+        "lightSamples" => ParamValue::Int(i64::from(settings.light_samples)),
         "debug" => ParamValue::Enum(
             DEBUG
                 .iter()
@@ -88,6 +94,15 @@ pub(crate) fn spherical_set(
         }
         ("burstMs", ParamValue::Number(value)) if (0.0..=50.0).contains(value) => {
             settings.burst_ms = *value as f32;
+        }
+        ("probeCache", ParamValue::Int(value)) if (0..=4096).contains(value) => {
+            settings.scheduler.cache_cells = *value as u32;
+        }
+        ("skySamples", ParamValue::Int(value)) if (0..=64).contains(value) => {
+            settings.sky_samples = *value as u32;
+        }
+        ("lightSamples", ParamValue::Int(value)) if (0..=64).contains(value) => {
+            settings.light_samples = *value as u32;
         }
         ("debug", ParamValue::Enum(value)) => {
             settings.debug = DEBUG

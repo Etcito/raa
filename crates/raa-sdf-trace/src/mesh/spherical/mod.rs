@@ -39,6 +39,17 @@ pub struct SphericalSchedulerConfig {
     pub origin_tolerance: f32,
     /// Keep a free-space probe at the grid anchor for the inner sphere below clipStart.
     pub center_probe: bool,
+    /// Extra pool slots for published probes that left the grid, lost a rekey collision
+    /// or were evicted (least recently cached first out). A recenter offers them to the
+    /// moved cells again, so walking back reuses them without a recapture.
+    pub cache_cells: u32,
+}
+
+impl SphericalSchedulerConfig {
+    /// GPU slots: resident probes plus the probe cache.
+    pub fn pool_slots(&self) -> u32 {
+        self.max_cells + self.cache_cells
+    }
 }
 
 impl Default for SphericalSchedulerConfig {
@@ -50,6 +61,7 @@ impl Default for SphericalSchedulerConfig {
             cell_queries_per_update: 768,
             origin_tolerance: 0.25,
             center_probe: true,
+            cache_cells: 0,
         }
     }
 }
@@ -126,6 +138,10 @@ pub struct SchedulerStats {
     pub visible_published_cells: u32,
     /// Discovery, reprojection or a dirty rescan still has candidate cells to examine.
     pub discovery_pending: bool,
+    /// Published probes held in the cache, outside the grid lookup.
+    pub cached_cells: u32,
+    /// Cumulative cached probes adopted back into the grid by a recenter.
+    pub adopted_cells: u64,
 }
 
 impl SchedulerStats {
@@ -240,12 +256,18 @@ pub struct SphericalScheduler {
     dirty: Option<DirtyScan>,
     pending_dirty: Option<Bounds>,
     last_cell_queries: u32,
+    /// Probe cache in least-recently-cached order (key = stamp).
+    cache: BTreeMap<u64, Entry>,
+    cache_stamp: u64,
+    adopted: BTreeSet<u32>,
+    adopted_cells: u64,
 }
 
 impl SphericalScheduler {
     pub fn new(config: SphericalSchedulerConfig) -> Result<Self, RaaError> {
         let min_cells = 1 + u32::from(config.center_probe);
         if !(min_cells..=4096).contains(&config.max_cells)
+            || config.cache_cells > 4096
             || config.near_shells > 64
             || !(1..=65536).contains(&config.cell_queries_per_update)
             || !config.origin_tolerance.is_finite()
@@ -266,7 +288,7 @@ impl SphericalScheduler {
             reflected_candidates: Vec::new(),
             reflected_cursor: 0,
             reflected_face_turn: false,
-            free: (0..config.max_cells).collect(),
+            free: (0..config.pool_slots()).collect(),
             released: BTreeSet::new(),
             serial: 0,
             revisions: None,
@@ -279,6 +301,10 @@ impl SphericalScheduler {
             dirty: None,
             pending_dirty: None,
             last_cell_queries: 0,
+            cache: BTreeMap::new(),
+            cache_stamp: 0,
+            adopted: BTreeSet::new(),
+            adopted_cells: 0,
         })
     }
 
@@ -358,6 +384,12 @@ impl SphericalScheduler {
         std::mem::take(&mut self.released)
     }
 
+    /// Slots of cached probes adopted back into the grid since the previous drain;
+    /// their projection is intact, the consumer only restarts their fade-in.
+    pub fn take_adopted_slots(&mut self) -> BTreeSet<u32> {
+        std::mem::take(&mut self.adopted)
+    }
+
     /// Update a scene with sun and environment lighting and no local lights.
     pub fn update(
         &mut self,
@@ -410,6 +442,14 @@ impl SphericalScheduler {
             self.rekey();
         }
         if let Some((old_geometry, old_material, old_light)) = self.revisions {
+            // Cached captures are not tracked per light: any change drops them.
+            if old_geometry != revisions.0
+                || old_material != revisions.1
+                || old_light != revisions.2
+                || !local_changes.is_empty()
+            {
+                self.clear_cache();
+            }
             if old_geometry != revisions.0 {
                 self.clear_reflected_receivers();
                 if old_geometry.wrapping_add(1) == revisions.0 {
@@ -591,15 +631,16 @@ impl SphericalScheduler {
 
     /// Returns false when every slot belongs to the centre probe.
     fn allocate(&mut self, key: CellKey, surface: Option<Surface>, probe: [f32; 3]) -> bool {
-        if self.free.is_empty() {
+        if self.resident_full() {
             let Some((&rank, &displaced)) = self.resident_order.last_key_value() else {
                 return false;
             };
-            self.release(displaced);
+            let entry = self.detach(displaced);
+            self.stash(entry, None);
             // If an edit frees capacity later, rediscover this still-overlapping cell.
             self.discovery.start = self.discovery.start.min(rank);
         }
-        let slot = self.free.pop_first().expect("free or released slot");
+        let slot = self.take_slot();
         self.serial += 1;
         let surface = surface.unwrap_or(Surface {
             position: probe,
@@ -641,11 +682,22 @@ impl SphericalScheduler {
         self.reprojected.clear();
         // A published probe outranks an unpublished one, so a collision never pops a
         // visible probe; among equals the one nearest the new cell centre stays.
-        let mut placed: BTreeMap<CellKey, ((bool, f64), Entry)> = BTreeMap::new();
+        // Cached probes compete like residents; losers return to the cache.
+        let mut placed: BTreeMap<CellKey, ((bool, f64), Option<u64>, Entry)> = BTreeMap::new();
+        let mut leftovers: Vec<(Option<u64>, Entry)> = Vec::new();
         let mut witnesses = Vec::new();
-        for (_, mut entry) in old {
+        let candidates = old
+            .into_values()
+            .map(|entry| (None, entry))
+            .chain(
+                std::mem::take(&mut self.cache)
+                    .into_iter()
+                    .map(|(stamp, entry)| (Some(stamp), entry)),
+            )
+            .collect::<Vec<_>>();
+        for (stamp, mut entry) in candidates {
             let progress = entry.progress;
-            if !progress.key.is_center() {
+            if !progress.key.is_center() && stamp.is_none() {
                 witnesses.push(progress.surface_position);
             }
             let key = self
@@ -653,8 +705,7 @@ impl SphericalScheduler {
                 .probe_key_at(progress.probe)
                 .filter(|key| self.config.center_probe || !key.is_center());
             let Some(key) = key else {
-                self.free.insert(progress.slot);
-                self.released.insert(progress.slot);
+                leftovers.push((stamp, entry));
                 continue;
             };
             let center = self.grid.center(key).expect("rekeyed cell");
@@ -665,21 +716,34 @@ impl SphericalScheduler {
             entry.progress.in_flight_faces = 0;
             entry.tickets = [0; 6];
             let displaced = match placed.get(&key) {
-                Some((best, _)) if *best <= distance => Some(entry),
+                Some((best, _, _)) if *best <= distance => Some((stamp, entry)),
                 _ => placed
-                    .insert(key, (distance, entry))
-                    .map(|(_, entry)| entry),
+                    .insert(key, (distance, stamp, entry))
+                    .map(|(_, stamp, entry)| (stamp, entry)),
             };
-            if let Some(entry) = displaced {
-                self.free.insert(entry.progress.slot);
-                self.released.insert(entry.progress.slot);
-            }
+            leftovers.extend(displaced);
         }
-        for (key, (_, entry)) in placed {
+        // Residency stays bounded: the centre first, then priority rank.
+        let mut placed: Vec<_> = placed.into_iter().collect();
+        placed.sort_by_key(|(key, _)| (!key.is_center(), self.priority_rank(*key)));
+        for (index, (key, (_, stamp, entry))) in placed.into_iter().enumerate() {
+            if index >= self.config.max_cells as usize {
+                leftovers.push((stamp, entry));
+                continue;
+            }
+            if stamp.is_some() {
+                self.adopted.insert(entry.progress.slot);
+                self.adopted_cells += 1;
+            }
             if !key.is_center() {
                 self.resident_order.insert(self.priority_rank(key), key);
             }
             self.cells.insert(key, entry);
+        }
+        // Former residents are the most recent cache entries.
+        leftovers.sort_by_key(|(stamp, _)| stamp.is_none());
+        for (stamp, entry) in leftovers {
+            self.stash(entry, stamp);
         }
         // Old surface witnesses are certain geometry: confirm their cells first.
         self.reprojected = witnesses
@@ -865,7 +929,11 @@ impl SphericalScheduler {
             light_invalidated_faces: self.light_invalidated_faces,
             ..SchedulerStats::default()
         };
-        stats.discovery_pending = !self.discovery.is_empty()
+        stats.cached_cells = self.cache.len() as u32;
+        stats.adopted_cells = self.adopted_cells;
+        // A discovery range blocked by the capacity cutoff has nothing left to admit.
+        stats.discovery_pending = (!self.discovery.is_empty()
+            && self.before_capacity_cutoff(self.discovery.start))
             || !self.reprojected.is_empty()
             || self.dirty.is_some()
             || self.pending_dirty.is_some();
@@ -902,9 +970,9 @@ impl SphericalScheduler {
     }
 
     fn restart(&mut self) {
+        self.clear_cache();
         for entry in std::mem::take(&mut self.cells).into_values() {
-            self.free.insert(entry.progress.slot);
-            self.released.insert(entry.progress.slot);
+            self.free_slot(entry.progress.slot);
         }
         self.resident_order.clear();
         self.reflected_cells.clear();
@@ -920,12 +988,59 @@ impl SphericalScheduler {
     }
 
     fn release(&mut self, key: CellKey) {
+        let entry = self.detach(key);
+        self.free_slot(entry.progress.slot);
+    }
+
+    fn detach(&mut self, key: CellKey) -> Entry {
         let entry = self.cells.remove(&key).expect("resident cell");
         if !key.is_center() && !self.reflected_cells.remove(&key) {
             self.resident_order.remove(&self.priority_rank(key));
         }
-        self.free.insert(entry.progress.slot);
+        entry
+    }
+
+    fn free_slot(&mut self, slot: u32) {
+        self.free.insert(slot);
+        self.released.insert(slot);
+    }
+
+    fn resident_full(&self) -> bool {
+        self.cells.len() >= self.config.max_cells as usize
+    }
+
+    /// A free slot, or the slot of the least recently cached probe.
+    fn take_slot(&mut self) -> u32 {
+        if let Some(slot) = self.free.pop_first() {
+            return slot;
+        }
+        let (_, entry) = self.cache.pop_first().expect("free or cached slot");
         self.released.insert(entry.progress.slot);
+        entry.progress.slot
+    }
+
+    /// Keep a complete, published probe in the cache (its old stamp when it came from
+    /// there), otherwise free its slot. The oldest cached probes leave first.
+    fn stash(&mut self, entry: Entry, stamp: Option<u64>) {
+        if self.config.cache_cells == 0 || !entry.progress.published || !entry.progress.is_ready() {
+            self.free_slot(entry.progress.slot);
+            return;
+        }
+        let stamp = stamp.unwrap_or_else(|| {
+            self.cache_stamp += 1;
+            self.cache_stamp
+        });
+        self.cache.insert(stamp, entry);
+        while self.cache.len() > self.config.cache_cells as usize {
+            let (_, old) = self.cache.pop_first().expect("cached probe");
+            self.free_slot(old.progress.slot);
+        }
+    }
+
+    fn clear_cache(&mut self) {
+        for (_, entry) in std::mem::take(&mut self.cache) {
+            self.free_slot(entry.progress.slot);
+        }
     }
 
     fn invalidate_geometry(&mut self, bounds: &[Bounds]) -> bool {
@@ -977,7 +1092,7 @@ impl SphericalScheduler {
     }
 
     fn before_capacity_cutoff(&self, rank: u32) -> bool {
-        !self.free.is_empty()
+        !self.resident_full()
             || self
                 .resident_order
                 .last_key_value()

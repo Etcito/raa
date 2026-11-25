@@ -36,6 +36,7 @@ const MOMENT_ROWS: usize = 16 * FACE_COUNT / 2;
 const SLOT_ROWS: usize = LEGACY_SLOT_ROWS + PATCH_ROWS + MOMENT_ROWS + 1;
 const MAX_FACES_PER_BUDGET: u32 = 4096;
 pub const MAX_CAPTURE_MS: f32 = 50.0;
+pub const MAX_CAPTURE_SAMPLES: u32 = 64;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
@@ -59,6 +60,11 @@ pub struct SphericalGiSettings {
     /// Capture target while visible probes are missing or undiscovered (after open or
     /// a camera move); 0 uses `capture_ms`.
     pub burst_ms: f32,
+    /// Cosine bounce rays per hit texel toward the sky (0 = none).
+    pub sky_samples: u32,
+    /// Local lights sampled per hit texel, stratified with weight count / samples;
+    /// 0 evaluates every light (one shadow ray each). The sun is always one shadow ray.
+    pub light_samples: u32,
     pub intensity: f32,
     pub debug: SphericalGiDebug,
     /// Bit 0 selects sky, bit 1 sun and bit 2 other.
@@ -73,6 +79,8 @@ impl Default for SphericalGiSettings {
             budget: FaceBudget { near: 24, far: 12 },
             capture_ms: 0.0,
             burst_ms: 0.0,
+            sky_samples: 1,
+            light_samples: 0,
             intensity: 1.0,
             debug: SphericalGiDebug::Off,
             channels: 7,
@@ -89,11 +97,13 @@ impl SphericalGiSettings {
             || self.budget.far > MAX_FACES_PER_BUDGET
             || !(0.0..=MAX_CAPTURE_MS).contains(&self.capture_ms)
             || !(0.0..=MAX_CAPTURE_MS).contains(&self.burst_ms)
+            || self.sky_samples > MAX_CAPTURE_SAMPLES
+            || self.light_samples > MAX_CAPTURE_SAMPLES
         {
             return Err(RaaError::FrameGraph {
                 code: "gi.spherical.invalid_settings",
                 message: format!(
-                    "expected intensity in [0, 16], channel mask in [0, 7], face budgets in [0, {MAX_FACES_PER_BUDGET}] and capture times in [0, {MAX_CAPTURE_MS}] ms"
+                    "expected intensity in [0, 16], channel mask in [0, 7], face budgets in [0, {MAX_FACES_PER_BUDGET}], capture times in [0, {MAX_CAPTURE_MS}] ms and sample counts in [0, {MAX_CAPTURE_SAMPLES}]"
                 ),
             });
         }
@@ -116,6 +126,8 @@ pub struct SphericalGiStats {
     pub face_budget: u32,
     pub burst: bool,
     pub capture_gpu_ms: f32,
+    /// Bytes per pool slot (capture faces, slot rows, work entries), for pool sizing.
+    pub slot_bytes: u64,
 }
 
 /// Readback from one fully submitted, current cubemap.
@@ -362,7 +374,7 @@ impl FeaturePass for SphericalPass {
         };
         let mut mesh = self.mesh.borrow_mut();
         let light_revision = light_revision(ctx.lighting, view.light, mesh.sky_diffuse);
-        let capacity = settings.scheduler.max_cells;
+        let capacity = settings.scheduler.pool_slots();
         if self.gpu.as_ref().is_none_or(|gpu| gpu.capacity != capacity) {
             self.gpu = Some(SphericalGpu::new(ctx.gpu, capacity, grid_revision));
         }
@@ -413,6 +425,10 @@ impl FeaturePass for SphericalPass {
             .retain(|sample| captured_face_current(scheduler, sample.job));
         for slot in scheduler.take_released_slots() {
             gpu.ready_at[slot as usize] = None;
+        }
+        // An adopted cached probe keeps its projection and fades in again.
+        for slot in scheduler.take_adopted_slots() {
+            gpu.ready_at[slot as usize] = Some((ctx.frame as u32).max(1));
         }
         gpu.update_lookup(ctx.gpu, scheduler, settings, ctx.frame as u32);
         ctx.lighting
@@ -477,6 +493,7 @@ impl FeaturePass for SphericalPass {
                 mesh.geometry.count(),
                 mesh.sky_diffuse,
                 state.settings.channels,
+                [state.settings.sky_samples, state.settings.light_samples],
             );
         }
         self.staged.recorded = true;
@@ -559,6 +576,7 @@ impl FeaturePass for SphericalPass {
             face_budget: gpu.face_budget,
             burst: gpu.burst,
             capture_gpu_ms: gpu.clock.as_ref().map_or(0.0, |clock| clock.last_ms as f32),
+            slot_bytes: gpu.bytes() / u64::from(gpu.capacity.max(1)),
         });
     }
 }
@@ -806,6 +824,7 @@ impl SphericalGpu {
         triangle_count: u32,
         sky_diffuse: f32,
         channels: u32,
+        samples: [u32; 2],
     ) {
         let device = ctx.gpu.device();
         self.work_bytes.clear();
@@ -858,8 +877,9 @@ impl SphericalGpu {
             .expect("last shell")
             .outer;
         write_words(&mut options, [sky_diffuse.to_bits(), end.to_bits(), 0, 0]);
-        // The shared local-light integrator uses its one-tap area estimator for this capture.
-        write_words(&mut options, [1, 0, 0, 0]);
+        // The shared local-light integrator uses its one-tap area estimator for this capture;
+        // y, z: sky and local-light samples per hit texel.
+        write_words(&mut options, [1, samples[0], samples[1], 0]);
         let queue = ctx.gpu.queue();
         queue.write_buffer(&self.options, 0, &options);
         queue.write_buffer(&self.work, 0, &self.work_bytes);
@@ -869,12 +889,15 @@ impl SphericalGpu {
             .as_ref()
             .filter(|clock| clock.pending.is_none() && !jobs.is_empty());
         let last_pass = if projected == 0 { 0 } else { 2 };
+        // WebGPU rejects timestampWrites that name neither index, so a middle pass gets none.
         let stamps = |pass: usize| {
-            clock.map(|clock| wgpu::ComputePassTimestampWrites {
-                query_set: &clock.queries,
-                beginning_of_pass_write_index: (pass == 0).then_some(0),
-                end_of_pass_write_index: (pass == last_pass).then_some(1),
-            })
+            clock
+                .filter(|_| pass == 0 || pass == last_pass)
+                .map(|clock| wgpu::ComputePassTimestampWrites {
+                    query_set: &clock.queries,
+                    beginning_of_pass_write_index: (pass == 0).then_some(0),
+                    end_of_pass_write_index: (pass == last_pass).then_some(1),
+                })
         };
         if !jobs.is_empty() {
             let capture_group = device.create_bind_group(&wgpu::BindGroupDescriptor {

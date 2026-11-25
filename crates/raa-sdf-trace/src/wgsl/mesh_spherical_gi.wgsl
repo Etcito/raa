@@ -105,23 +105,54 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
             var seed = (work.ids.x * 747796405u + work.ids.y * 277803737u + px) ^ 0x85ebca6bu;
             sun_rgb = mesh_sun_at_hit(p, ng, n, -direction, material, true);
             let shadow_origin = p + ng * (2.0 * EPS);
-            for (var i = 0u; i < min(256u, frame.light_info.x); i++) {
-                // A change to dense light order must not resample unaffected lights.
-                var light_seed = seed;
-                let contribution = mesh_local_at_hit(i, shadow_origin, p, ng, n, -direction,
-                    material, &light_seed, true, false);
-                if any(contribution > vec3<f32>(0.0)) {
-                    atomicOr(&spherical_light_masks[i >> 5u], 1u << (i & 31u));
-                    other_rgb += contribution;
+            let light_count = min(256u, frame.light_info.x);
+            let light_samples = options[3].z;
+            if light_samples == 0u || light_samples >= light_count {
+                for (var i = 0u; i < light_count; i++) {
+                    // A change to dense light order must not resample unaffected lights.
+                    var light_seed = seed;
+                    let contribution = mesh_local_at_hit(i, shadow_origin, p, ng, n, -direction,
+                        material, &light_seed, true, false);
+                    if any(contribution > vec3<f32>(0.0)) {
+                        atomicOr(&spherical_light_masks[i >> 5u], 1u << (i & 31u));
+                        other_rgb += contribution;
+                    }
+                }
+            } else {
+                // Stratified subset: one light per stride from a random start, weighted
+                // by the stride. The dependency mask stays conservative: every light
+                // whose range reaches the hit, sampled or not.
+                let stride = f32(light_count) / f32(light_samples);
+                let start = random(&seed);
+                for (var j = 0u; j < light_samples; j++) {
+                    let i = min(light_count - 1u, u32((f32(j) + start) * stride));
+                    var light_seed = seed;
+                    other_rgb += stride * mesh_local_at_hit(i, shadow_origin, p, ng, n, -direction,
+                        material, &light_seed, true, false);
+                }
+                for (var i = 0u; i < light_count; i++) {
+                    let light = lights[i];
+                    let reach = light.kind >= 2u
+                        || distance(light.position_range.xyz, p) < light.position_range.w;
+                    if reach && any(light.radiance.rgb > vec3<f32>(0.0)) {
+                        atomicOr(&spherical_light_masks[i >> 5u], 1u << (i & 31u));
+                    }
                 }
             }
 
-            // One cosine sample estimates sky reflected by the hit surface.
-            let u = random(&seed);
-            let phi = 2.0 * PI * random(&seed);
-            let bounce = basis(n) * vec3<f32>(sqrt(u) * cos(phi), sqrt(u) * sin(phi), sqrt(1.0 - u));
-            if dot(ng, bounce) > 0.0 && closest(Ray(p + ng * (2.0 * EPS), bounce), limit, true).object == MISS {
-                sky_rgb += diffuse(material) * spherical_sky(bounce);
+            // Cosine samples estimate sky reflected by the hit surface.
+            let sky_samples = options[3].y;
+            var sky_sum = vec3<f32>(0.0);
+            for (var k = 0u; k < sky_samples; k++) {
+                let u = random(&seed);
+                let phi = 2.0 * PI * random(&seed);
+                let bounce = basis(n) * vec3<f32>(sqrt(u) * cos(phi), sqrt(u) * sin(phi), sqrt(1.0 - u));
+                if dot(ng, bounce) > 0.0 && closest(Ray(p + ng * (2.0 * EPS), bounce), limit, true).object == MISS {
+                    sky_sum += spherical_sky(bounce);
+                }
+            }
+            if sky_samples > 0u {
+                sky_rgb += diffuse(material) * sky_sum / f32(sky_samples);
             }
         }
     }

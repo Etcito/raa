@@ -677,6 +677,83 @@ fn shared_capture_pool_serves_visible_probes_first_then_periphery_then_behind() 
     assert!(jobs.iter().all(|job| job.key == key(0, CubeFace::PosZ)));
 }
 
+#[test]
+fn probe_cache_keeps_probes_that_leave_the_grid_and_a_walk_back_adopts_them() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(&mut scene, &[triangle(1, &facing_x(-1.5))]);
+    let walk = |cache_cells| {
+        let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+            cache_cells,
+            ..config()
+        })
+        .unwrap();
+        for _ in 0..4 {
+            scheduler.update(&scene, [0.0; 3], 0);
+            for job in scheduler.take_jobs_shared(64) {
+                assert!(scheduler.complete(job));
+            }
+        }
+        let probe = *scheduler.cells().next().expect("captured probe");
+        assert!(probe.published && probe.is_ready());
+        scheduler.take_released_slots();
+        // Walk 12 m away: the wall leaves the 8 m grid.
+        scheduler.update(&scene, [12.0, 0.0, 0.0], 0);
+        assert!(scheduler.cells().all(|cell| cell.probe != probe.probe));
+        let away = scheduler.stats();
+        // Walk back: the cached probe is adopted with its slot and faces.
+        scheduler.update(&scene, [0.0; 3], 0);
+        let back = scheduler
+            .cells()
+            .find(|cell| cell.probe == probe.probe)
+            .copied();
+        (
+            away,
+            back,
+            scheduler.take_adopted_slots(),
+            scheduler.take_released_slots(),
+            probe,
+        )
+    };
+    let (away, back, adopted, released, probe) = walk(8);
+    assert_eq!(away.cached_cells, 1);
+    let back = back.expect("adopted probe");
+    assert_eq!(
+        (back.slot, back.ready_faces, back.published),
+        (probe.slot, ALL_FACES, true)
+    );
+    assert!(adopted.contains(&probe.slot));
+    assert!(!released.contains(&probe.slot));
+
+    // Without a cache the probe is released and comes back unpublished.
+    let (away, back, adopted, released, probe) = walk(0);
+    assert_eq!(away.cached_cells, 0);
+    // Rediscovery places a fresh probe at the same point; it must be captured again.
+    assert!(back.is_none_or(|cell| !cell.published && cell.ready_faces == 0));
+    assert!(adopted.is_empty());
+    assert!(released.contains(&probe.slot));
+}
+
+#[test]
+fn a_light_change_clears_the_probe_cache() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(&mut scene, &[triangle(1, &facing_x(-1.5))]);
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        cache_cells: 8,
+        ..config()
+    })
+    .unwrap();
+    for _ in 0..4 {
+        scheduler.update(&scene, [0.0; 3], 0);
+        for job in scheduler.take_jobs_shared(64) {
+            assert!(scheduler.complete(job));
+        }
+    }
+    scheduler.update(&scene, [12.0, 0.0, 0.0], 0);
+    assert_eq!(scheduler.stats().cached_cells, 1);
+    scheduler.update(&scene, [12.0, 0.0, 0.0], 1);
+    assert_eq!(scheduler.stats().cached_cells, 0);
+}
+
 fn center_config() -> SphericalSchedulerConfig {
     SphericalSchedulerConfig {
         center_probe: true,
@@ -975,4 +1052,101 @@ fn reordered_identical_reflected_feedback_does_not_requery_the_bvh() {
     ));
     scheduler.update(&scene, origin, 1);
     assert_eq!(scheduler.stats().last_cell_queries, 0);
+}
+
+/// CPU cost of discovery and probe placement on a real scene. Run with
+/// `SPHERICAL_BENCH_TRIANGLES=<N x 3 x 3 float32 file> cargo test --release -- --ignored bench_`.
+#[test]
+#[ignore]
+fn bench_scheduler_update_on_triangle_file() {
+    let Ok(path) = std::env::var("SPHERICAL_BENCH_TRIANGLES") else {
+        return;
+    };
+    let bytes = std::fs::read(path).unwrap();
+    let positions: Vec<[f32; 3]> = bytes
+        .chunks_exact(12)
+        .map(|c| {
+            std::array::from_fn(|i| f32::from_le_bytes(c[4 * i..4 * i + 4].try_into().unwrap()))
+        })
+        .collect();
+    let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
+    let indices: Vec<u32> = (0..positions.len() as u32).collect();
+    let mut scene = MeshTraceScene::default();
+    let start = std::time::Instant::now();
+    scene
+        .geometry
+        .update(
+            &[MeshInput {
+                key: 1,
+                mesh: 1,
+                positions: &positions,
+                normals: &normals,
+                colors: None,
+                uvs: None,
+                indices: &indices,
+                material: 0,
+                world: Mat4::IDENTITY,
+            }],
+            8 << 30,
+            0,
+        )
+        .unwrap();
+    eprintln!(
+        "bvh {} triangles {:?}",
+        positions.len() / 3,
+        start.elapsed()
+    );
+    let config = SphericalSchedulerConfig {
+        grid: SphericalGridConfig {
+            angular_resolution: 8,
+            radial_growth: 0.3f32.exp2(),
+            clip_start: 1.0,
+            z_max: 12.0,
+            ..SphericalGridConfig::default()
+        },
+        max_cells: 2048,
+        cache_cells: 1024,
+        ..SphericalSchedulerConfig::default()
+    };
+    let views = [
+        ([-8.807f32, 1.592, -0.858], [-3.004f32, 2.762, 0.237]),
+        ([2.703, 1.355, 2.111], [-9.668, 2.493, -2.255]),
+    ];
+    let mut scheduler = SphericalScheduler::new(config).unwrap();
+    for (label, (position, target)) in [("V1", views[0]), ("V2", views[1]), ("V1 again", views[0])]
+    {
+        let forward = std::array::from_fn(|i| target[i] - position[i]);
+        scheduler.set_view_priority(forward, 0.66);
+        let mut total = std::time::Duration::ZERO;
+        for frame in 0..400 {
+            let start = std::time::Instant::now();
+            scheduler.update(&scene, position, 0);
+            let jobs = scheduler.take_jobs_shared(144);
+            let spent = start.elapsed();
+            total += spent;
+            for job in jobs {
+                scheduler.complete(job);
+            }
+            let stats = scheduler.stats();
+            if frame < 8 || !stats.visible_missing() {
+                eprintln!(
+                    "{label} frame {frame}: {:?} cells {} visible {}/{} queries {} discovery {}",
+                    spent,
+                    stats.cells,
+                    stats.visible_published_cells,
+                    stats.visible_cells,
+                    stats.last_cell_queries,
+                    stats.discovery_pending
+                );
+            }
+            if !stats.visible_missing() {
+                eprintln!(
+                    "{label}: visible valid after {} updates, CPU {:?}",
+                    frame + 1,
+                    total
+                );
+                break;
+            }
+        }
+    }
 }

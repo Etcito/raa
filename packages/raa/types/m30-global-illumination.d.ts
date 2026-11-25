@@ -330,6 +330,16 @@ export interface SphericalGiSettings {
   captureMs: number;
   /** Capture target while visible probes are missing (after open or a camera move), 0 to 50. Defaults to 0 (= captureMs). */
   burstMs: number;
+  /**
+   * Integer from 0 to 4096: extra pool slots that keep published probes which left the grid,
+   * lost a rekey collision or were evicted; a recenter adopts them back without recapture.
+   * Cleared by any light, material or geometry change. Defaults to 0.
+   */
+  probeCache: number;
+  /** Integer from 0 to 64: cosine bounce rays toward the sky per captured hit. Defaults to 1. */
+  skySamples: number;
+  /** Integer from 0 to 64: local lights sampled per captured hit (stratified); 0 = every light. Defaults to 0. */
+  lightSamples: number;
 }
 
 export interface SphericalGiStats {
@@ -366,6 +376,10 @@ export interface SphericalGiStats {
   /** Faces issued by the latest frame, and the latest measured capture GPU time (0 before a sample). */
   faceBudget: number;
   captureGpuMs: number;
+  /** Probes held in the probe cache, cumulative cached probes adopted back, and bytes per pool slot. */
+  cachedCells: number;
+  adoptedCells: number;
+  slotBytes: number;
   /** Revision of the global lighting inputs, encoded as hexadecimal. */
   lightRevision: string;
   /** World-space grid anchor retained across sub-threshold camera movement. */
