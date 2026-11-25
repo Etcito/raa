@@ -41,9 +41,9 @@ let gridArgs;
 if (gridDiffuse) {
   if (!headful) throw new Error('Grid diffuse capture requires --headful');
   const input = path.resolve(comparison);
-  const { scene, mode, stride, captureRows, size, checkpointDirectory } = JSON.parse(await readFile(input, 'utf8'));
-  gridArgs = { scene, mode, stride, captureRows, size };
-  if (scene !== 'cornell' || mode === 'learned') {
+  const { scene, mode, stride, captureRows, size, timingStudy, checkpointDirectory } = JSON.parse(await readFile(input, 'utf8'));
+  gridArgs = { scene, mode, stride, captureRows, size, timingStudy };
+  if (scene !== 'cornell' || mode === 'learned' || timingStudy) {
     if (typeof checkpointDirectory !== 'string') throw new Error('Reserved replay requires a recorded checkpoint directory');
     const root = path.resolve(path.dirname(input), checkpointDirectory);
     const [weights, manifestBytes, freezeText] = await Promise.all([
@@ -59,7 +59,7 @@ if (gridDiffuse) {
       throw new Error('Reserved capture does not match its recorded checkpoint freeze');
     }
     console.log(`Frozen checkpoint before reserved replay ${checkpointSha256} at ${freeze.frozenAtUtc}`);
-    Object.assign(gridArgs, { checkpointSha256, checkpointBase64: mode === 'learned' ? weights.toString('base64') : undefined });
+    Object.assign(gridArgs, { checkpointSha256, checkpointBase64: mode === 'learned' || timingStudy ? weights.toString('base64') : undefined });
   }
 }
 

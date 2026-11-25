@@ -201,7 +201,7 @@ export async function captureGridDiffuseReplay({ target, engine, fixture }, {
   }
 }
 
-export async function captureGalleryGridDiffuse({ target, canvas, raa }, args = {}) {
+async function captureGalleryMode({ target, canvas, raa }, args) {
   setCanvasSize(canvas, ...(args.size ?? defaultSize));
   const engine = await raa.createEngine(canvas, { msaa: 1, allowSoftware: false, powerPreference: 'high-performance' });
   try {
@@ -210,4 +210,28 @@ export async function captureGalleryGridDiffuse({ target, canvas, raa }, args = 
   } finally {
     engine.dispose();
   }
+}
+
+export async function captureGalleryGridDiffuse(context, args = {}) {
+  if (!args.timingStudy) return captureGalleryMode(context, args);
+  const modes = ['legacy', 'analytic-directional', 'learned', 'learned', 'analytic-directional', 'legacy'];
+  const deadline = context.target.performance.now() + (args.remainingMs ?? 280000);
+  const runs = [];
+  for (const mode of modes) {
+    const remainingMs = deadline - context.target.performance.now();
+    if (remainingMs <= 0) throw new Error('Matched grid diffuse timing study timed out');
+    const { json } = await captureGalleryMode(context, { ...args, mode, captureRows: false, remainingMs });
+    if (runs.some(run => run.tapeSha256 !== json.tapeSha256 || run.scene.geometrySha256 !== json.scene.geometrySha256)) {
+      throw new Error('Timing conditions changed across cache routes');
+    }
+    runs.push(json);
+  }
+  const first = runs[0];
+  return {
+    json: { format: 'raa.grid-diffuse-gpu-timing/1', source: first.source, scene: first.scene,
+      checkpointSha256: args.checkpointSha256, tapeSha256: first.tapeSha256, size: first.sceneSize,
+      condition: 'Warmed interleaved real-frame renderer GPU timestamps, teacher capture disabled',
+      simulationHz: first.fixedHz, frames: [], runs },
+    files: [],
+  };
 }
