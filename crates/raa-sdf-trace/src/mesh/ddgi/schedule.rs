@@ -1,7 +1,8 @@
 //! Which probe slots a frame updates, in the order a viewer notices: probes whose influence
-//! reaches the view frustum first (invalid, then young, nearest / largest on screen first), then
-//! the periphery, then the probes behind the camera, and only then refreshes of converged probes
-//! (stalest first, visible first). A scroll resets the age of the slots that changed probe, so
+//! reaches the view frustum first (invalid, then barely updated, nearest / largest on screen
+//! first), then the periphery, then the probes behind the camera; then the same zones finish
+//! their convergence; and only then refreshes of converged probes (stalest first, a probe in the
+//! frustum four times as often as one outside it, which is still refreshed). A scroll resets the age of the slots that changed probe, so
 //! newly scrolled-in visible probes preempt every refresh.
 //!
 //! Cascades share one slot space (cascade k owns slots `offset_k..offset_k + probes_k`) and one
@@ -105,6 +106,21 @@ pub(super) struct Schedule {
 }
 
 const CLASS_SHIFT: u32 = 40;
+/// Updates after which a probe is close to its value (with the change-shortened hysteresis a
+/// probe invalidated at age 2 keeps under 5% of its old value after 6 more updates).
+const QUICK_AGE: u16 = 8;
+/// First class of the probes finishing their convergence, and of the converged ones.
+const CLASS_FINISH: u64 = 6;
+const CLASS_REFRESH: u64 = 9;
+
+/// A converged probe in the frustum is refreshed this many times as often as one outside it.
+const REFRESH_BIAS: u64 = 4;
+
+/// Whether a key is a probe in the frustum.
+fn key_visible(key: u64) -> bool {
+    let class = key >> CLASS_SHIFT;
+    matches!(class, 0 | 1) || class == CLASS_FINISH || (class == CLASS_REFRESH && key & 1 == 0)
+}
 
 /// Cells from an open side of a cascade where its lookup weight reaches one (the band starts at
 /// half a cell): `BAND_START + BAND_WIDTH`, plus the largest surface bias (0.4 cell) as margin.
@@ -342,13 +358,26 @@ impl Schedule {
             }
             let d = (0..3).map(|i| (p[i] - eye[i]).powi(2)).sum::<f32>().sqrt();
             let near = ((d * 100.0) as u64).min((1 << 20) - 1);
+            // Classes, in update order: 0-5 invalid then barely updated probes (fewer than
+            // QUICK_AGE updates: still visibly wrong), frustum, periphery, elsewhere; 6-8 the same
+            // zones finishing their convergence; 9 refreshes of converged probes. A probe
+            // behind the camera gets its first updates before a visible one gets its last: a
+            // sudden turn after a lighting change finds it close to right.
             let (class, metric) = if age >= converge_age {
                 let stale = u64::from(self.frame.wrapping_sub(self.last[slot as usize]));
-                (6 + zone.min(1), (1u64 << 32).saturating_sub(stale))
+                // Stalest first; a probe in the frustum counts its staleness REFRESH_BIAS times, so
+                // the others are still refreshed, that much less often. Bit 0: outside the frustum.
+                let weighted = stale * if zone == 0 { REFRESH_BIAS } else { 1 };
+                (
+                    CLASS_REFRESH,
+                    ((1u64 << 34).saturating_sub(weighted) << 1) | zone.min(1),
+                )
             } else if age == 0 {
                 (zone * 2, near)
-            } else {
+            } else if age < QUICK_AGE.min(converge_age) {
                 (zone * 2 + 1, (u64::from(age) << 20) | near)
+            } else {
+                (CLASS_FINISH + zone, (u64::from(age) << 20) | near)
             };
             keys.push(((class << CLASS_SHIFT) | metric, slot));
         };
@@ -366,7 +395,10 @@ impl Schedule {
         }
         self.bases = Some(bases);
         self.keys = keys;
-        let urgent = self.keys.iter().any(|&(key, _)| key >> CLASS_SHIFT <= 1);
+        let urgent = self.keys.iter().any(|&(key, _)| {
+            let class = key >> CLASS_SHIFT;
+            class <= 1 || class == CLASS_FINISH
+        });
         let take = (if urgent { burst } else { budget }).min(self.keys.len() as u32) as usize;
         if take > 0 && take < self.keys.len() {
             self.keys.select_nth_unstable(take - 1);
@@ -409,7 +441,7 @@ impl Schedule {
                 } else if slot >= self.cascades[0].probes {
                     2
                 } else {
-                    usize::from(!matches!(key >> CLASS_SHIFT, 0 | 1 | 6))
+                    usize::from(!key_visible(key))
                 };
                 let frames = self.frame.wrapping_sub(self.last[i]).max(1);
                 let bucket = (31 - frames.leading_zeros() as usize).min(PERIOD_BUCKETS - 1);
@@ -419,8 +451,7 @@ impl Schedule {
         }
         // Visibility after this frame's updates.
         for &(key, slot) in &self.keys {
-            let class = key >> CLASS_SHIFT;
-            if class == 0 || class == 1 || class == 6 {
+            if key_visible(key) {
                 seen.valid += u32::from(self.age[slot as usize] > 0);
                 seen.converged += u32::from(self.effective_age(slot as usize) >= converge_age);
             }
