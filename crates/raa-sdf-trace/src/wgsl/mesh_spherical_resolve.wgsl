@@ -27,6 +27,8 @@ fn spherical_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let p = spherical_resolve_world((vec2<f32>(pixel) + 0.5) / vec2<f32>(full), z);
     let n = normalize((frame.inv_view * vec4<f32>(normal_view, 0.0)).xyz);
+    let trace = raa_spherical_data[6].w;
+    raa_spherical_tracing = trace != 0u && id.x + 1u == (trace & 0xffffu) && id.y + 1u == (trace >> 16u);
     let distance = length(frame.camera_pos.xyz - p);
     let result = raa_spherical_evaluate(p, n);
     // xyz: rgb (f32); w: camera distance (f32 top 16 bits), blend weight (8 bits),

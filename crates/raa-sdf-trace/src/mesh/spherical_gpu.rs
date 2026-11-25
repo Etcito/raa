@@ -113,6 +113,12 @@ pub struct SphericalGiSettings {
     /// probes' visibility, and the probes' sun visibility replaces the far shadow.
     pub sphere_direct: bool,
     pub direct_sun_range: f32,
+    /// Experimental lookup (user sketch): a receiver uses the probes on the side its normal
+    /// faces, weighted by a compact distance kernel, instead of the trilinear cell corners.
+    pub front_probes: bool,
+    /// Diagnostic: resolve texel traced by the lookup, x + 1 | (y + 1) << 16 (0 = off);
+    /// its rows are read back into `SphericalGiState::trace`.
+    pub trace_texel: u32,
     pub intensity: f32,
     pub debug: SphericalGiDebug,
     /// Bit 0 selects sky, bit 1 sun and bit 2 other.
@@ -146,6 +152,8 @@ impl Default for SphericalGiSettings {
             parallax_range: 0.0,
             sphere_direct: false,
             direct_sun_range: 12.0,
+            front_probes: false,
+            trace_texel: 0,
             intensity: 1.0,
             debug: SphericalGiDebug::Off,
             channels: 7,
@@ -263,6 +271,8 @@ pub struct SphericalGiState {
     probe_requested: bool,
     probe: Option<Probe>,
     probe_result: Option<(FaceIdentity, SphericalGiProbe)>,
+    trace_pending: Option<(Buffer, Receiver<Option<Vec<u8>>>)>,
+    trace_result: Option<Vec<u32>>,
 }
 
 impl SphericalGiState {
@@ -292,6 +302,26 @@ impl SphericalGiState {
 
     pub fn stats(&self) -> Option<SphericalGiStats> {
         self.stats
+    }
+
+    /// The last diagnostic trace rows read back (settings.trace_texel), as u32 words.
+    pub fn trace(&mut self) -> Option<Vec<u32>> {
+        if let Some((_, result)) = &self.trace_pending {
+            match result.try_recv() {
+                Ok(bytes) => {
+                    self.trace_result = bytes.map(|bytes| {
+                        bytes
+                            .chunks_exact(4)
+                            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                            .collect()
+                    });
+                    self.trace_pending = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.trace_pending = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        self.trace_result.clone()
     }
 
     pub fn probe(&mut self) -> Option<SphericalGiProbe> {
@@ -779,6 +809,12 @@ impl FeaturePass for SphericalPass {
             let probe = gpu.record_probe(ctx, id, cell.probe, cell.light_hash, light_ids);
             state.probe = Some(probe);
         }
+        if state.settings.trace_texel != 0 {
+            state.trace();
+            if state.trace_pending.is_none() {
+                state.trace_pending = gpu.record_trace(ctx);
+            }
+        }
         Ok(())
     }
 
@@ -1232,6 +1268,39 @@ impl SphericalGpu {
         pass.dispatch_workgroups(1, 1, 1);
     }
 
+    fn record_trace(&self, ctx: &mut RecordCtx<'_>) -> Option<(Buffer, Receiver<Option<Vec<u8>>>)> {
+        let (width, height) = self.screen?;
+        let first = self.resolve_first_row() + (width * height) as usize;
+        if 16 * (first + TRACE_ROWS) as u64 > self.lookup.size() {
+            return None;
+        }
+        let readback = buffer(
+            ctx.gpu.device(),
+            "gi.spherical.trace",
+            16 * TRACE_ROWS as u64,
+            Usage::MAP_READ | Usage::COPY_DST,
+        );
+        ctx.encoder.copy_buffer_to_buffer(
+            &self.lookup,
+            16 * first as u64,
+            &readback,
+            0,
+            16 * TRACE_ROWS as u64,
+        );
+        let (send, result) = sync_channel(1);
+        let mapped = readback.clone();
+        ctx.encoder
+            .map_buffer_on_submit(&readback, wgpu::MapMode::Read, .., move |loaded| {
+                let bytes = loaded.ok().and_then(|()| {
+                    let data = mapped.get_mapped_range(..).ok().map(|bytes| bytes.to_vec());
+                    mapped.unmap();
+                    data
+                });
+                let _ = send.send(bytes);
+            });
+        Some((readback, result))
+    }
+
     fn record_resolve(&self, ctx: &mut RecordCtx<'_>, frame: &Buffer) {
         let Some((width, height)) = self.screen else {
             return;
@@ -1417,6 +1486,10 @@ impl SphericalGpu {
         if settings.sphere_direct {
             rows[4][3] = settings.direct_sun_range.max(1e-6).to_bits();
         }
+        // Row 5 w: normal-side probe selection (frontProbes).
+        rows[5][3] = u32::from(settings.front_probes);
+        // Row 6 w: traced resolve texel (diagnostic).
+        rows[6][3] = settings.trace_texel;
         for cell in scheduler.cells() {
             let key = encode_key(cell.key);
             let mut hash = hash_key(key) & mask;
@@ -2292,10 +2365,20 @@ fn spherical_resolve_module() -> String {
         block("struct Light {"),
         crate::wgsl::MESH_SPHERICAL_BINDING,
         raa_shader::SPHERICAL_CUBE_WGSL,
-        raa_shader::SPHERICAL_GI_WGSL,
+        raa_shader::SPHERICAL_GI_WGSL.replace(
+            "fn raa_spherical_trace(row: u32, value: vec4<u32>) {}",
+            "fn raa_spherical_trace(row: u32, value: vec4<u32>) {\n\
+             \x20   let size = raa_spherical_data[3].w;\n\
+             \x20   let first = raa_spherical_data[3].z + (size & 0xffffu) * (size >> 16u);\n\
+             \x20   if first + row < arrayLength(&raa_spherical_data) { raa_spherical_data[first + row] = value; }\n\
+             }",
+        ),
         include_str!("../wgsl/mesh_spherical_resolve.wgsl"),
     )
 }
+
+/// Rows after the screen resolve rows written by the diagnostic trace (traceTexel).
+const TRACE_ROWS: usize = 8 + 4 * 24 + 2 * 24;
 
 fn spherical_module() -> String {
     format!(

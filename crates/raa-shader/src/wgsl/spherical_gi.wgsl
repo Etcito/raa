@@ -9,7 +9,7 @@
 // y = parallax range (f32 metres, 0 = always parallax patches), z = first screen-resolve
 // row (0 none), w = resolve width | height << 16;
 // 4.. shell inner, centre, outer (row 4 w: sphere-only direct near-sun radius in metres as
-// f32, 0 = off); 68 sun group scale rgb, 69 sky group scale rgb (see below).
+// f32, 0 = off; row 5 w: 1 = normal-side probe selection, frontProbes); 68 sun group scale rgb, 69 sky group scale rgb (see below).
 // Entry rows: key, slot, first publication frame, light hash; probe xyz + spacing;
 // reserved xyz + published.
 //
@@ -507,15 +507,279 @@ fn raa_spherical_top(p: vec3<f32>, n: vec3<f32>, cell: RaaSphericalCoordinate) -
     return top;
 }
 
-// Physical irradiance / pi of the grid at p: every published corner probe of the
+// Physical irradiance / pi of the grid at p. With header row 5 w set (node parameter
+// frontProbes) the probes are chosen by the receiver normal (raa_spherical_diffuse_front),
+// otherwise by the trilinear cell around p (raa_spherical_diffuse_corners).
+fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
+                           cell: RaaSphericalCoordinate) -> vec4<f32> {
+    if raa_spherical_data[5].w != 0u { return raa_spherical_diffuse_front(p, normal, cell); }
+    return raa_spherical_diffuse_corners(p, normal, cell);
+}
+
+// Angular cell metric at the receiver: one-cell steps of the direction along the face's u
+// and v cell axes (tangent to the unit sphere at p's direction). Offsets in cells are solved
+// in this tangent frame rather than by projecting probes on p's cube face: the gnomonic
+// stretch past the face edge made the weights jump where p crosses a face seam; the
+// tangent metric is the same on both sides of a seam.
+struct RaaSphericalTangent {
+    dir: vec3<f32>,
+    tu: vec3<f32>,
+    tv: vec3<f32>,
+    // Inverse Gram matrix (g11, g12, g22) of tu, tv.
+    inverse: vec3<f32>,
+}
+
+fn raa_spherical_tangent(face: u32, dir: vec3<f32>, angular: vec2<f32>, n: f32) -> RaaSphericalTangent {
+    let axis = raa_spherical_face_direction(face, vec2<f32>(0.0));
+    let au = raa_spherical_face_direction(face, vec2<f32>(1.0, 0.0)) - axis;
+    let av = raa_spherical_face_direction(face, vec2<f32>(0.0, 1.0)) - axis;
+    let uv = angular * (2.0 / n) - 1.0;
+    let step = (2.0 / n) / length(axis + uv.x * au + uv.y * av);
+    let tu = (au - dir * dot(dir, au)) * step;
+    let tv = (av - dir * dot(dir, av)) * step;
+    let g = vec3<f32>(dot(tu, tu), dot(tu, tv), dot(tv, tv));
+    let det = max(g.x * g.z - g.y * g.y, 1e-20);
+    return RaaSphericalTangent(dir, tu, tv, vec3<f32>(g.z, -g.y, g.x) / det);
+}
+
+// Angular offset in cells of unit direction q from the receiver's direction.
+fn raa_spherical_tangent_cells(t: RaaSphericalTangent, q: vec3<f32>) -> vec2<f32> {
+    let delta = q - t.dir;
+    let b = vec2<f32>(dot(delta, t.tu), dot(delta, t.tv));
+    return vec2<f32>(t.inverse.x * b.x + t.inverse.y * b.y, t.inverse.y * b.x + t.inverse.z * b.y);
+}
+
+// Continuous radial cell coordinate of radius r in shell s (extended below / above it).
+fn raa_spherical_shell_cells(shell: u32, r: f32) -> f32 {
+    let bounds = bitcast<vec3<f32>>(raa_spherical_data[4u + shell].xyz);
+    return f32(shell) + (r - bounds.x) / max(bounds.z - bounds.x, 1e-6);
+}
+
+// Kernel radius in cells. The block is the 4x4x4 cells whose centres bracket p (two on each
+// side per axis); probes stay within 1/3 cell of their cell centre, so every probe within
+// 1.6 cells of p lies in the block: a probe leaves it only at zero weight and the result
+// does not depend on where cell edges are. Measured (sphS): a 3x3x3 block with 1.15 cells
+// left 1-3 probes in front and drew hard bright bands (one dominant probe's visibility
+// step) on the V1 arches; 1.35 cells leaked more on V3 (bright parapet).
+const RAA_SPHERICAL_FRONT_KERNEL: f32 = 1.6;
+
+struct RaaSphericalFront {
+    sum: vec3<f32>,
+    // Kernel x front x fade/validity x visibility.
+    total: f32,
+    // Kernel x front x fade/validity: published probes in front, visible or not.
+    front: f32,
+    // Kernel x fade/validity of every published probe, and the kernel of every cell of
+    // the block (published or not): their ratio is the grid coverage of p.
+    coverage: f32,
+    nominal: f32,
+}
+
+// Diagnostic trace (header row 6 w = resolve texel x+1 | (y+1) << 16, 0 off): the resolve
+// sets raa_spherical_tracing for that texel and replaces raa_spherical_trace with a writer
+// of the rows after the resolve rows (read back by sphericalGiStats().trace). Elsewhere the
+// lookup is read-only and the trace is a no-op.
+var<private> raa_spherical_tracing: bool;
+var<private> raa_spherical_trace_count: u32;
+var<private> raa_spherical_trace_best: u32;
+var<private> raa_spherical_trace_best_w: f32;
+
+// Trace rows 104..151: the 24 parallax patches of the strongest probe at (p, n): centroid
+// and R^2, then the luminance each light group adds at p (misses in the sky term) and cos_n.
+fn raa_spherical_trace_patches(entry: u32, p: vec3<f32>, n: vec3<f32>) {
+    let mask = raa_spherical_data[1].z;
+    let slot = raa_spherical_slot(entry, mask);
+    let base = slot + RAA_SPHERICAL_PATCH_ROW;
+    let misses = raa_spherical_data[slot + RAA_SPHERICAL_INFO_ROW].w;
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722) * 0.31830988;
+    for (var k = 0u; k < 24u; k++) {
+        let row = base + RAA_SPHERICAL_PATCH_STRIDE * k;
+        let r0 = bitcast<vec4<f32>>(raa_spherical_data[row]);
+        var sun = 0.0;
+        var sky = 0.0;
+        var other = 0.0;
+        var cos_n = 0.0;
+        if r0.w >= 0.0 {
+            let delta = r0.xyz - p;
+            let d2 = dot(delta, delta);
+            let w = delta * inverseSqrt(max(d2, 1e-10));
+            cos_n = dot(n, w);
+            if cos_n > 0.0 {
+                let r1 = bitcast<vec4<f32>>(raa_spherical_data[row + 1u]);
+                let normal = raa_spherical_oct_decode(unpack2x16snorm(raa_spherical_data[row + 2u].w));
+                let cos_h = mix(1.0, max(0.0, -dot(normal, w)), r1.w);
+                let g = cos_h * cos_n / (d2 + r0.w);
+                sun = dot(luma, raa_spherical_sun_scale() * r1.xyz * g);
+                let r3 = raa_spherical_data[row + 3u];
+                sky = dot(luma, raa_spherical_sky_scale() * raa_spherical_rgb9e5(r3.x) * g);
+                other = dot(luma, raa_spherical_rgb9e5(r3.y) * g);
+            }
+        }
+        if (misses & (1u << k)) != 0u {
+            let miss = bitcast<vec3<f32>>(raa_spherical_data[row + 2u].xyz);
+            let corner = vec2<f32>(f32(k & 1u), f32((k >> 1u) & 1u)) - 0.5;
+            let d = normalize(raa_spherical_face_direction(k / 4u, corner));
+            sky += dot(luma, raa_spherical_sky_scale() * miss * max(0.0, dot(n, d)));
+        }
+        raa_spherical_trace(104u + 2u * k, raa_spherical_data[row]);
+        raa_spherical_trace(105u + 2u * k, bitcast<vec4<u32>>(vec4<f32>(sun, sky, other, cos_n)));
+    }
+}
+fn raa_spherical_trace(row: u32, value: vec4<u32>) {}
+
+fn raa_spherical_front_add(acc: ptr<function, RaaSphericalFront>, entry: u32, kernel: f32,
+                           p: vec3<f32>, n: vec3<f32>, far: f32) {
+    let mask = raa_spherical_data[1].z;
+    let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
+    let age = f32(raa_spherical_data[2].z - raa_spherical_data[entry].z);
+    let validity = bitcast<f32>(raa_spherical_data[raa_spherical_slot(entry, mask)
+        + RAA_SPHERICAL_INFO_ROW].x);
+    let live = smoothstep(0.0, RAA_SPHERICAL_FADE_FRAMES, age + 1.0) * clamp(validity, 0.0, 1.0);
+    (*acc).coverage += kernel * live;
+    // Strictly in front of the receiver's tangent plane, ramping in over the first 30 degrees
+    // above it (a ramp over 0.15 spacing drew hard bands on curved arches, sphS run A).
+    let to_probe = probe.xyz - p;
+    let front = smoothstep(0.0, 0.5, dot(to_probe, n) * inverseSqrt(max(dot(to_probe, to_probe), 1e-12)));
+    let w = kernel * front * live;
+    if raa_spherical_tracing && raa_spherical_trace_count < 24u {
+        let visibility = raa_spherical_visibility(entry, mask, p, n);
+        let value = raa_spherical_probe_value(entry, mask, p, n, far);
+        let row = 8u + 4u * raa_spherical_trace_count;
+        raa_spherical_trace(row, raa_spherical_data[entry + 1u]);
+        raa_spherical_trace(row + 1u, vec4<u32>(raa_spherical_data[entry].x, bitcast<u32>(kernel),
+            bitcast<u32>(front), bitcast<u32>(live)));
+        raa_spherical_trace(row + 2u, bitcast<vec4<u32>>(vec4<f32>(dot(to_probe, n), visibility,
+            w * visibility, length(to_probe))));
+        raa_spherical_trace(row + 3u, bitcast<vec4<u32>>(vec4<f32>(value, validity)));
+        raa_spherical_trace_count += 1u;
+        if w * visibility > raa_spherical_trace_best_w {
+            raa_spherical_trace_best_w = w * visibility;
+            raa_spherical_trace_best = entry;
+        }
+    }
+    if w <= 1e-6 { return; }
+    (*acc).front += w;
+    let seen = w * raa_spherical_visibility(entry, mask, p, n);
+    if seen <= 1e-6 { return; }
+    (*acc).sum += seen * raa_spherical_probe_value(entry, mask, p, n, far);
+    (*acc).total += seen;
+}
+
+// Normal-side lookup (user sketch user-sketch-sphere-cells.jpg, experiment): the grid only
+// places the probes. p uses the probes on the side its normal faces, dot(probe - p, n) > 0
+// (ramp over the first 30 degrees above the tangent plane), weighted by a compact kernel of
+// their distance in cells (1 - x^2)^2, x = distance / 1.6 cells, times Chebyshev visibility
+// and fade/validity. No trilinear corners, no cell boundary: the weights are continuous in
+// p and n. Validity comes from the capture only (no inside/outside classification here, so
+// probes left inside geometry with a near clip count once the capture keeps them). It
+// evaluates ~2x the probes of the corner lookup (gi.spherical ~1.6-1.8 vs ~0.8 ms). Normalisation is
+// capped at 1 / (0.05 x the front mass) so a receiver whose front probes are all occluded
+// darkens smoothly; only where no published probe is in front at all (not captured yet, or
+// none within the kernel) does the legacy ambient take over, continuously.
+fn raa_spherical_diffuse_front(p: vec3<f32>, normal: vec3<f32>,
+                              cell: RaaSphericalCoordinate) -> vec4<f32> {
+    let grid = cell.desc;
+    if grid.x == 0u { return vec4<f32>(0.0); }
+    let mask = grid.z;
+    let range = bitcast<f32>(raa_spherical_data[3].y);
+    let far = select(0.0, smoothstep(range, 1.5 * range, cell.radius), range > 0.0);
+    let anchor = bitcast<vec4<f32>>(raa_spherical_data[0]).xyz;
+    let cells = f32(grid.x);
+    let at = vec3<f32>(cell.angular, raa_spherical_shell_cells(cell.shell, cell.radius));
+    let span = 4;
+    let kernel = RAA_SPHERICAL_FRONT_KERNEL;
+    let first = vec3<i32>(floor(at - 0.5)) - 1;
+    let base = vec2<i32>(min(first.xy, vec2<i32>(i32(grid.x) - 2)));
+    let reach = 1.0 / (kernel * kernel);
+    let tangent = raa_spherical_tangent(cell.face, normalize(p - anchor + vec3<f32>(1e-7, 0.0, 0.0)),
+        cell.angular, cells);
+    var acc = RaaSphericalFront();
+    // The centre probe (a sphere of radius clipStart): Euclidean kernel over 1.6 x the
+    // radius of shell 0's centre.
+    if cell.shell <= 2u {
+        let c0 = bitcast<f32>(raa_spherical_data[4u].y) * kernel;
+        let nominal = cell.radius / c0;
+        acc.nominal += select(0.0, (1.0 - nominal * nominal) * (1.0 - nominal * nominal), nominal < 1.0);
+        let entry = raa_spherical_find(raa_spherical_key(RAA_SPHERICAL_CENTER, 0u, vec2<i32>(0), grid.x), mask);
+        if raa_spherical_published(entry) {
+            let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
+            let x = length(probe.xyz - p) / c0;
+            if x < 1.0 { raa_spherical_front_add(&acc, entry, (1.0 - x * x) * (1.0 - x * x), p, normal, far); }
+        }
+    }
+    for (var layer = first.z; layer < first.z + span; layer++) {
+        if layer < 0 || layer >= i32(grid.y) { continue; }
+        let shell = u32(layer);
+        for (var m = 0; m < span * span; m++) {
+            let ij = base + vec2<i32>(m % span, m / span);
+            // Past a cube corner three faces meet: no unique cell (and no duplicate).
+            let outside = (ij < vec2<i32>(0)) | (ij >= vec2<i32>(i32(grid.x)));
+            if outside.x && outside.y { continue; }
+            let key = raa_spherical_key(shell, cell.face, ij, grid.x);
+            // Past a face edge, consecutive cells along the edge can map to one cell of the
+            // next face (its along-edge axis is compressed): count each probe once.
+            if outside.x && m >= span && key == raa_spherical_key(shell, cell.face, ij - vec2<i32>(0, 1), grid.x) {
+                continue;
+            }
+            if outside.y && m % span > 0 && key == raa_spherical_key(shell, cell.face, ij - vec2<i32>(1, 0), grid.x) {
+                continue;
+            }
+            let nominal_d = vec3<f32>(vec2<f32>(ij) + 0.5, f32(shell) + 0.5) - at;
+            let nominal = 1.0 - dot(nominal_d, nominal_d) * reach;
+            if nominal > 0.0 { acc.nominal += nominal * nominal; }
+            let entry = raa_spherical_find(key, mask);
+            if !raa_spherical_published(entry) { continue; }
+            let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
+            let offset = probe.xyz - anchor;
+            let distance = length(offset);
+            let q = offset / max(distance, 1e-6);
+            if dot(q, tangent.dir) <= 0.5 { continue; }
+            let d = vec3<f32>(raa_spherical_tangent_cells(tangent, q),
+                raa_spherical_shell_cells(shell, distance) - at.z);
+            let x2 = dot(d, d) * reach;
+            if x2 >= 1.0 { continue; }
+            raa_spherical_front_add(&acc, entry, (1.0 - x2) * (1.0 - x2), p, normal, far);
+        }
+    }
+    let intensity = bitcast<f32>(raa_spherical_data[0].w);
+    let last = bitcast<vec3<f32>>(raa_spherical_data[4u + grid.y - 1u].xyz);
+    let edge = 1.0 - smoothstep(last.y, last.z, cell.radius);
+    // The side rule holds everywhere: the blend toward the legacy flat ambient follows only the
+    // mass of published probes IN FRONT (fallback = no published probe in front at all), and
+    // there is no corner fallback. Before (sphS), the blend followed the coverage ratio of all
+    // published cells, which invalid probes (inside walls or pillars) lowered: on the V3 back
+    // wall 60% of the kernel was invalid, blend 0.63, so 37% of the flat ambient (alone 87/255
+    // on that wall, DDGI 25) lit it although its front probes said dark (sphS2 trace).
+    let fallback = 1.0 - smoothstep(0.0, 0.1, acc.front);
+    var value = vec4<f32>(0.0, 0.0, 0.0, (1.0 - fallback) * edge);
+    if acc.total > 0.0 {
+        value = vec4<f32>(intensity * acc.sum / max(acc.total, 0.05 * acc.front), value.w);
+    }
+    let corners = vec4<f32>(0.0);
+    if raa_spherical_tracing {
+        raa_spherical_trace(0u, vec4<u32>(0x7ace0001u, raa_spherical_trace_count,
+            bitcast<u32>(fallback), bitcast<u32>(acc.front)));
+        raa_spherical_trace(1u, bitcast<vec4<u32>>(vec4<f32>(acc.total, acc.coverage, acc.nominal, cell.radius)));
+        raa_spherical_trace(2u, bitcast<vec4<u32>>(vec4<f32>(p, f32(cell.shell))));
+        raa_spherical_trace(3u, bitcast<vec4<u32>>(vec4<f32>(normal, f32(cell.face))));
+        raa_spherical_trace(4u, bitcast<vec4<u32>>(value));
+        raa_spherical_trace(5u, bitcast<vec4<u32>>(corners));
+        raa_spherical_trace(6u, bitcast<vec4<u32>>(vec4<f32>(at, kernel)));
+        raa_spherical_trace(7u, raa_spherical_data[0]);
+        if raa_spherical_trace_best_w > 0.0 { raa_spherical_trace_patches(raa_spherical_trace_best, p, normal); }
+    }
+    return value;
+}
+
+// Corner lookup: every published corner probe of the
 // trilinear cell (eight, or four inside one shell) contributes its parallax irradiance
 // weighted by trilinear x facing x Chebyshev visibility x fade/validity, normalised by
 // the total weight (DDGI-style), so the result is continuous across cell and shell
 // boundaries; a probe enters and leaves at zero trilinear weight. With poor coverage the
 // centre probe and the shell's 3x3 ring join with a distance weight. It runs in the
 // half-resolution screen resolve, never in forward.
-fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
-                           cell: RaaSphericalCoordinate) -> vec4<f32> {
+fn raa_spherical_diffuse_corners(p: vec3<f32>, normal: vec3<f32>,
+                                cell: RaaSphericalCoordinate) -> vec4<f32> {
     if cell.desc.x == 0u { return vec4<f32>(0.0); }
     let mask = cell.desc.z;
     // Far receivers may use the six-face irradiance (no parallax), see parallaxRange.

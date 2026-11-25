@@ -162,6 +162,14 @@ impl NodeFamily for RuntimeLighting {
                 Rebuild::None,
             ),
             (
+                "frontProbes",
+                "Probes on the normal side (experimental)",
+                ParamKind::Bool,
+                None,
+                &[][..],
+                Rebuild::None,
+            ),
+            (
                 "autoRange",
                 "Outer radius from scene bounds",
                 ParamKind::Bool,

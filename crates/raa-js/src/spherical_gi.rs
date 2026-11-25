@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 25] = [
+const OPTIONS: [&str; 27] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
@@ -42,6 +42,8 @@ const OPTIONS: [&str; 25] = [
     "parallaxRange",
     "sphereDirect",
     "directSunRange",
+    "frontProbes",
+    "traceTexel",
     "autoRange",
     "screenAo",
     "sunRefresh",
@@ -150,6 +152,18 @@ fn read_patch(
             }
             "sphereDirect" => {
                 settings.sphere_direct = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(&name, "expected a boolean"))?;
+            }
+            "traceTexel" => {
+                let texel = number()?;
+                if !(0.0..=4294967295.0).contains(&texel) {
+                    return Err(invalid(&name, "expected x + 1 | (y + 1) << 16"));
+                }
+                settings.trace_texel = texel as u32;
+            }
+            "frontProbes" => {
+                settings.front_probes = value
                     .as_bool()
                     .ok_or_else(|| invalid(&name, "expected a boolean"))?;
             }
@@ -294,6 +308,7 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
     put(&result, "lightSamples", settings.light_samples.into());
     put(&result, "parallaxRange", settings.parallax_range.into());
     put(&result, "sphereDirect", settings.sphere_direct.into());
+    put(&result, "frontProbes", settings.front_probes.into());
     put(&result, "directSunRange", settings.direct_sun_range.into());
     put(&result, "autoRange", settings.scheduler.auto_range.into());
     put(&result, "screenAo", settings.screen_ao.into());
@@ -355,12 +370,20 @@ impl Engine {
             let Some(handle) = st.features.get::<SphericalGiHandle>() else {
                 return Ok(JsValue::NULL);
             };
-            let state = handle.borrow();
+            let mut state = handle.borrow_mut();
+            let trace = state.trace();
             let Some(stats) = state.stats() else {
                 return Ok(JsValue::NULL);
             };
             let result = Object::new();
             put(&result, "active", state.active().into());
+            if let Some(trace) = trace {
+                let words = Array::new();
+                for word in trace {
+                    words.push(&f64::from(word).into());
+                }
+                put(&result, "trace", words.into());
+            }
             let scheduler = stats.scheduler;
             for (name, value) in [
                 ("cells", scheduler.cells as f64),
