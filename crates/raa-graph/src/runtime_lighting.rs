@@ -14,6 +14,8 @@ pub(crate) const SPHERICAL_KEYS: &[&str] = &[
     "zMax",
     "channelMask",
     "debug",
+    "maxProbes",
+    "captureFaces",
     "enabled",
 ];
 
@@ -33,6 +35,8 @@ pub(crate) fn spherical_get(settings: SphericalGiSettings, key: &str) -> Option<
         "clipStart" => ParamValue::Number(f64::from(grid.clip_start)),
         "zMax" => ParamValue::Number(f64::from(grid.z_max)),
         "channelMask" => ParamValue::Int(i64::from(settings.channels)),
+        "maxProbes" => ParamValue::Int(i64::from(settings.scheduler.max_cells)),
+        "captureFaces" => ParamValue::Int(i64::from(settings.budget.near)),
         "debug" => ParamValue::Enum(
             DEBUG
                 .iter()
@@ -66,6 +70,14 @@ pub(crate) fn spherical_set(
         }
         ("channelMask", ParamValue::Int(value)) if (0..=7).contains(value) => {
             settings.channels = *value as u32;
+        }
+        ("maxProbes", ParamValue::Int(value)) if (16..=4096).contains(value) => {
+            settings.scheduler.max_cells = *value as u32;
+        }
+        // Far shells get half of the near face budget, as in the original 24/12 split.
+        ("captureFaces", ParamValue::Int(value)) if (1..=1024).contains(value) => {
+            settings.budget.near = *value as u32;
+            settings.budget.far = (*value as u32).div_ceil(2);
         }
         ("debug", ParamValue::Enum(value)) => {
             settings.debug = DEBUG

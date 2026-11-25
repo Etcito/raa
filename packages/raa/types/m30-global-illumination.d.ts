@@ -301,7 +301,10 @@ export interface SphericalGiSettings {
   sphereSubdivision: number;
   /** Finite number from 0 to 2. Shell widths grow by a factor of 2 ** exponentialPower. */
   exponentialPower: number;
-  /** Inner radial boundary in world units. Must be nonnegative and smaller than zMax. */
+  /**
+   * Inner radial boundary in world units. Must be nonnegative and smaller than zMax.
+   * It is also the radius of the centre probe's sphere around the grid anchor.
+   */
   clipStart: number;
   /**
    * Finite outer radial boundary in world units, strictly greater than clipStart.
@@ -312,6 +315,10 @@ export interface SphericalGiSettings {
   debug: SphericalGiDebug;
   /** Bit mask for sky (1), sun (2), and other lights (4). Defaults to 7. */
   channelMask: number;
+  /** Integer from 16 to 4096: resident free-space probes, the centre probe included. Defaults to 1024. */
+  maxProbes: number;
+  /** Integer from 1 to 1024: near-shell cube faces captured per frame; far shells get half. Defaults to 24. */
+  captureFaces: number;
 }
 
 export interface SphericalGiStats {

@@ -17,6 +17,8 @@ fn config() -> SphericalSchedulerConfig {
     SphericalSchedulerConfig {
         grid: grid_config(),
         near_shells: 1,
+        max_cells: 128,
+        center_probe: false,
         ..SphericalSchedulerConfig::default()
     }
 }
@@ -195,7 +197,7 @@ fn near_and_far_budgets_track_each_face_and_retry_only_the_aborted_face() {
 }
 
 #[test]
-fn light_and_recenter_reject_old_faces_even_for_the_same_slot_and_key() {
+fn light_change_resets_faces_and_recenter_reissues_in_flight_faces_in_place() {
     let mut scene = MeshTraceScene::default();
     update_geometry(&mut scene, &[triangle(1, &facing_x(1.7))]);
     let mut scheduler = SphericalScheduler::new(config()).unwrap();
@@ -208,50 +210,78 @@ fn light_and_recenter_reject_old_faces_even_for_the_same_slot_and_key() {
     assert_eq!(scheduler.stats().light_revision, 10);
     assert_eq!(scheduler.stats().ready_faces, 0);
     assert!(!scheduler.complete(stale_light_job));
+    let first = scheduler.take_jobs(FaceBudget { near: 1, far: 0 })[0];
+    assert!(scheduler.complete(first));
     let old_origin_job = scheduler.take_jobs(FaceBudget { near: 1, far: 0 })[0];
     assert_eq!(old_origin_job.slot, slot);
+    // The world-space probe keeps its cell, slot, epoch and completed face; only the
+    // in-flight face is reissued because its job named the retired anchor.
     scheduler.update(&scene, [0.3, 0.0, 0.0], 10);
+    assert_eq!(scheduler.grid().origin(), [0.25, 0.0, 0.0]);
+    assert_eq!(scheduler.stats().ready_faces, 1);
+    assert!(!scheduler.take_released_slots().contains(&slot));
     let new_job = scheduler.take_jobs(FaceBudget { near: 1, far: 0 })[0];
     assert_eq!(
-        (new_job.key, new_job.slot),
-        (old_origin_job.key, old_origin_job.slot)
+        (
+            new_job.key,
+            new_job.slot,
+            new_job.epoch,
+            new_job.face,
+            new_job.probe
+        ),
+        (
+            old_origin_job.key,
+            old_origin_job.slot,
+            old_origin_job.epoch,
+            old_origin_job.face,
+            old_origin_job.probe
+        )
     );
     assert_ne!(new_job.center, old_origin_job.center);
-    assert_ne!(new_job.epoch, old_origin_job.epoch);
-    assert!(scheduler.take_released_slots().contains(&slot));
     assert!(!scheduler.complete(old_origin_job));
     assert!(scheduler.complete(new_job));
 }
 
 #[test]
-fn sustained_walk_makes_face_progress_in_each_bounded_origin_epoch() {
+fn sustained_walk_keeps_ready_world_space_probes_across_origin_epochs() {
     let mut scene = MeshTraceScene::default();
-    update_geometry(&mut scene, &[triangle(1, &facing_x(1.9))]);
+    // Walking away from the wall keeps its probes outside the inner sphere.
+    update_geometry(&mut scene, &[triangle(1, &facing_x(-1.9))]);
     let mut scheduler = SphericalScheduler::new(config()).unwrap();
-    let mut ready_epochs = BTreeSet::new();
-    let mut previous = None;
+    let mut epochs = BTreeSet::new();
+    let mut first = None;
+    let mut first_survived_epochs = BTreeSet::new();
     for step in 0..48 {
         let camera = [step as f32 * 0.02, 0.0, 0.0];
         scheduler.update(&scene, camera, 0);
         let anchor = scheduler.grid().origin();
         assert!((camera[0] - anchor[0]).abs() <= config().origin_tolerance);
         let epoch = scheduler.stats().origin_epoch;
-        if let Some((previous_epoch, previous_job)) = previous
-            && epoch != previous_epoch
-        {
-            assert!(ready_epochs.contains(&previous_epoch));
-            assert!(!scheduler.complete(previous_job));
-            assert_eq!(scheduler.stats().ready_faces, 0);
-        }
+        epochs.insert(epoch);
         for job in scheduler.take_jobs(FaceBudget { near: 1, far: 1 }) {
             assert!(scheduler.complete(job));
-            previous = Some((epoch, job));
         }
-        if scheduler.stats().ready_cells == 1 {
-            ready_epochs.insert(epoch);
+        if first.is_some() {
+            // Recentering never leaves the walk without a published probe.
+            assert!(
+                scheduler
+                    .cells()
+                    .any(|cell| cell.is_ready() && cell.published)
+            );
+        } else if let Some(cell) = scheduler.cells().find(|cell| cell.is_ready()) {
+            first = Some(cell.probe);
+        }
+        if let Some(probe) = first
+            && scheduler
+                .cells()
+                .any(|cell| cell.probe == probe && cell.published)
+        {
+            first_survived_epochs.insert(epoch);
         }
     }
-    assert!(ready_epochs.len() >= 3);
+    assert!(epochs.len() >= 3);
+    // The first published probe was reused, not recaptured, after a recenter.
+    assert!(first_survived_epochs.len() >= 2);
 }
 
 #[test]
@@ -543,7 +573,7 @@ fn pending_light_metadata_is_conservative_and_stale_readback_is_rejected() {
 }
 
 #[test]
-fn rotating_view_admits_visible_geometry_without_resetting_retained_faces() {
+fn rotating_view_keeps_near_cells_behind_the_camera() {
     let mut scene = MeshTraceScene::default();
     let visible = [[-0.1, -0.1, -5.0], [0.1, -0.1, -5.0], [0.0, 0.1, -5.0]];
     update_geometry(
@@ -554,36 +584,135 @@ fn rotating_view_admits_visible_geometry_without_resetting_retained_faces() {
             triangle(3, &visible),
         ],
     );
+    let make = |max_cells| {
+        SphericalScheduler::new(SphericalSchedulerConfig {
+            max_cells,
+            cell_queries_per_update: 3,
+            ..config()
+        })
+        .unwrap()
+    };
+    let mut scheduler = make(2);
+    for _ in 0..12 {
+        scheduler.update(&scene, [0.0; 3], 0);
+    }
+    capture_light_metadata(&mut scheduler, |_| vec![]);
+    let retained = key(0, CubeFace::PosX);
+    let behind = key(0, CubeFace::NegX);
+    let visible = key(2, CubeFace::NegZ);
+    let original = *scheduler.progress(retained).unwrap();
+    let behind_cell = *scheduler.progress(behind).unwrap();
+    let anchor_epoch = scheduler.stats().origin_epoch;
+    assert!(scheduler.progress(visible).is_none());
+
+    // Shell-major priority: a far visible cell never displaces a near one.
+    scheduler.set_view_priority([0.0, 0.0, -1.0], 0.87);
+    for _ in 0..12 {
+        scheduler.update(&scene, [0.0; 3], 0);
+    }
+    assert_eq!(scheduler.stats().origin_epoch, anchor_epoch);
+    assert_eq!(scheduler.progress(retained), Some(&original));
+    assert_eq!(scheduler.progress(behind), Some(&behind_cell));
+    assert!(scheduler.progress(visible).is_none());
+    assert!(scheduler.take_released_slots().is_empty());
+
+    let mut roomy = make(3);
+    roomy.set_view_priority([0.0, 0.0, -1.0], 0.87);
+    for _ in 0..12 {
+        roomy.update(&scene, [0.0; 3], 0);
+    }
+    assert!(roomy.progress(behind).is_some());
+    let far_face = roomy
+        .take_jobs(FaceBudget { near: 0, far: 1 })
+        .pop()
+        .unwrap();
+    assert_eq!(far_face.key, visible);
+    roomy.set_view_priority([0.01, 0.0, -1.0], 0.87);
+    roomy.update(&scene, [0.0; 3], 0);
+    assert!(roomy.is_current(far_face));
+}
+
+fn center_config() -> SphericalSchedulerConfig {
+    SphericalSchedulerConfig {
+        center_probe: true,
+        ..config()
+    }
+}
+
+#[test]
+fn centre_probe_covers_the_inner_sphere_and_follows_the_camera_beyond_clip_start() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(&mut scene, &[triangle(1, &facing_x(1.5))]);
+    let mut scheduler = SphericalScheduler::new(center_config()).unwrap();
+    scheduler.update(&scene, [0.0; 3], 0);
+    let center = *scheduler.progress(CellKey::CENTER).unwrap();
+    assert_eq!(center.probe, [0.0; 3]);
+    assert_eq!(scheduler.stats().near_cells, 2);
+    // The centre probe draws first from the near budget.
+    let jobs = scheduler.take_jobs(FaceBudget { near: 6, far: 0 });
+    assert!(jobs.iter().all(|job| job.key.is_center()));
+    for job in jobs {
+        assert!(scheduler.complete(job));
+    }
+    assert!(scheduler.progress(CellKey::CENTER).unwrap().published);
+    // Inside clipStart (1 m) the same probe stays the centre without recapture.
+    scheduler.update(&scene, [0.5, 0.0, 0.0], 0);
+    let kept = *scheduler.progress(CellKey::CENTER).unwrap();
+    assert_eq!((kept.slot, kept.probe), (center.slot, center.probe));
+    assert!(kept.is_ready());
+    // Beyond clipStart it becomes the probe of its own cell and a new centre starts.
+    scheduler.update(&scene, [-1.25, 0.0, 0.0], 0);
+    let moved = scheduler.progress(key(0, CubeFace::PosX)).unwrap();
+    assert_eq!((moved.slot, moved.probe), (center.slot, center.probe));
+    assert!(moved.published);
+    let fresh = scheduler.progress(CellKey::CENTER).unwrap();
+    assert_eq!(fresh.probe, [-1.25, 0.0, 0.0]);
+    assert!(!fresh.published);
+}
+
+#[test]
+fn probes_are_pushed_off_triangles_through_the_cell_centre() {
+    let mut scene = MeshTraceScene::default();
+    // A wall through the PosX shell-0 centre (radius 1.5).
+    let wall = [[1.5, -4.0, -4.0], [1.5, 4.0, -4.0], [1.5, 0.0, 6.0]];
+    update_geometry(&mut scene, &[triangle(1, &wall)]);
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    scheduler.update(&scene, [0.0; 3], 0);
+    let cell = scheduler.progress(key(0, CubeFace::PosX)).unwrap();
+    assert_eq!(cell.center, [1.5, 0.0, 0.0]);
+    assert!((cell.probe[0] - 1.5).abs() > 0.05, "probe {:?}", cell.probe);
+    assert_eq!(scheduler.grid().key_at(cell.probe), Some(cell.key));
+}
+
+#[test]
+fn rekey_keeps_the_probe_nearest_each_new_cell_centre() {
+    let mut scene = MeshTraceScene::default();
+    // Off-centre triangles leave both cell centres clear, so probes sit on them.
+    let off = |x: f32| [[x, 0.6, -0.1], [x, 1.0, -0.1], [x, 0.8, 0.2]];
+    let (a, b) = (off(1.5), off(3.0));
+    update_geometry(&mut scene, &[triangle(1, &a), triangle(2, &b)]);
     let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
-        max_cells: 2,
-        cell_queries_per_update: 3,
+        origin_tolerance: 0.5,
         ..config()
     })
     .unwrap();
     scheduler.update(&scene, [0.0; 3], 0);
-    capture_light_metadata(&mut scheduler, |_| vec![]);
-    let retained = key(0, CubeFace::PosX);
-    let offscreen = key(0, CubeFace::NegX);
-    let visible = key(2, CubeFace::NegZ);
-    let original = *scheduler.progress(retained).unwrap();
-    let anchor_epoch = scheduler.stats().origin_epoch;
-    let released = scheduler.progress(offscreen).unwrap().slot;
-    assert!(scheduler.progress(visible).is_none());
+    let near = *scheduler.progress(key(0, CubeFace::PosX)).unwrap();
+    let far = *scheduler.progress(key(1, CubeFace::PosX)).unwrap();
+    assert_eq!((near.probe, far.probe), ([1.5, 0.0, 0.0], [3.0, 0.0, 0.0]));
+    // The anchor snaps to -0.5: both probes now fall in PosX shell 1 (radius 2 to 4,
+    // centre 3). The probe at radius 3.5 is nearer that centre than the one at 2.0.
+    scheduler.update(&scene, [-0.6, 0.0, 0.0], 0);
+    assert_eq!(scheduler.grid().origin(), [-0.5, 0.0, 0.0]);
+    let kept = *scheduler.progress(key(1, CubeFace::PosX)).unwrap();
+    assert_eq!((kept.slot, kept.probe), (far.slot, far.probe));
+    assert!(scheduler.take_released_slots().contains(&near.slot));
+}
 
-    scheduler.set_view_priority([0.0, 0.0, -1.0], 0.87);
-    scheduler.update(&scene, [0.0; 3], 0);
-    assert_eq!(scheduler.stats().last_cell_queries, 3);
-    assert_eq!(scheduler.stats().origin_epoch, anchor_epoch);
-    assert_eq!(scheduler.progress(retained), Some(&original));
-    assert!(scheduler.progress(offscreen).is_none());
-    assert!(scheduler.take_released_slots().contains(&released));
-    let new_face = scheduler.take_jobs(FaceBudget { near: 0, far: 1 })[0];
-    assert_eq!(new_face.key, visible);
-
-    scheduler.set_view_priority([0.01, 0.0, -1.0], 0.87);
-    scheduler.update(&scene, [0.0; 3], 0);
-    assert_eq!(scheduler.progress(retained), Some(&original));
-    assert!(scheduler.is_current(new_face));
+#[test]
+fn snapped_origin_lies_on_the_tolerance_lattice() {
+    assert_eq!(snap_origin([0.3, -0.13, 0.0], 0.25), [0.25, -0.25, 0.0]);
+    assert_eq!(snap_origin([0.3, -0.13, 0.0], 0.0), [0.3, -0.13, 0.0]);
 }
 
 #[test]

@@ -45,6 +45,20 @@ pub struct CellKey {
     pub y: u16,
 }
 
+impl CellKey {
+    /// The single free-space probe of the inner sphere of radius clipStart.
+    pub const CENTER: Self = Self {
+        shell: u16::MAX,
+        face: CubeFace::PosX,
+        x: 0,
+        y: 0,
+    };
+
+    pub fn is_center(self) -> bool {
+        self.shell == u16::MAX
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SphericalGridConfig {
     pub angular_resolution: u16,
@@ -226,6 +240,9 @@ impl SphericalGrid {
     }
 
     pub fn center(&self, key: CellKey) -> Option<[f32; 3]> {
+        if key.is_center() {
+            return Some(self.origin);
+        }
         if key.x >= self.angular_resolution() || key.y >= self.angular_resolution() {
             return None;
         }
@@ -239,6 +256,49 @@ impl SphericalGrid {
         Some(std::array::from_fn(|i| {
             (f64::from(self.origin[i]) + ray[i] * factor) as f32
         }))
+    }
+
+    /// Probe ownership lookup: like `key_at`, but the inner sphere below clipStart
+    /// belongs to the centre probe instead of falling outside the grid.
+    pub fn probe_key_at(&self, position: [f32; 3]) -> Option<CellKey> {
+        let p = sub(position.map(f64::from), self.origin.map(f64::from));
+        let radius = dot(p, p).sqrt();
+        if radius.is_finite() && radius < f64::from(self.config.clip_start) {
+            return Some(CellKey::CENTER);
+        }
+        self.key_at(position)
+    }
+
+    /// Radial width and angular width at the shell centre, in metres. The centre
+    /// probe reports the inner sphere diameter for both.
+    pub fn cell_extent(&self, key: CellKey) -> (f64, f64) {
+        if key.is_center() {
+            let diameter = 2.0 * f64::from(self.config.clip_start);
+            return (diameter, diameter);
+        }
+        let shell = self.radial_shell(key.shell).expect("valid cell shell");
+        let radial = f64::from(shell.outer - shell.inner);
+        let angular = f64::from(shell.center) * 2.0 / f64::from(self.angular_resolution());
+        (radial, angular)
+    }
+
+    /// A point inside the cell at fractional offsets in [-0.5, 0.5] from its centre,
+    /// along the column's two face axes and the radius. The centre probe uses world axes.
+    pub fn cell_point(&self, key: CellKey, offset: [f64; 3]) -> [f32; 3] {
+        let origin = self.origin.map(f64::from);
+        if key.is_center() {
+            let radius = f64::from(self.config.clip_start);
+            return std::array::from_fn(|i| (origin[i] + offset[i] * radius) as f32);
+        }
+        let shell = self.radial_shell(key.shell).expect("valid cell shell");
+        let step = 2.0 / f64::from(self.angular_resolution());
+        let [axis, axis_u, axis_v] = key.face.frame();
+        let u = (f64::from(key.x) + 0.5 + offset[0]) * step - 1.0;
+        let v = (f64::from(key.y) + 0.5 + offset[1]) * step - 1.0;
+        let ray: [f64; 3] = std::array::from_fn(|i| axis[i] + u * axis_u[i] + v * axis_v[i]);
+        let radius = f64::from(shell.center) + offset[2] * f64::from(shell.outer - shell.inner);
+        let factor = radius / dot(ray, ray).sqrt();
+        std::array::from_fn(|i| (origin[i] + ray[i] * factor) as f32)
     }
 
     /// Angular cap enclosing a column. A convex cone cut by the cube face is
@@ -484,4 +544,52 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 
 fn lerp(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
+}
+
+/// Squared distance from a point to a triangle (Ericson, Real-Time Collision Detection 5.1.5).
+pub(super) fn point_triangle_distance_sq(p: [f64; 3], triangle: [[f32; 3]; 3]) -> f64 {
+    let [a, b, c] = triangle.map(|v| v.map(f64::from));
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let ap = sub(p, a);
+    let d1 = dot(ab, ap);
+    let d2 = dot(ac, ap);
+    let closest = |q: [f64; 3]| {
+        let d = sub(p, q);
+        dot(d, d)
+    };
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return closest(a);
+    }
+    let bp = sub(p, b);
+    let d3 = dot(ab, bp);
+    let d4 = dot(ac, bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return closest(b);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let v = d1 / (d1 - d3);
+        return closest(lerp(a, b, v));
+    }
+    let cp = sub(p, c);
+    let d5 = dot(ab, cp);
+    let d6 = dot(ac, cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return closest(c);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6);
+        return closest(lerp(a, c, w));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return closest(lerp(b, c, w));
+    }
+    let denom = 1.0 / (va + vb + vc);
+    let v = vb * denom;
+    let w = vc * denom;
+    closest(std::array::from_fn(|i| a[i] + ab[i] * v + ac[i] * w))
 }

@@ -116,8 +116,14 @@ not a graph is set.
   spherical node is present. The lookup has no generic compute or history tap. Capture
   uses the primary view and the scene's geometry and lights.
 - The spherical node exposes `sphereSubdivision`, `exponentialPower`, `clipStart`, `zMax`,
-  `channelMask` and the `debug` views from `setSphericalGi`. Node presence enables capture.
-  Set `zMax` above `clipStart`. The `spherical_gi` frozen graph uses the same pass and handles.
+  `channelMask`, `maxProbes`, `captureFaces` and the `debug` views from `setSphericalGi`.
+  Node presence enables capture. Set `zMax` above `clipStart`. The `spherical_gi` frozen graph
+  uses the same pass and handles.
+- Probes float in free space: each occupied cell captures from its centre pushed away from
+  nearby triangles, and a centre probe covers the sphere of radius `clipStart` around the
+  grid anchor. Shading interpolates the nearest published probes with the receiver's own
+  normal, parallax-corrected patches and depth-moment visibility; captures are world space,
+  so a recenter rekeys probes instead of recapturing them, and new probes fade in.
 - `pass.gi.volume.volumeAtlas` feeds `pass.gi.screen.volumeAtlas`. Set the screen node's
   `indirect` to `probes` or `restir` and use its `debugView` for volume and screen diagnostics.
   Both modes publish `pass.gi.screen.gi` for `pass.forward.gi`. Spherical GI can coexist with

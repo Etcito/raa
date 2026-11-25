@@ -167,7 +167,9 @@ fn mesh_grid_shaders_reuse_forward_lookup_and_keep_directional_faces_private() {
         .split_once("fn raa_spherical_neighbors")
         .unwrap()
         .0;
-    assert!(physical.contains("raa_spherical_data[2].w"));
+    // Free-space probes: the light-group mask is applied when probes are projected,
+    // the physical path evaluates parallax patches and never reads the debug mode.
+    assert!(physical.contains("raa_spherical_probe_irradiance"));
     assert!(!physical.contains("desc.w"));
     assert!(!hybrid.contains("coord.desc.w"));
     assert!(!mesh.contains("mesh_spherical_faces"));

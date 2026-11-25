@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 7] = [
+const OPTIONS: [&str; 9] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
@@ -32,6 +32,8 @@ const OPTIONS: [&str; 7] = [
     "zMax",
     "debug",
     "channelMask",
+    "maxProbes",
+    "captureFaces",
 ];
 
 fn invalid(key: &str, reason: &str) -> RaaError {
@@ -96,6 +98,21 @@ fn read_patch(
                     return Err(invalid(&name, "expected an integer from 0 to 7"));
                 }
                 settings.channels = mask as u32;
+            }
+            "maxProbes" => {
+                let probes = number()?;
+                if !(16.0..=4096.0).contains(&probes) || probes.fract() != 0.0 {
+                    return Err(invalid(&name, "expected an integer from 16 to 4096"));
+                }
+                settings.scheduler.max_cells = probes as u32;
+            }
+            "captureFaces" => {
+                let faces = number()?;
+                if !(1.0..=1024.0).contains(&faces) || faces.fract() != 0.0 {
+                    return Err(invalid(&name, "expected an integer from 1 to 1024"));
+                }
+                settings.budget.near = faces as u32;
+                settings.budget.far = (faces as u32).div_ceil(2);
             }
             "debug" => {
                 settings.debug = match value.as_string().as_deref() {
@@ -164,6 +181,8 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
     put(&result, "zMax", grid.z_max.into());
     put(&result, "debug", debug.into());
     put(&result, "channelMask", settings.channels.into());
+    put(&result, "maxProbes", settings.scheduler.max_cells.into());
+    put(&result, "captureFaces", settings.budget.near.into());
     result.into()
 }
 

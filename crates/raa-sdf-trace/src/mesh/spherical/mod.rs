@@ -14,8 +14,11 @@ pub use grid::{CellKey, CubeFace, RadialShell, SphericalGrid, SphericalGridConfi
 pub use lighting::{SKY_LIGHT_ID, SUN_LIGHT_ID, SphericalLight};
 pub use reflected::{MAX_REFLECTED_RECEIVERS, ReflectedReceiver};
 
-use super::{MeshTraceScene, geometry::Bounds};
-use grid::{Surface, dot, sub};
+use super::{
+    MeshTraceScene,
+    geometry::{Bounds, Geometry},
+};
+use grid::{Surface, dot, point_triangle_distance_sq, sub};
 use lighting::{FaceLighting, light_changes, light_hash};
 use view::ViewOrder;
 
@@ -30,20 +33,23 @@ pub struct SphericalSchedulerConfig {
     /// Maximum candidate cells examined per update, including broad-phase rejects.
     pub cell_queries_per_update: u32,
     /// Maximum camera translation from the current world-space grid anchor, in metres.
-    /// The default is 0.25 metres. Camera rotation and translation within this
-    /// tolerance preserve face progress. A recenter confirms reprojected world
-    /// candidates against the BVH before dispatching a fresh face epoch.
+    /// The default is 0.25 metres. A recenter snaps the anchor to a lattice of this
+    /// step and rekeys the world-space probes into the moved cells: captured faces
+    /// survive, only probes that leave the grid or collide in one cell are dropped.
     pub origin_tolerance: f32,
+    /// Keep a free-space probe at the grid anchor for the inner sphere below clipStart.
+    pub center_probe: bool,
 }
 
 impl Default for SphericalSchedulerConfig {
     fn default() -> Self {
         Self {
             grid: SphericalGridConfig::default(),
-            max_cells: 128,
+            max_cells: 1024,
             near_shells: 4,
             cell_queries_per_update: 768,
             origin_tolerance: 0.25,
+            center_probe: true,
         }
     }
 }
@@ -61,10 +67,17 @@ pub struct CellProgress {
     pub epoch: u64,
     pub center: [f32; 3],
     /// Point on an overlapping triangle, with its world-space geometric normal.
+    /// It only witnesses nearby geometry; captures start from `probe`.
     pub surface_position: [f32; 3],
     pub normal: [f32; 3],
+    /// Free-space capture origin inside the cell, pushed away from nearby triangles.
+    /// It stays fixed in world space while the grid recenters.
+    pub probe: [f32; 3],
     pub ready_faces: u8,
     pub in_flight_faces: u8,
+    /// Whether a complete capture of this probe was projected at least once. A light
+    /// or material refresh keeps the previous projection visible until it is replaced.
+    pub published: bool,
     /// Hash of the reported contributing IDs and their capture light values.
     pub light_hash: u64,
 }
@@ -84,6 +97,7 @@ pub struct FaceJob {
     pub center: [f32; 3],
     pub surface_position: [f32; 3],
     pub normal: [f32; 3],
+    pub probe: [f32; 3],
     ticket: u64,
 }
 
@@ -123,7 +137,7 @@ impl Entry {
         jobs: &mut Vec<FaceJob>,
     ) {
         let p = &mut self.progress;
-        let budget = if p.key.shell < near_shells {
+        let budget = if p.key.is_center() || p.key.shell < near_shells {
             &mut budget.near
         } else {
             &mut budget.far
@@ -148,6 +162,7 @@ impl Entry {
                 center: p.center,
                 surface_position: p.surface_position,
                 normal: p.normal,
+                probe: p.probe,
                 ticket: *serial,
             });
         }
@@ -211,7 +226,8 @@ pub struct SphericalScheduler {
 
 impl SphericalScheduler {
     pub fn new(config: SphericalSchedulerConfig) -> Result<Self, RaaError> {
-        if !(1..=4096).contains(&config.max_cells)
+        let min_cells = 1 + u32::from(config.center_probe);
+        if !(min_cells..=4096).contains(&config.max_cells)
             || config.near_shells > 64
             || !(1..=65536).contains(&config.cell_queries_per_update)
             || !config.origin_tolerance.is_finite()
@@ -260,7 +276,7 @@ impl SphericalScheduler {
         self.resident_order = self
             .cells
             .keys()
-            .filter(|key| !self.reflected_cells.contains(key))
+            .filter(|key| !key.is_center() && !self.reflected_cells.contains(key))
             .map(|&key| (order.rank(&self.grid, key), key))
             .collect();
         self.view_order = Some(order);
@@ -371,16 +387,11 @@ impl SphericalScheduler {
             || dot(displacement, displacement) > f64::from(self.config.origin_tolerance).powi(2);
         let mut changed = recenter;
         if recenter {
-            self.grid.origin = camera_origin;
+            self.grid.origin = snap_origin(camera_origin, self.config.origin_tolerance);
             self.origin_epoch += 1;
-            let reprojected = self
-                .cells()
-                .filter(|cell| !self.reflected_cells.contains(&cell.key))
-                .filter_map(|cell| self.grid.key_at(cell.surface_position))
-                .collect();
-            self.restart();
-            self.reprojected = reprojected;
-        } else if let Some((old_geometry, old_material, old_light)) = self.revisions {
+            self.rekey();
+        }
+        if let Some((old_geometry, old_material, old_light)) = self.revisions {
             if old_geometry != revisions.0 {
                 self.clear_reflected_receivers();
                 if old_geometry.wrapping_add(1) == revisions.0 {
@@ -422,6 +433,10 @@ impl SphericalScheduler {
             self.pending_dirty = None;
             return changed;
         }
+        if self.config.center_probe && !self.cells.contains_key(&CellKey::CENTER) {
+            let probe = self.place_probe(geometry, CellKey::CENTER);
+            changed |= self.allocate(CellKey::CENTER, None, probe);
+        }
 
         // Alternate the dirty scan with forward discovery so continuous edits
         // keep their own progress without preventing initial occupancy discovery.
@@ -459,9 +474,11 @@ impl SphericalScheduler {
             else {
                 continue;
             };
-            self.allocate(key, surface);
-            self.resident_order.insert(rank, key);
-            changed = true;
+            let probe = self.place_probe(geometry, key);
+            if self.allocate(key, Some(surface), probe) {
+                self.resident_order.insert(rank, key);
+                changed = true;
+            }
         }
         changed
     }
@@ -506,22 +523,70 @@ impl SphericalScheduler {
             }) else {
                 continue;
             };
-            self.allocate(key, surface);
-            self.reflected_cells.insert(key);
-            changed = true;
+            let probe = self.place_probe(geometry, key);
+            if self.allocate(key, Some(surface), probe) {
+                self.reflected_cells.insert(key);
+                changed = true;
+            }
         }
         changed
     }
 
-    fn allocate(&mut self, key: CellKey, surface: Surface) {
+    /// Choose a free-space capture origin inside the cell: its centre when no triangle
+    /// lies within the clearance radius, otherwise the candidate offset with the most
+    /// clearance. The test is exact on the shared BVH, so a probe never sits on a wall.
+    fn place_probe(&self, geometry: &Geometry, key: CellKey) -> [f32; 3] {
+        let (radial, angular) = self.grid.cell_extent(key);
+        let rho = (0.2 * radial.min(angular)).clamp(0.02, 0.5);
+        let clearance = |point: [f32; 3]| {
+            let p = point.map(f64::from);
+            let mut best = rho * rho;
+            geometry.find_triangle(p.map(|v| v - rho), p.map(|v| v + rho), |tri| {
+                best = best.min(point_triangle_distance_sq(p, tri));
+                (best == 0.0).then_some(())
+            });
+            best.sqrt()
+        };
+        let center = self.grid.cell_point(key, [0.0; 3]);
+        let mut best = (clearance(center), center);
+        if best.0 >= rho {
+            return center;
+        }
+        const STEP: f64 = 1.0 / 3.0;
+        let mut offsets: Vec<[f64; 3]> = (0..27)
+            .filter(|&i| i != 13)
+            .map(|i| [i % 3, i / 3 % 3, i / 9].map(|v| f64::from(v as u8) * STEP - STEP))
+            .collect();
+        offsets.sort_by(|a, b| dot(*a, *a).total_cmp(&dot(*b, *b)));
+        for offset in offsets {
+            let point = self.grid.cell_point(key, offset);
+            let distance = clearance(point);
+            if distance > best.0 {
+                best = (distance, point);
+                if distance >= rho {
+                    break;
+                }
+            }
+        }
+        best.1
+    }
+
+    /// Returns false when every slot belongs to the centre probe.
+    fn allocate(&mut self, key: CellKey, surface: Option<Surface>, probe: [f32; 3]) -> bool {
         if self.free.is_empty() {
-            let (&rank, &displaced) = self.resident_order.last_key_value().expect("resident slot");
+            let Some((&rank, &displaced)) = self.resident_order.last_key_value() else {
+                return false;
+            };
             self.release(displaced);
             // If an edit frees capacity later, rediscover this still-overlapping cell.
             self.discovery.start = self.discovery.start.min(rank);
         }
         let slot = self.free.pop_first().expect("free or released slot");
         self.serial += 1;
+        let surface = surface.unwrap_or(Surface {
+            position: probe,
+            normal: [0.0; 3],
+        });
         self.cells.insert(
             key,
             Entry {
@@ -532,14 +597,79 @@ impl SphericalScheduler {
                     center: self.grid.center(key).expect("valid cell key"),
                     surface_position: surface.position,
                     normal: surface.normal,
+                    probe,
                     ready_faces: 0,
                     in_flight_faces: 0,
+                    published: false,
                     light_hash: 0,
                 },
                 tickets: [0; 6],
                 lighting: FaceLighting::default(),
             },
         );
+        true
+    }
+
+    /// Move world-space probes into the cells of the recentred grid. Each probe keeps
+    /// its slot, captured faces and publication; in-flight faces are reissued because
+    /// their jobs name the retired key. When several probes land in one cell, a
+    /// published probe stays first, then the one nearest the new cell centre. The centre probe stays the centre while it
+    /// remains inside the inner sphere.
+    fn rekey(&mut self) {
+        let old = std::mem::take(&mut self.cells);
+        self.resident_order.clear();
+        self.reflected_cells.clear();
+        self.clear_reflected_receivers();
+        self.reprojected.clear();
+        // A published probe outranks an unpublished one, so a collision never pops a
+        // visible probe; among equals the one nearest the new cell centre stays.
+        let mut placed: BTreeMap<CellKey, ((bool, f64), Entry)> = BTreeMap::new();
+        let mut witnesses = Vec::new();
+        for (_, mut entry) in old {
+            let progress = entry.progress;
+            if !progress.key.is_center() {
+                witnesses.push(progress.surface_position);
+            }
+            let key = self
+                .grid
+                .probe_key_at(progress.probe)
+                .filter(|key| self.config.center_probe || !key.is_center());
+            let Some(key) = key else {
+                self.free.insert(progress.slot);
+                self.released.insert(progress.slot);
+                continue;
+            };
+            let center = self.grid.center(key).expect("rekeyed cell");
+            let delta = sub(progress.probe.map(f64::from), center.map(f64::from));
+            let distance = (!progress.published, dot(delta, delta));
+            entry.progress.key = key;
+            entry.progress.center = center;
+            entry.progress.in_flight_faces = 0;
+            entry.tickets = [0; 6];
+            let displaced = match placed.get(&key) {
+                Some((best, _)) if *best <= distance => Some(entry),
+                _ => placed
+                    .insert(key, (distance, entry))
+                    .map(|(_, entry)| entry),
+            };
+            if let Some(entry) = displaced {
+                self.free.insert(entry.progress.slot);
+                self.released.insert(entry.progress.slot);
+            }
+        }
+        for (key, (_, entry)) in placed {
+            if !key.is_center() {
+                self.resident_order.insert(self.priority_rank(key), key);
+            }
+            self.cells.insert(key, entry);
+        }
+        // Old surface witnesses are certain geometry: confirm their cells first.
+        self.reprojected = witnesses
+            .into_iter()
+            .filter_map(|position| self.grid.key_at(position))
+            .filter(|key| !self.cells.contains_key(key))
+            .collect();
+        self.restart_scan();
     }
 
     /// Emit each band's independent face budget in view and radial priority order.
@@ -556,6 +686,14 @@ impl SphericalScheduler {
             far: reserve(budget.far),
         };
         self.reflected_face_turn = !self.reflected_face_turn && !self.reflected_cells.is_empty();
+        if let Some(center) = self.cells.get_mut(&CellKey::CENTER) {
+            center.take_jobs(
+                &mut budget,
+                self.config.near_shells,
+                &mut self.serial,
+                &mut jobs,
+            );
+        }
         let mut reflected = allowance;
         for candidate in &self.reflected_candidates {
             if self.reflected_cells.contains(&candidate.key) {
@@ -661,7 +799,8 @@ impl SphericalScheduler {
         for entry in self.cells.values() {
             let cell = entry.progress;
             stats.lighting_metadata_ready_cells += u32::from(entry.lighting.is_known());
-            stats.near_cells += u32::from(cell.key.shell < self.config.near_shells);
+            stats.near_cells +=
+                u32::from(cell.key.is_center() || cell.key.shell < self.config.near_shells);
             stats.ready_cells += u32::from(cell.is_ready());
             stats.ready_faces += cell.ready_faces.count_ones();
             stats.in_flight_faces += cell.in_flight_faces.count_ones();
@@ -680,6 +819,7 @@ impl SphericalScheduler {
         p.in_flight_faces &= !bit;
         if ready {
             p.ready_faces |= bit;
+            p.published |= p.ready_faces == ALL_FACES;
         }
         true
     }
@@ -704,7 +844,7 @@ impl SphericalScheduler {
 
     fn release(&mut self, key: CellKey) {
         let entry = self.cells.remove(&key).expect("resident cell");
-        if !self.reflected_cells.remove(&key) {
+        if !key.is_center() && !self.reflected_cells.remove(&key) {
             self.resident_order.remove(&self.priority_rank(key));
         }
         self.free.insert(entry.progress.slot);
@@ -720,10 +860,8 @@ impl SphericalScheduler {
             .keys()
             .copied()
             .filter(|&key| {
-                let cell = self.grid.cell(key);
-                bounds
-                    .iter()
-                    .any(|bounds| bounds.overlaps(cell.min, cell.max))
+                let (min, max) = self.cell_bounds(key);
+                bounds.iter().any(|bounds| bounds.overlaps(min, max))
             })
             .collect();
         for &key in &keys {
@@ -736,6 +874,16 @@ impl SphericalScheduler {
             }
         }
         !keys.is_empty()
+    }
+
+    fn cell_bounds(&self, key: CellKey) -> ([f64; 3], [f64; 3]) {
+        if key.is_center() {
+            let origin = self.grid.origin().map(f64::from);
+            let (diameter, _) = self.grid.cell_extent(key);
+            return (origin.map(|v| v - diameter), origin.map(|v| v + diameter));
+        }
+        let cell = self.grid.cell(key);
+        (cell.min, cell.max)
     }
 
     fn priority_rank(&self, key: CellKey) -> u32 {
@@ -800,6 +948,19 @@ impl SphericalScheduler {
             self.dirty = Some(DirtyScan { bounds, keys });
         }
     }
+}
+
+/// Snap a recentred anchor to a cubic lattice so a camera that comes back reuses
+/// the same cells. The snapped point is within sqrt(3)/2 steps of the camera, which
+/// stays inside the recenter tolerance and so cannot retrigger immediately.
+fn snap_origin(camera: [f32; 3], step: f32) -> [f32; 3] {
+    if step <= 0.0 {
+        return camera;
+    }
+    camera.map(|v| {
+        let snapped = (f64::from(v) / f64::from(step)).round() * f64::from(step);
+        snapped as f32
+    })
 }
 
 fn invalid_config(message: &str) -> RaaError {

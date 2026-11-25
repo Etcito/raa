@@ -73,6 +73,7 @@ fn spherical_radius_and_private_buffer_are_validated_before_apply() {
         .iter_mut()
         .find(|node| node.id == "spherical")
         .unwrap();
+    spherical.params.retain(|(key, _)| key != "clipStart");
     spherical
         .params
         .push(("clipStart".into(), JsonValue::Number(12.0)));

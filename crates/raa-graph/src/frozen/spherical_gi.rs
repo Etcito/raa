@@ -354,11 +354,11 @@ pub fn plan() -> crate::plan::GraphPlan {
                     ),
                     (
                         "exponentialPower".to_string(),
-                        crate::catalog::ParamValue::Number(0.5849625007211562),
+                        crate::catalog::ParamValue::Number(0.3),
                     ),
                     (
                         "clipStart".to_string(),
-                        crate::catalog::ParamValue::Number(0.05000000074505806),
+                        crate::catalog::ParamValue::Number(1.0),
                     ),
                     ("zMax".to_string(), crate::catalog::ParamValue::Number(12.0)),
                     (
@@ -368,6 +368,14 @@ pub fn plan() -> crate::plan::GraphPlan {
                     (
                         "debug".to_string(),
                         crate::catalog::ParamValue::Enum("off".to_string()),
+                    ),
+                    (
+                        "maxProbes".to_string(),
+                        crate::catalog::ParamValue::Int(2048),
+                    ),
+                    (
+                        "captureFaces".to_string(),
+                        crate::catalog::ParamValue::Int(48),
                     ),
                 ],
                 inputs: vec![],
