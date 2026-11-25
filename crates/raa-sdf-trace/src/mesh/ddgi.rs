@@ -509,18 +509,22 @@ fn sun_age(degrees: f32) -> u8 {
         .clamp(f32::from(RELIGHT_AGE), 12.0) as u8
 }
 
-/// Largest change of a sky SH coefficient relative to the larger band-0 magnitude.
+/// Change of the SHAPE of a sky SH: the largest coefficient difference after each sky is divided
+/// by its band-0 magnitude, so a sky that only gets brighter or darker (the physical sky follows
+/// the sun intensity) is no change. A sky that turns black or lights up is a full change.
 fn sky_change(a: &[[f32; 4]; 9], b: &[[f32; 4]; 9]) -> f32 {
-    let scale = (0..3)
-        .map(|c| a[0][c].abs().max(b[0][c].abs()))
-        .fold(1e-6, f32::max);
+    let norm = |sh: &[[f32; 4]; 9]| sh[0][..3].iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    let (na, nb) = (norm(a), norm(b));
+    if na <= 1e-7 || nb <= 1e-7 {
+        return if na <= 1e-7 && nb <= 1e-7 { 0.0 } else { 1.0 };
+    }
     let mut worst = 0.0f32;
     for k in 0..9 {
         for c in 0..3 {
-            worst = worst.max((a[k][c] - b[k][c]).abs());
+            worst = worst.max((a[k][c] / na - b[k][c] / nb).abs());
         }
     }
-    worst / scale
+    worst
 }
 
 impl DdgiPass {
@@ -1391,6 +1395,10 @@ mod tests {
         assert_eq!(sky_change(&a, &b), 0.0);
         b[3][1] = 0.4;
         assert!((sky_change(&a, &b) - 0.1).abs() < 1e-6);
+        // Brighter with the same shape (a sun intensity edit under the physical sky): no change.
+        let brighter = b.map(|c| c.map(|x| 3.0 * x));
+        assert!(sky_change(&b, &brighter) < 1e-6);
+        assert_eq!(sky_change(&a, &[[0.0; 4]; 9]), 1.0);
     }
 
     #[test]
