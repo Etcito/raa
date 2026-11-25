@@ -176,6 +176,7 @@ def score(taps, params, scale):
     learned = gated_mix(taps, params)
     # Scores of the cache contribution on all requests retain weak or absent support.
     target = taps.teacher
+    result["teacherMeanLuma"] = float(np.mean(target @ LUMA))
     result["allRequestCacheContribution"] = {
         "legacy": metrics(taps.legacy * taps.legacy_blend[:, None], target, scale),
         "directionalAnalytic": metrics(analytic * taps.blend[:, None], target, scale),
@@ -279,14 +280,7 @@ def read_capture(path, split):
         if sha256(data) != record["sha256"]:
             raise ValueError(f"Capture digest mismatch: {record['file']}")
         taps, rows = unpack_rows(data, record["rows"])
-        pixel_indices = None
-        if "rasterIndices" in record:
-            raster = record["rasterIndices"]
-            indices = relative_read(path.parent, raster["file"])
-            if len(indices) != 4 * record["rows"] or sha256(indices) != raster["sha256"]:
-                raise ValueError(f"Raster index digest or length mismatch: {raster['file']}")
-            pixel_indices = np.frombuffer(indices, dtype="<u4")
-        frames.append((record, taps, rows, pixel_indices))
+        frames.append((record, taps, rows))
     return manifest, frames, sha256(payload)
 
 
@@ -341,23 +335,20 @@ def unique_indices(keys):
 def temporal_pairs(frames, params):
     previous = {}
     result = []
-    for record, taps, rows, raster in frames:
+    for record, taps, rows in frames:
         trajectory = record.get("trajectory")
         if trajectory is None:
             continue
         words = rows.view("<u4")
-        key_kind = "raster" if raster is not None else "worldHitHash"
-        keys, indices = unique_indices(raster if raster is not None else words[:, 31])
+        keys, indices = unique_indices(words[:, 31])
         primitives = words[:, 3][indices]
         valid = taps.supported[indices]
         current = residuals(taps, params)[indices]
         old = previous.get(trajectory)
-        previous[trajectory] = (record, key_kind, keys, primitives, valid, current)
+        previous[trajectory] = (record, keys, primitives, valid, current)
         if old is None:
             continue
-        old_record, old_kind, old_keys, old_primitives, old_supported, old_residuals = old
-        if old_kind != key_kind:
-            raise ValueError(f"Trajectory matching key changed: {trajectory}")
+        old_record, old_keys, old_primitives, old_supported, old_residuals = old
         common, left, right = np.intersect1d(old_keys, keys, assume_unique=True, return_indices=True)
         supported = old_supported[left] & valid[right]
         delta = current[right] - old_residuals[left]
@@ -373,7 +364,7 @@ def temporal_pairs(frames, params):
                     ("legacy", "directionalAnalytic", "directionalLearned"), errors.tolist()
                 ))
         result.append({"trajectory": trajectory, "from": old_record["id"], "to": record["id"],
-                       "matchKey": key_kind, "commonRequests": int(common.size), **scores})
+                       "matchKey": "raster", "commonRequests": int(common.size), **scores})
     return result
 
 
@@ -401,7 +392,7 @@ def score_scene(manifest, frames, params, scale, weights_sha=None):
         "conditions": {name: score_frames(group, params, scale) for name, group in groups.items()},
         "frames": [
             {**{k: record[k] for k in ("id", "condition", "reference", "sha256")},
-             **{k: record[k] for k in ("trajectory", "camera", "lighting", "gpuTimings") if k in record},
+             **{k: record[k] for k in ("trajectory", "camera", "lighting", "gpuTimings", "grid", "trace") if k in record},
              **score_frames([frame], params, scale),
              "nativeLearnedParity": native_parity(record, frame[1], frame[2], params, weights_sha)}
             for frame in frames for record in (frame[0],)
