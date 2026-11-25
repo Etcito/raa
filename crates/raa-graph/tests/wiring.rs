@@ -14,7 +14,7 @@ use raa_graph::registry;
 use raa_pipeline::{FeaturePass, PipelineConfig, RecordCtx};
 
 /// The pass nodes whose `color` input and output are generic (the chain of the colour graph).
-const CHAIN: [&str; 12] = [
+const CHAIN: [&str; 13] = [
     "pass.gi.history",
     "pass.ssr",
     "pass.fog",
@@ -26,6 +26,7 @@ const CHAIN: [&str; 12] = [
     "pass.dof",
     "pass.bloom",
     "pass.grading",
+    "pass.sharpen",
     "pass.cel.resolve",
 ];
 
@@ -41,7 +42,7 @@ const MULTI: [&str; 7] = [
 ];
 
 /// The node types that stay single-instance.
-const SINGLE: [&str; 8] = [
+const SINGLE: [&str; 9] = [
     "pass.prepass",
     "pass.forward",
     "pass.tonemap",
@@ -50,6 +51,7 @@ const SINGLE: [&str; 8] = [
     "pass.transparent.oit",
     "pass.particles.blend",
     "pass.gi.history",
+    "pass.sharpen",
 ];
 
 fn node_of<'a>(catalog: &'a Catalog, id: &str) -> &'a NodeTypeSpec {
@@ -292,6 +294,63 @@ fn the_order_from_links_is_accepted_by_the_pipeline_config() {
     assert!(at("bloom") < at("dof"));
     assert!(at("dof") < at("tonemap"));
     assert_eq!(at("tonemap"), names.len() - 1);
+}
+
+/// The Simple forward frozen graph with `pass.taa` then `pass.sharpen` spliced between forward and
+/// tonemap: the temporal-upscaling chain the SDF Modeler Game setting builds.
+fn simple_forward_taau() -> GraphDoc {
+    let mut doc = parse_graph(include_str!("../src/frozen/simple_forward.json"))
+        .expect("the Simple forward graph parses");
+    doc.links
+        .retain(|l| l.from != port("forward.color") || l.to != port("tonemap.color"));
+    doc.nodes.push(node("taau", "pass.taa"));
+    doc.nodes.push(node("sharpen", "pass.sharpen"));
+    doc.links.push(link("forward.color", "taau.color"));
+    doc.links.push(link("taau.color", "sharpen.color"));
+    doc.links.push(link("sharpen.color", "tonemap.color"));
+    doc
+}
+
+#[test]
+fn simple_forward_with_taa_and_sharpen_plans_and_enables_both_entries_in_chain_order() {
+    let catalog = Catalog::build();
+    let plan = plan_of(&simple_forward_taau()).unwrap_or_else(|issues| panic!("{issues:?}"));
+    assert!(order_of(&plan, "forward") < order_of(&plan, "taau"));
+    assert!(order_of(&plan, "taau") < order_of(&plan, "sharpen"));
+    assert!(order_of(&plan, "sharpen") < order_of(&plan, "tonemap"));
+    let taa = plan.nodes.iter().find(|n| n.id == "taau").expect("taau planned");
+    let motion = taa.inputs.iter().find(|i| i.port == "motion").expect("motion input");
+    assert!(
+        matches!(&motion.source, raa_graph::plan::InputSource::Default { node, port } if node == "prepass" && port == "motion"),
+        "the TAA motion comes from the prepass by default: {:?}",
+        motion.source
+    );
+    let mut config = PipelineConfig::new();
+    for planned in &plan.nodes {
+        let spec = node_of(&catalog, &planned.type_id);
+        let Some(name) = spec.pass.filter(|_| !spec.contributor) else {
+            continue;
+        };
+        let mock = Mock {
+            name,
+            order: spec.default_order,
+            required: spec.required_in_graph,
+        };
+        config
+            .add(Box::new(mock))
+            .unwrap_or_else(|error| panic!("{error:?}"));
+    }
+    let instructions = pipeline_instructions(&plan, &catalog, &config.passes());
+    for entry in ["taa", "sharpen"] {
+        assert!(
+            instructions.enable.iter().any(|(name, on)| name == entry && *on),
+            "{entry} enabled: {:?}",
+            instructions.enable
+        );
+    }
+    let order: Vec<&str> = instructions.order.iter().map(String::as_str).collect();
+    let at = |name: &str| order.iter().position(|entry| *entry == name).unwrap();
+    assert!(at("forward") < at("taa") && at("taa") < at("sharpen") && at("sharpen") < at("tonemap"));
 }
 
 /// The Full GI starter with the `pass.dof` nodes `(id, fStop)` added before `tonemap`, spliced

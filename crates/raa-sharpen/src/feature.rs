@@ -132,6 +132,9 @@ fn pack_params(out: &mut [u8; PARAMS_SIZE], sharpness: f32) {
     out[..4].copy_from_slice(&sharpness.to_le_bytes());
 }
 
+/// Cached bind groups: the two own HDR chain textures plus graph-bound chain images.
+const MAX_GROUPS: usize = 8;
+
 /// One cached bind group, with the HDR chain texture whose view it binds.
 struct TextureGroup {
     texture: wgpu::Texture,
@@ -148,7 +151,8 @@ struct SharpenPass {
     pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
     scratch: [u8; PARAMS_SIZE],
-    /// One entry per HDR chain texture (A and B), rebuilt by `resize` only.
+    /// One entry per HDR chain texture (A and B, rebuilt by `resize`) and per graph-bound
+    /// source seen by `record` (at most MAX_GROUPS in all).
     groups: Vec<TextureGroup>,
 }
 
@@ -235,11 +239,20 @@ impl FeaturePass for SharpenPass {
     }
 
     /// One fullscreen draw from `hdr.src()` into `hdr.dst()` (load Clear transparent), then swap.
+    /// A render graph binds its own chain images (`HdrChain::bind`), possibly display-sized after
+    /// a temporal resolve: their groups are created here on first use and kept in a small cache.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let hdr = ctx.targets.hdr();
+        if !self.groups.iter().any(|g| g.texture == *hdr.src_texture()) {
+            if self.groups.len() >= MAX_GROUPS {
+                self.groups.remove(0);
+            }
+            let group = self.texture_group(ctx.gpu.device(), hdr.src_texture(), hdr.src());
+            self.groups.push(group);
+        }
         let Some(entry) = self.groups.iter().find(|g| g.texture == *hdr.src_texture()) else {
             return Err(RaaError::Resource(
-                "sharpen: the HDR source is not a texture the pass was resized for".to_owned(),
+                "sharpen: no bind group for the HDR source".to_owned(),
             ));
         };
         {

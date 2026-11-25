@@ -138,6 +138,7 @@ pub fn chain_type(ty: &str) -> bool {
                 | "ssr.composite"
                 | "ssr.replace"
                 | "pass.grading"
+                | "pass.sharpen"
                 | "pass.cel.resolve"
         )
 }
