@@ -8,17 +8,39 @@
 // 2 clipStart, zMax, frame, channel mask; 3 x = table row of the centre probe (0 none),
 // y = parallax range (f32 metres, 0 = always parallax patches), z = first screen-resolve
 // row (0 none), w = resolve width | height << 16;
-// 4.. shell inner, centre, outer. Entry rows: key, slot, first publication frame,
-// light hash; probe xyz + spacing; reserved xyz + published.
-
-const RAA_SPHERICAL_TABLE: u32 = 68u;
+// 4.. shell inner, centre, outer (row 4 w: sphere-only direct near-sun radius in metres as
+// f32, 0 = off); 68 sun group scale rgb, 69 sky group scale rgb (see below).
+// Entry rows: key, slot, first publication frame, light hash; probe xyz + spacing;
+// reserved xyz + published.
+//
+// Light groups: probes store the sun and sky groups at UNIT intensity (the sun group as
+// the response to a white unit sun, the sky group as the environment divided by its norm,
+// the mean luminance of 64 directions of its last mip, or a unit ambient); the lookup
+// multiplies them by header rows 68 and 69, written on the GPU every frame
+// (spherical_scales: sun radiance; sky diffuse x norm, or the ambient colour), so a sun
+// or sky intensity / tint change recaptures nothing (handoff/light-change.md interface).
+// The other group (local lights, emission) is stored absolute and invalidated per light.
+const RAA_SPHERICAL_TABLE: u32 = 70u;
+const RAA_SPHERICAL_SUN_SCALE_ROW: u32 = 68u;
+const RAA_SPHERICAL_SKY_SCALE_ROW: u32 = 69u;
 // 21 legacy rows (uniform average, six world-axis faces, three light groups each),
-// 24 parallax patches x 3 rows (hit centroid + R², intensity + coherence, miss flux +
-// octahedral mean normal), 96 depth-moment bins two per row, one information row.
-const RAA_SPHERICAL_SLOT_ROWS: u32 = 142u;
+// 24 parallax patches x 4 rows (hit centroid + R², sun intensity + coherence, sky miss
+// flux + octahedral mean normal, x = sky intensity and y = other intensity as rgb9e5,
+// z w spare for a sky transfer), 96 depth-moment bins
+// two per row, one information row, one light row (sphere-only direct: sun visibility,
+// two light indices, their visibility).
+const RAA_SPHERICAL_SLOT_ROWS: u32 = 167u;
 const RAA_SPHERICAL_PATCH_ROW: u32 = 21u;
-const RAA_SPHERICAL_MOMENT_ROW: u32 = 93u;
-const RAA_SPHERICAL_INFO_ROW: u32 = 141u;
+const RAA_SPHERICAL_PATCH_STRIDE: u32 = 4u;
+const RAA_SPHERICAL_MOMENT_ROW: u32 = 117u;
+const RAA_SPHERICAL_INFO_ROW: u32 = 165u;
+const RAA_SPHERICAL_LIGHT_ROW: u32 = 166u;
+
+// Shared-exponent rgb (9-bit mantissas, 5-bit exponent, bias 15), unsigned.
+fn raa_spherical_rgb9e5(v: u32) -> vec3<f32> {
+    let scale = exp2(f32(i32(v >> 27u) - 24));
+    return vec3<f32>(f32(v & 511u), f32((v >> 9u) & 511u), f32((v >> 18u) & 511u)) * scale;
+}
 const RAA_SPHERICAL_EMPTY: u32 = 0xffffffffu;
 const RAA_SPHERICAL_CENTER: u32 = 0xffffu;
 const RAA_SPHERICAL_FADE_FRAMES: f32 = 8.0;
@@ -121,12 +143,24 @@ fn raa_spherical_incident(entry: u32, mask: u32, channels: u32) -> vec3<f32> {
     return raa_spherical_channel_sum(raa_spherical_slot(entry, mask), channels);
 }
 
+// Group scales of the unit-intensity sky (x) and sun (y) groups, rgb each.
+fn raa_spherical_sky_scale() -> vec3<f32> {
+    return bitcast<vec3<f32>>(raa_spherical_data[RAA_SPHERICAL_SKY_SCALE_ROW].xyz);
+}
+fn raa_spherical_sun_scale() -> vec3<f32> {
+    return bitcast<vec3<f32>>(raa_spherical_data[RAA_SPHERICAL_SUN_SCALE_ROW].xyz);
+}
+
 fn raa_spherical_channel_sum(base: u32, channels: u32) -> vec3<f32> {
     var rgb = vec3<f32>(0.0);
-    for (var i = 0u; i < 3u; i++) {
-        if (channels & (1u << i)) != 0u {
-            rgb += bitcast<vec3<f32>>(raa_spherical_data[base + i].rgb);
-        }
+    if (channels & 1u) != 0u {
+        rgb += raa_spherical_sky_scale() * bitcast<vec3<f32>>(raa_spherical_data[base].rgb);
+    }
+    if (channels & 2u) != 0u {
+        rgb += raa_spherical_sun_scale() * bitcast<vec3<f32>>(raa_spherical_data[base + 1u].rgb);
+    }
+    if (channels & 4u) != 0u {
+        rgb += bitcast<vec3<f32>>(raa_spherical_data[base + 2u].rgb);
     }
     return rgb;
 }
@@ -147,31 +181,39 @@ fn raa_spherical_probe_irradiance(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f
     let hi = n > vec3<f32>(0.82);
     let culled = select(0u, 0xfu, lo.x) | select(0u, 0xf0u, hi.x) | select(0u, 0xf00u, lo.y)
         | select(0u, 0xf000u, hi.y) | select(0u, 0xf0000u, lo.z) | select(0u, 0xf00000u, hi.z);
-    var e = vec3<f32>(0.0);
+    var e_sun = vec3<f32>(0.0);
+    var e_sky = vec3<f32>(0.0);
+    var e_other = vec3<f32>(0.0);
     for (var k = 0u; k < 24u; k++) {
         if ((culled >> k) & 1u) != 0u {
             continue;
         }
-        let r0 = bitcast<vec4<f32>>(raa_spherical_data[base + 3u * k]);
+        let row = base + RAA_SPHERICAL_PATCH_STRIDE * k;
+        let r0 = bitcast<vec4<f32>>(raa_spherical_data[row]);
         if r0.w >= 0.0 {
             let delta = r0.xyz - p;
             let d2 = dot(delta, delta);
             let w = delta * inverseSqrt(max(d2, 1e-10));
             let cos_n = dot(n, w);
             if cos_n > 0.0 {
-                let r1 = bitcast<vec4<f32>>(raa_spherical_data[base + 3u * k + 1u]);
-                let normal = raa_spherical_oct_decode(unpack2x16snorm(raa_spherical_data[base + 3u * k + 2u].w));
+                let r1 = bitcast<vec4<f32>>(raa_spherical_data[row + 1u]);
+                let normal = raa_spherical_oct_decode(unpack2x16snorm(raa_spherical_data[row + 2u].w));
                 let cos_h = mix(1.0, max(0.0, -dot(normal, w)), r1.w);
-                e += r1.xyz * (cos_h * cos_n / (d2 + r0.w));
+                let g = cos_h * cos_n / (d2 + r0.w);
+                e_sun += r1.xyz * g;
+                let r3 = raa_spherical_data[row + 3u];
+                e_sky += raa_spherical_rgb9e5(r3.x) * g;
+                e_other += raa_spherical_rgb9e5(r3.y) * g;
             }
         }
         if (misses & (1u << k)) != 0u {
-            let miss = bitcast<vec3<f32>>(raa_spherical_data[base + 3u * k + 2u].xyz);
+            let miss = bitcast<vec3<f32>>(raa_spherical_data[row + 2u].xyz);
             let corner = vec2<f32>(f32(k & 1u), f32((k >> 1u) & 1u)) - 0.5;
             let d = normalize(raa_spherical_face_direction(k / 4u, corner));
-            e += miss * max(0.0, dot(n, d));
+            e_sky += miss * max(0.0, dot(n, d));
         }
     }
+    let e = raa_spherical_sun_scale() * e_sun + raa_spherical_sky_scale() * e_sky + e_other;
     return e * 0.31830988;
 }
 
@@ -292,7 +334,18 @@ fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult
 // the four nearest resolve texels, keeping those resolved for a surface at this camera
 // distance (within 2%), else any resolved neighbour; no resolve gives no spherical light.
 // Forward never runs the probe lookup itself (its registers and ~150 loads per pixel).
+// Also sets raa_spherical_sun_visibility (the probes' sun visibility, sphere-only direct).
+var<private> raa_spherical_sun_visibility: f32;
+
+// Sphere-only direct lighting: forward skips local lights, and the cascaded sun shadow
+// beyond this radius (metres; < 0 when the mode is off).
+fn raa_spherical_direct_range() -> f32 {
+    let range = bitcast<f32>(raa_spherical_data[4].w);
+    return select(-1.0, range, raa_spherical_data[1].x != 0u && range > 0.0);
+}
+
 fn raa_spherical_screen(p: vec3<f32>, frag: vec2<f32>, eye: vec3<f32>) -> RaaSphericalResult {
+    raa_spherical_sun_visibility = 1.0;
     let screen = raa_spherical_data[3];
     if screen.z == 0u { return RaaSphericalResult(); }
     let size = vec2<i32>(i32(screen.w & 0xffffu), i32(screen.w >> 16u));
@@ -304,28 +357,35 @@ fn raa_spherical_screen(p: vec3<f32>, frag: vec2<f32>, eye: vec3<f32>) -> RaaSph
     var total = 0.0;
     var any_sum = vec4<f32>(0.0);
     var any_total = 0.0;
+    var sun = vec2<f32>(0.0);
+    var any_sun = vec2<f32>(0.0);
     var flags = 0u;
     for (var i = 0u; i < 4u; i++) {
         let o = vec2<u32>(i & 1u, i >> 1u);
         let texel = clamp(vec2<i32>(corner) + vec2<i32>(o), vec2<i32>(0), size - 1);
         let row = raa_spherical_data[screen.z + u32(texel.y * size.x + texel.x)];
-        // Row layout: see mesh_spherical_resolve.wgsl (rgb f32, distance | blend | flags).
+        // Row layout: see mesh_spherical_resolve.wgsl (rgb f32; distance | blend | sun | flags).
         if (row.w & 1u) == 0u { continue; }
         flags |= row.w & 3u;
         let w = select(1.0 - f.x, f.x, o.x == 1u) * select(1.0 - f.y, f.y, o.y == 1u) + 1e-3;
-        let value = vec4<f32>(bitcast<vec3<f32>>(row.xyz), f32((row.w >> 2u) & 1023u) / 1023.0);
+        let value = vec4<f32>(bitcast<vec3<f32>>(row.xyz), f32((row.w >> 8u) & 255u) / 255.0);
+        let visibility = f32((row.w >> 2u) & 63u) / 63.0;
         any_sum += w * value;
         any_total += w;
-        if abs(bitcast<f32>(row.w & 0xfffff000u) - distance) <= 0.02 * distance + 0.002 {
+        any_sun += vec2<f32>(w * visibility, w);
+        if abs(bitcast<f32>(row.w & 0xffff0000u) - distance) <= 0.02 * distance + 0.002 {
             sum += w * value;
             total += w;
+            sun += vec2<f32>(w * visibility, w);
         }
     }
     var value = vec4<f32>(0.0);
     if total > 0.0 {
         value = sum / total;
+        raa_spherical_sun_visibility = sun.x / sun.y;
     } else if any_total > 0.0 {
         value = any_sum / any_total;
+        raa_spherical_sun_visibility = any_sun.x / any_sun.y;
     }
     if (flags & 2u) != 0u { return RaaSphericalResult(vec4<f32>(0.0), value); }
     return RaaSphericalResult(value, vec4<f32>(0.0));
@@ -428,45 +488,99 @@ fn raa_spherical_top(p: vec3<f32>, n: vec3<f32>, cell: RaaSphericalCoordinate) -
     return top;
 }
 
-// Physical irradiance / pi stays available while forward displays a debug overlay.
-// Only the two strongest probes are evaluated with parallax. Each keeps its weight
-// minus the third strongest weight, so a probe enters or leaves the evaluated set at
-// zero weight and the selection never shows a seam. The support weights already
-// include visibility, so occluded probes do not leak.
+// Physical irradiance / pi of the grid at p: every published corner probe of the
+// trilinear cell (eight, or four inside one shell) contributes its parallax irradiance
+// weighted by trilinear x facing x Chebyshev visibility x fade/validity, normalised by
+// the total weight (DDGI-style), so the result is continuous across cell and shell
+// boundaries; a probe enters and leaves at zero trilinear weight. With poor coverage the
+// centre probe and the shell's 3x3 ring join with a distance weight. It runs in the
+// half-resolution screen resolve, never in forward.
 fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
                            cell: RaaSphericalCoordinate) -> vec4<f32> {
     if cell.desc.x == 0u { return vec4<f32>(0.0); }
-    let top = raa_spherical_top(p, normal, cell);
     let mask = cell.desc.z;
-    let a = top.w0 - top.w2;
-    let b = top.w1 - top.w2;
-    if a <= 1e-7 { return vec4<f32>(0.0); }
-    // Far receivers use the six-face irradiance (no parallax), blended in over
-    // [range, 1.5 range] from the anchor; only that band pays for both.
+    // Far receivers may use the six-face irradiance (no parallax), see parallaxRange.
     let range = bitcast<f32>(raa_spherical_data[3].y);
     let far = select(0.0, smoothstep(range, 1.5 * range, cell.radius), range > 0.0);
+    let interpolation = raa_spherical_interpolation(cell);
+    // Trilinear weights are NOT floored: a corner that is not shared with the next cell
+    // reaches exactly zero on the boundary, so dropping missing corners (renormalising)
+    // stays continuous. The floored sum is only used where every shared corner is gone.
     var sum = vec3<f32>(0.0);
-    if far < 1.0 {
-        var near = a * raa_spherical_probe_irradiance(top.e0, mask, p, normal);
-        if b > 1e-7 {
-            near += b * raa_spherical_probe_irradiance(top.e1, mask, p, normal);
-        }
-        sum += (1.0 - far) * near;
+    var total = 0.0;
+    var floor_sum = vec3<f32>(0.0);
+    var floor_total = 0.0;
+    var coverage = 0.0;
+    for (var i = 0u; i < select(8u, 4u, interpolation.shell0 == interpolation.shell1); i++) {
+        let corner = raa_spherical_corner(i);
+        let entry = raa_spherical_find(raa_spherical_corner_key(cell, interpolation, corner), mask);
+        if !raa_spherical_published(entry) { continue; }
+        let f = select(1.0 - interpolation.fraction, interpolation.fraction, corner);
+        let trilinear = f.x * f.y * f.z;
+        let gates = raa_spherical_support_gates(entry, p, normal);
+        coverage += trilinear * gates.z;
+        let support = gates.x * gates.y * gates.z;
+        if support <= 1e-6 { continue; }
+        let value = raa_spherical_probe_value(entry, mask, p, normal, far);
+        sum += trilinear * support * value;
+        total += trilinear * support;
+        floor_sum += 0.001 * support * value;
+        floor_total += 0.001 * support;
     }
-    if far > 0.0 {
-        var cube = a * raa_spherical_probe_cube(top.e0, mask, normal);
-        if b > 1e-7 {
-            cube += b * raa_spherical_probe_cube(top.e1, mask, normal);
+    // Low coverage: the floored corners, then the centre probe and the shell's 3x3 ring,
+    // faded in continuously as the trilinear coverage drops below 0.5.
+    let corners = select(vec3<f32>(0.0), sum / max(total, 1e-12), total > 0.0);
+    let floor_value = select(vec3<f32>(0.0), floor_sum / max(floor_total, 1e-12), floor_total > 0.0);
+    let main_weight = smoothstep(0.0, 0.02, total);
+    sum = mix(floor_value, corners, main_weight);
+    total = select(0.0, 1.0, total > 0.0 || floor_total > 0.0);
+    let ring = 1.0 - smoothstep(0.25, 0.5, coverage);
+    if ring > 0.0 {
+        var ring_sum = vec3<f32>(0.0);
+        var ring_total = 0.0;
+        let center = vec2<i32>(floor(cell.angular));
+        for (var k = 0u; k < 10u; k++) {
+            // k == 0 visits the centre probe, then the 3x3 columns of this shell.
+            let m = i32(max(k, 1u) - 1u);
+            let ij = center + vec2<i32>(m % 3 - 1, m / 3 - 1);
+            let key = select(raa_spherical_key(cell.shell, cell.face, ij, cell.desc.x),
+                raa_spherical_key(RAA_SPHERICAL_CENTER, 0u, vec2<i32>(0), cell.desc.x), k == 0u);
+            let entry = raa_spherical_find(key, mask);
+            if !raa_spherical_published(entry) { continue; }
+            let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
+            let offset = probe.xyz - p;
+            let spacing2 = probe.w * probe.w;
+            let distance_weight = 0.25 * spacing2 / (dot(offset, offset) + spacing2);
+            let gates = raa_spherical_support_gates(entry, p, normal);
+            coverage += distance_weight * gates.z;
+            let w = distance_weight * gates.x * gates.y * gates.z;
+            if w <= 1e-6 { continue; }
+            ring_sum += w * raa_spherical_probe_value(entry, mask, p, normal, far);
+            ring_total += w;
         }
-        sum += far * cube;
+        if ring_total > 0.0 {
+            let ring_value = ring_sum / ring_total;
+            sum = select(ring_value, mix(sum, ring_value, ring), total > 0.0);
+            total = 1.0;
+        }
     }
+    if total <= 1e-7 { return vec4<f32>(0.0); }
     // Coverage ignores visibility so an occluded receiver still uses the probes
     // rather than the legacy ambient; it fades out over the outer half of the last shell.
     let last = bitcast<vec3<f32>>(raa_spherical_data[4u + cell.desc.y - 1u].xyz);
     let edge = 1.0 - smoothstep(last.y, last.z, cell.radius);
-    let blend = smoothstep(0.0, 0.25, top.coverage) * edge;
+    let blend = smoothstep(0.0, 0.25, coverage) * edge;
     let intensity = bitcast<f32>(raa_spherical_data[0].w);
-    return vec4<f32>(intensity * sum / (a + max(b, 0.0)), blend);
+    return vec4<f32>(intensity * sum / total, blend);
+}
+
+// One probe: parallax patches near, six-face irradiance beyond parallaxRange.
+fn raa_spherical_probe_value(entry: u32, mask: u32, p: vec3<f32>, normal: vec3<f32>,
+                             far: f32) -> vec3<f32> {
+    var value = vec3<f32>(0.0);
+    if far < 1.0 { value += (1.0 - far) * raa_spherical_probe_irradiance(entry, mask, p, normal); }
+    if far > 0.0 { value += far * raa_spherical_probe_cube(entry, mask, normal); }
+    return value;
 }
 
 struct RaaSphericalInterpolation {

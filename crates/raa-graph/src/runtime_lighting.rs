@@ -22,6 +22,8 @@ pub(crate) const SPHERICAL_KEYS: &[&str] = &[
     "skySamples",
     "lightSamples",
     "parallaxRange",
+    "sphereDirect",
+    "directSunRange",
     "autoRange",
     "enabled",
 ];
@@ -50,6 +52,8 @@ pub(crate) fn spherical_get(settings: SphericalGiSettings, key: &str) -> Option<
         "skySamples" => ParamValue::Int(i64::from(settings.sky_samples)),
         "lightSamples" => ParamValue::Int(i64::from(settings.light_samples)),
         "parallaxRange" => ParamValue::Number(f64::from(settings.parallax_range)),
+        "sphereDirect" => ParamValue::Bool(settings.sphere_direct),
+        "directSunRange" => ParamValue::Number(f64::from(settings.direct_sun_range)),
         "autoRange" => ParamValue::Bool(settings.scheduler.auto_range),
         "debug" => ParamValue::Enum(
             DEBUG
@@ -110,6 +114,10 @@ pub(crate) fn spherical_set(
         }
         ("parallaxRange", ParamValue::Number(value)) if (0.0..=10000.0).contains(value) => {
             settings.parallax_range = *value as f32;
+        }
+        ("sphereDirect", ParamValue::Bool(value)) => settings.sphere_direct = *value,
+        ("directSunRange", ParamValue::Number(value)) if (0.0..=10000.0).contains(value) => {
+            settings.direct_sun_range = *value as f32;
         }
         ("autoRange", ParamValue::Bool(value)) => settings.scheduler.auto_range = *value,
         ("debug", ParamValue::Enum(value)) => {

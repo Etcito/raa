@@ -59,7 +59,9 @@
         "captureFaces": 96,
         "captureMs": 0.75,
         "burstMs": 4,
-        "parallaxRange": 8,
+        "parallaxRange": 0,
+        "sphereDirect": false,
+        "directSunRange": 12,
         "autoRange": true
       }
     },

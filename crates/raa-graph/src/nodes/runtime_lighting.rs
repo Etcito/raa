@@ -145,6 +145,22 @@ impl NodeFamily for RuntimeLighting {
                 Rebuild::None,
             ),
             (
+                "sphereDirect",
+                "Sphere-only direct lighting",
+                ParamKind::Bool,
+                None,
+                &[][..],
+                Rebuild::None,
+            ),
+            (
+                "directSunRange",
+                "Cascaded sun range",
+                ParamKind::Number,
+                Some((0.0, 10000.0)),
+                &[][..],
+                Rebuild::None,
+            ),
+            (
                 "autoRange",
                 "Outer radius from scene bounds",
                 ParamKind::Bool,

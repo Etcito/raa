@@ -347,6 +347,16 @@ export interface SphericalGiSettings {
    */
   parallaxRange: number;
   /**
+   * Sphere-only direct lighting: forward skips its local lights (they arrive through the
+   * screen resolve: each probe pair's two strongest lights, evaluated at the receiver and
+   * shadowed by the probes' visibility; diffuse only) and, beyond directSunRange metres
+   * from the camera, the cascaded sun shadow (the probes' sun visibility instead). Emissive
+   * surfaces already light the scene through the probes. Defaults to false.
+   */
+  sphereDirect: boolean;
+  /** Metres from the camera within which the sun keeps its cascaded shadow when sphereDirect is on. Defaults to 12. */
+  directSunRange: number;
+  /**
    * Derive zMax from the scene: the farthest corner of the geometry bounds from the grid
    * anchor, quantised to quarter octaves, grown at once and shrunk only below 1/sqrt(2) of the
    * current radius; shells are re-derived from [clipStart, outer radius] and probes rekeyed.
