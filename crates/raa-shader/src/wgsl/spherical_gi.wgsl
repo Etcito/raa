@@ -107,6 +107,18 @@ fn raa_spherical_moments(slot: u32, face: u32, bin: vec2<u32>) -> vec2<f32> {
 // moments of the four nearest 4x4 bins of the face are interpolated (clamped at the face
 // border) before the Chebyshev test, so the visibility has no bin edges.
 fn raa_spherical_visibility_at(entry: u32, mask: u32, query: vec3<f32>, bilinear: bool) -> f32 {
+    return raa_spherical_visibility_mode(entry, mask, query, select(0u, 8u, bilinear));
+}
+
+// Bit 3: bilinear moments; bit 5: separate the sky misses from the hits. A capture texel
+// that misses stores the miss distance (1.5 x the outer radius of the grid), so one miss
+// in a bin pushes its mean far beyond the wall the other texels hit and Chebyshev calls
+// everything behind that wall visible. With the miss distance M known, the bin's two
+// moments give the miss fraction f and the hit distance r (hits at one distance:
+// mean = f M + (1 - f) r, second = f M^2 + (1 - f) r^2); the visibility is then
+// f + (1 - f) x Chebyshev(hits), so a probe outside a wall keeps only its sky fraction.
+fn raa_spherical_visibility_mode(entry: u32, mask: u32, query: vec3<f32>, mode: u32) -> f32 {
+    let bilinear = (mode & 8u) != 0u;
     let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
     let offset = query - probe.xyz;
     let distance = length(offset);
@@ -128,11 +140,23 @@ fn raa_spherical_visibility_at(entry: u32, mask: u32, query: vec3<f32>, bilinear
         let bin = clamp(vec2<u32>((face_uv.xy + 1.0) * 2.0), vec2<u32>(0u), vec2<u32>(3u));
         moments = raa_spherical_moments(slot, face, bin);
     }
+    var sky = 0.0;
+    if (mode & 32u) != 0u {
+        let miss = 1.5 * bitcast<f32>(raa_spherical_data[4u + raa_spherical_data[1].y - 1u].z);
+        if moments.x >= 0.999 * miss { return 1.0; }
+        let mean = moments.x;
+        let r = clamp((moments.y - mean * miss) / min(mean - miss, -1e-6), 0.0, mean);
+        sky = clamp((mean - r) / max(miss - r, 1e-6), 0.0, 1.0);
+        // Hit moments of the remaining (1 - f) part.
+        let hit_mean = (mean - sky * miss) / max(1.0 - sky, 1e-6);
+        let hit_second = (moments.y - sky * miss * miss) / max(1.0 - sky, 1e-6);
+        moments = vec2<f32>(clamp(hit_mean, 0.0, mean), max(hit_second, 0.0));
+    }
     if distance <= moments.x { return 1.0; }
     let variance = max(abs(moments.y - moments.x * moments.x), 1e-4 * probe.w * probe.w);
     let d = distance - moments.x;
     let v = variance / (variance + d * d);
-    return v * v * v;
+    return sky + (1.0 - sky) * v * v * v;
 }
 
 // x: probe in front of the receiver, y: visibility, z: fade-in times validity.
@@ -143,7 +167,8 @@ fn raa_spherical_support_gates(entry: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f
 // EVAL ONLY (lookup variants): parallaxRange >= 9000 selects variant bits (value - 9000);
 // the parallax range is then effectively infinite (patches everywhere). Bit 0: normal
 // offset of the lookup point (0.3 x smallest spacing), bit 1: normal + view offset, bit 2:
-// sharp backface weight, bit 3: bilinear Chebyshev moments, bit 4: continuous ring.
+// sharp backface weight, bit 3: bilinear Chebyshev moments, bit 4: continuous ring,
+// bit 5: sky misses separated from the hits in the moments.
 fn raa_spherical_variant() -> u32 {
     let range = bitcast<f32>(raa_spherical_data[3].y);
     return select(0u, u32(range - 9000.0), range >= 9000.0);
@@ -164,7 +189,7 @@ fn raa_spherical_support_gates_at(entry: u32, p: vec3<f32>, n: vec3<f32>, query:
     }
     // Without the lookup offset (bits 0-1) the query is p biased by this probe's spacing.
     let at = select(p + n * max(0.02, 0.05 * probe.w), query, (variant & 3u) != 0u);
-    let visibility = raa_spherical_visibility_at(entry, mask, at, (variant & 8u) != 0u);
+    let visibility = raa_spherical_visibility_mode(entry, mask, at, variant & 40u);
     let age = f32(raa_spherical_data[2].z - raa_spherical_data[entry].z);
     let fade = smoothstep(0.0, RAA_SPHERICAL_FADE_FRAMES, age + 1.0);
     let validity = bitcast<f32>(raa_spherical_data[raa_spherical_slot(entry, mask)
