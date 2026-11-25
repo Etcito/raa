@@ -424,6 +424,10 @@ impl FeaturePass for SphericalPass {
             let Some(frame) = mesh.frame.clone() else {
                 return Ok(());
             };
+            let texture_atlas = mesh
+                .texture_atlas
+                .clone()
+                .expect("prepared mesh trace atlas");
             let geometry = mesh.geometry_buffers(ctx.gpu);
             gpu.record(
                 ctx,
@@ -431,6 +435,7 @@ impl FeaturePass for SphericalPass {
                 &self.staged.jobs,
                 &frame,
                 &geometry,
+                &texture_atlas,
                 mesh.geometry.count(),
                 mesh.sky_diffuse,
             );
@@ -743,6 +748,7 @@ impl SphericalGpu {
         jobs: &[FaceJob],
         frame: &Buffer,
         geometry: &[Buffer; 3],
+        texture_atlas: &wgpu::TextureView,
         triangle_count: u32,
         sky_diffuse: f32,
     ) {
@@ -803,6 +809,7 @@ impl SphericalGpu {
                 buffer_entry(21, &self.work),
                 buffer_entry(22, &self.faces),
                 buffer_entry(24, &self.face_lighting),
+                image_entry(crate::wgsl::MESH_TRACE_ATLAS_BINDING, texture_atlas),
             ],
         });
         let mut pass = ctx

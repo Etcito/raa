@@ -737,6 +737,14 @@ impl LitShared {
         self.textures.remove(gpu, id)
     }
 
+    pub(crate) fn trace_texture_atlas(&self) -> wgpu::TextureView {
+        self.textures.srgb_view().clone()
+    }
+
+    pub(crate) fn texture_content(&self, id: u32) -> Option<(crate::textures::AtlasRect, u64)> {
+        self.textures.texture_content(id)
+    }
+
     /// The atlas packing (rects of the live textures).
     pub(crate) fn texture_packer(&self) -> &crate::textures::ShelfPacker {
         self.textures.packer()

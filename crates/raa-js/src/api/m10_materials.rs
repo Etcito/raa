@@ -273,6 +273,26 @@ fn surface_data(desc: &JsValue) -> Result<u32, RaaError> {
     }
 }
 
+fn trace_base_color(
+    desc: &JsValue,
+    default_factor: [f32; 3],
+) -> Result<Option<raa_lit::TraceBaseColor>, RaaError> {
+    let Some(input) = get(desc, "traceBaseColor")? else {
+        return Ok(None);
+    };
+    require_object(&input, "traceBaseColor")?;
+    let texture = optional_f64(&input, "texture")?.unwrap_or(0.0);
+    if texture.fract() != 0.0 || !(0.0..=f64::from(u32::MAX)).contains(&texture) {
+        return Err(invalid(
+            "'traceBaseColor.texture' must be an unsigned texture ID".into(),
+        ));
+    }
+    Ok(Some(raa_lit::TraceBaseColor {
+        texture: texture as u32,
+        factor: optional_vec3(&input, "factor")?.unwrap_or(default_factor),
+    }))
+}
+
 #[wasm_bindgen(js_class = Engine)]
 impl Engine {
     /// Adds a surface material from a `SurfaceMaterialDesc` and returns its material handle
@@ -285,6 +305,7 @@ impl Engine {
             let d = surface_desc(&desc)?;
             let mut m = map_surface(&d, st)?;
             m.data = surface_data(&desc)?;
+            m.trace_base_color = trace_base_color(&desc, m.base_color)?;
             if optional_bool(&desc, "unlit", false)? {
                 m.flags |= raa_lit::FLAG_UNLIT;
             }
@@ -318,6 +339,7 @@ impl Engine {
             let d = surface_desc(&desc)?;
             let mut m = map_surface(&d, st)?;
             m.data = surface_data(&desc)?;
+            m.trace_base_color = trace_base_color(&desc, m.base_color)?;
             if optional_bool(&desc, "unlit", false)? {
                 m.flags |= raa_lit::FLAG_UNLIT;
             }

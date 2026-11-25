@@ -87,6 +87,14 @@ fn generated_variants_parse_and_validate() {
 fn mesh_trace_shaders_validate() {
     let trace = validate(&mesh_trace_module());
     assert_eq!(trace.entry_points[0].workgroup_size, [8, 8, 1]);
+    assert!(trace.global_variables.iter().any(|(_, var)| {
+        var.name.as_deref() == Some("base_color_atlas")
+            && var.binding
+                == Some(naga::ResourceBinding {
+                    group: 0,
+                    binding: 26,
+                })
+    }));
     let output = validate(&format!(
         "{}{}",
         raa_shader::IBL_SPECULAR_RESPONSE_WGSL,
@@ -106,6 +114,16 @@ fn hybrid_path_has_a_distinct_entry_and_model_bind_group() {
             .entry_points
             .iter()
             .any(|entry| entry.name == "trace_hybrid_path" && entry.workgroup_size == [8, 8, 1])
+    );
+    // The exact UV stream shares the material binding. The hybrid dispatcher
+    // still fits the WebGPU minimum of eight compute storage buffers.
+    assert_eq!(
+        module
+            .global_variables
+            .iter()
+            .filter(|(_, var)| matches!(var.space, naga::AddressSpace::Storage { .. }))
+            .count(),
+        8
     );
     let reference = validate(&raa_sdf_trace::wgsl::mesh_trace_module());
     assert!(reference.global_variables.iter().all(|(_, var)| {

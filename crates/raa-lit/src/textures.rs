@@ -295,6 +295,9 @@ impl ShelfPacker {
 pub(crate) struct TextureAtlas {
     packer: ShelfPacker,
     view: wgpu::TextureView,
+    srgb_view: wgpu::TextureView,
+    installed: [u64; MAX_TEXTURES as usize],
+    generation: u64,
     /// Whether `view` is the full atlas (false: the placeholder).
     allocated: bool,
     texture: wgpu::Texture,
@@ -315,7 +318,15 @@ fn create_texture(gpu: &GpuContext, size: u32, levels: u32) -> wgpu::Texture {
         dimension: wgpu::TextureDimension::D2,
         format: ATLAS_FORMAT,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
+        view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
+    })
+}
+
+fn srgb_view(texture: &wgpu::Texture) -> wgpu::TextureView {
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("raa.lit.texture_atlas.srgb"),
+        format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+        ..Default::default()
     })
 }
 
@@ -342,6 +353,9 @@ impl TextureAtlas {
         TextureAtlas {
             packer: ShelfPacker::new(ATLAS_SIZE, MAX_TEXTURES),
             view: texture.create_view(&Default::default()),
+            srgb_view: srgb_view(&texture),
+            installed: [0; MAX_TEXTURES as usize],
+            generation: 0,
             allocated: false,
             texture,
             sampler,
@@ -365,6 +379,16 @@ impl TextureAtlas {
                 resource: self.rects.as_entire_binding(),
             },
         ]
+    }
+
+    pub(crate) fn srgb_view(&self) -> &wgpu::TextureView {
+        &self.srgb_view
+    }
+
+    pub(crate) fn texture_content(&self, id: u32) -> Option<(AtlasRect, u64)> {
+        self.packer
+            .rect(id)
+            .map(|rect| (rect, self.installed[id as usize]))
     }
 
     pub(crate) fn packer(&self) -> &ShelfPacker {
@@ -401,6 +425,7 @@ impl TextureAtlas {
         if created {
             self.texture = create_texture(gpu, ATLAS_SIZE, ATLAS_MIP_LEVELS);
             self.view = self.texture.create_view(&Default::default());
+            self.srgb_view = srgb_view(&self.texture);
             self.allocated = true;
         }
         let queue = gpu.queue();
@@ -461,6 +486,8 @@ impl TextureAtlas {
         }
         let offset = u64::from(id) * TEXTURE_RECT_SIZE as u64;
         queue.write_buffer(&self.rects, offset, &rect.gpu_bytes_with(options.mips));
+        self.generation = self.generation.wrapping_add(1);
+        self.installed[id as usize] = self.generation;
         Ok((id, created))
     }
 

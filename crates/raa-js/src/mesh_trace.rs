@@ -9,8 +9,8 @@ use raa_math::Mat4;
 use raa_sdf_trace::mesh::{
     DiffuseOutput, GridDiffuseMode, LightingOutput, MAX_BOUNCES, MAX_LIGHTING_DEPTH,
     MESH_TRACE_NAME, MeshIndirectGrid, MeshInput, MeshTraceFeature, MeshTraceHandle,
-    MeshTraceMaterial, MeshTraceSettings, MirrorPriority, PanelSampling, PathMode,
-    SphericalGiHandle,
+    MeshTraceMaterial, MeshTraceSettings, MeshTraceTexture, MirrorPriority, PanelSampling,
+    PathMode, SphericalGiHandle,
 };
 use raa_shader::{RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE};
 use wasm_bindgen::prelude::*;
@@ -45,7 +45,11 @@ fn shared_handle(
     Ok(handle)
 }
 
-pub(crate) fn prepare(gpu: &raa_core::GpuContext, st: &EngineState, view: usize) -> Result<(), RaaError> {
+pub(crate) fn prepare(
+    gpu: &raa_core::GpuContext,
+    st: &EngineState,
+    view: usize,
+) -> Result<(), RaaError> {
     let Some(handle) = st.features.get::<MeshTraceHandle>() else {
         return Ok(());
     };
@@ -126,13 +130,21 @@ pub(crate) fn prepare(gpu: &raa_core::GpuContext, st: &EngineState, view: usize)
             let material = library
                 .get(raa_core::MaterialId(index))
                 .expect("dense lit materials");
+            let base = material.trace_base_color;
+            let base_texture = base
+                .and_then(|base| st.lit.texture_content(base.texture))
+                .map(|(rect, generation)| MeshTraceTexture {
+                    rect: [rect.x, rect.y, rect.width, rect.height],
+                    generation,
+                });
             MeshTraceMaterial {
-                base: material.base_color,
+                base: base.map_or(material.base_color, |base| base.factor),
                 roughness: material.roughness,
                 emissive: material.emissive,
                 metallic: material.metallic,
                 mirror: material.flags & FLAG_TRACE_MIRROR != 0,
                 unlit: material.flags & FLAG_UNLIT != 0 || material.model == SurfaceModel::Flat,
+                base_texture,
             }
         })
         .collect::<Vec<_>>();
@@ -153,6 +165,7 @@ pub(crate) fn prepare(gpu: &raa_core::GpuContext, st: &EngineState, view: usize)
                 positions: &source.mesh.positions,
                 normals: &source.mesh.normals,
                 colors: source.colors.as_deref(),
+                uvs: source.uvs.as_deref(),
                 indices,
                 world: item.world,
                 material: item.material.0,
@@ -163,9 +176,14 @@ pub(crate) fn prepare(gpu: &raa_core::GpuContext, st: &EngineState, view: usize)
         .features
         .get::<raa_ibl::IblHandle>()
         .map_or(1.0, raa_ibl::IblHandle::diffuse);
-    handle
-        .borrow_mut()
-        .update(gpu, &inputs, &materials, lit.frame_buffer(), sky_diffuse)
+    handle.borrow_mut().update(
+        gpu,
+        &inputs,
+        &materials,
+        lit.frame_buffer(),
+        st.lit.trace_texture_atlas(),
+        sky_diffuse,
+    )
 }
 
 fn integer(desc: &JsValue, key: &str, previous: u32, max: u32) -> Result<u32, RaaError> {

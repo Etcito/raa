@@ -74,6 +74,7 @@ const RAY_INTERVAL_WGSL: &str = include_str!("wgsl/ray_interval.wgsl");
 
 // Slots 21–24 belong to the spherical cache producer in the composed capture shader.
 pub(crate) const MESH_SPHERICAL_BINDING: u32 = 25;
+pub(crate) const MESH_TRACE_ATLAS_BINDING: u32 = 26;
 pub(crate) const MESH_GRAPH_SCREEN: u32 = 1;
 pub(crate) const MESH_VOLUME_GI: u32 = 2;
 

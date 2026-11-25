@@ -3,8 +3,12 @@ struct TraceNode { lo: vec3<f32>, left: u32, hi: vec3<f32>, count: u32 }
 struct Vertex {
     position: vec3<f32>, normal: vec3<f32>, color: vec3<f32>,
 }
-struct Triangle { a: Vertex, b: Vertex, c: Vertex, material: u32 }
-struct Material { base_roughness: vec4<f32>, emission_metallic: vec4<f32>, flags: vec4<u32> }
+struct Triangle {
+    a: Vertex, b: Vertex, c: Vertex, material: u32, indices: vec3<u32>, has_uv: bool,
+}
+struct Material {
+    base_roughness: vec4<f32>, emission_metallic: vec4<f32>, flags: vec4<u32>, base_rect: vec4<u32>,
+}
 struct Ray { origin: vec3<f32>, direction: vec3<f32> }
 struct Hit { t: f32, object: u32, bary: vec2<f32> }
 struct Frame {
@@ -25,7 +29,8 @@ struct Light {
 @group(0) @binding(1) var<uniform> options: array<vec4<u32>, 4>;
 @group(0) @binding(2) var<storage, read> nodes: array<TraceNode>;
 @group(0) @binding(3) var<storage, read> mesh_geometry: array<u32>;
-@group(0) @binding(4) var<storage, read> materials: array<Material>;
+// Header, the exact float32 indexed UV stream, then fixed-width material records.
+@group(0) @binding(4) var<storage, read> mesh_attributes: array<u32>;
 @group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(6) var depth: texture_depth_2d;
 @group(0) @binding(7) var normals: texture_2d<f32>;
@@ -51,6 +56,7 @@ struct RaaGiVolumeParams {
 @group(0) @binding(18) var terminal_samples: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(19) var terminal_surfaces: texture_storage_2d<rgba32uint, write>;
 @group(0) @binding(20) var terminal_weights: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(26) var base_color_atlas: texture_2d<f32>;
 const GI_VOLUME_VALID: u32 = 1u;
 
 const PI: f32 = 3.14159265;
@@ -96,7 +102,7 @@ struct HybridRoughGrid {
 }
 
 // The indexed payload starts with the vertex stride, then four words per BVH-ordered
-// triangle (three vertex indices and a material index), then exact-float attributes.
+// triangle (three vertex indices and the packed material/UV flag), then exact-float attributes.
 fn triangle_refs(index: u32) -> vec4<u32> {
     let at = 1u + index * 4u;
     return vec4<u32>(mesh_geometry[at], mesh_geometry[at + 1u], mesh_geometry[at + 2u], mesh_geometry[at + 3u]);
@@ -119,7 +125,8 @@ fn mesh_vertex(index: u32) -> Vertex {
 
 fn mesh_triangle(index: u32) -> Triangle {
     let refs = triangle_refs(index);
-    return Triangle(mesh_vertex(refs.x), mesh_vertex(refs.y), mesh_vertex(refs.z), refs.w);
+    return Triangle(mesh_vertex(refs.x), mesh_vertex(refs.y), mesh_vertex(refs.z),
+        refs.w & 0x7fffffffu, refs.xyz, (refs.w & 0x80000000u) != 0u);
 }
 
 fn closest(ray: Ray, limit: f32, any_hit: bool) -> Hit {
@@ -196,9 +203,55 @@ fn basis(n: vec3<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(tangent, cross(n, tangent), n);
 }
 
+fn attribute_words(at: u32) -> vec4<u32> {
+    return vec4<u32>(mesh_attributes[at], mesh_attributes[at + 1u],
+        mesh_attributes[at + 2u], mesh_attributes[at + 3u]);
+}
+
+fn mesh_material(index: u32) -> Material {
+    let at = mesh_attributes[0] + index * 16u;
+    return Material(bitcast<vec4<f32>>(attribute_words(at)),
+        bitcast<vec4<f32>>(attribute_words(at + 4u)), attribute_words(at + 8u),
+        attribute_words(at + 12u));
+}
+
+fn mesh_uv(index: u32) -> vec2<f32> {
+    let at = index * 2u + 1u;
+    return bitcast<vec2<f32>>(vec2<u32>(mesh_attributes[at], mesh_attributes[at + 1u]));
+}
+
+fn repeat_atlas_base(uv: vec2<f32>, rect: vec4<u32>) -> vec3<f32> {
+    let pixel = fract(uv) * vec2<f32>(rect.zw);
+    let origin = vec2<i32>(rect.xy);
+    let size = vec2<i32>(rect.zw);
+    // Native bilinear fetch where all four taps belong to this atlas rectangle.
+    if all(pixel >= vec2<f32>(0.5)) && all(pixel <= vec2<f32>(size) - vec2<f32>(0.5)) {
+        let atlas_uv = (vec2<f32>(origin) + pixel) / vec2<f32>(textureDimensions(base_color_atlas));
+        return textureSampleLevel(base_color_atlas, raa_linear_clamp, atlas_uv, 0.0).rgb;
+    }
+    // Wrap within the material, including at both sides of a repeat seam. The
+    // sRGB view decodes each texel before interpolation, so neighbours never bleed.
+    let center = pixel - vec2<f32>(0.5);
+    let coord = vec2<i32>(floor(center));
+    let i0 = (coord + size) % size;
+    let i1 = (i0 + vec2<i32>(1)) % size;
+    let f = fract(center);
+    let a = textureLoad(base_color_atlas, origin + i0, 0).rgb;
+    let b = textureLoad(base_color_atlas, origin + vec2<i32>(i1.x, i0.y), 0).rgb;
+    let c = textureLoad(base_color_atlas, origin + vec2<i32>(i0.x, i1.y), 0).rgb;
+    let d = textureLoad(base_color_atlas, origin + i1, 0).rgb;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
 fn hit_material(tri: Triangle, bary: vec2<f32>) -> Material {
-    var mat = materials[tri.material];
-    let color = tri.a.color * (1.0 - bary.x - bary.y) + tri.b.color * bary.x + tri.c.color * bary.y;
+    var mat = mesh_material(tri.material);
+    let a = 1.0 - bary.x - bary.y;
+    var color = tri.a.color * a + tri.b.color * bary.x + tri.c.color * bary.y;
+    if tri.has_uv && all(mat.base_rect.zw != vec2<u32>(0u)) {
+        let uv = mesh_uv(tri.indices.x) * a + mesh_uv(tri.indices.y) * bary.x +
+            mesh_uv(tri.indices.z) * bary.y;
+        color *= repeat_atlas_base(uv, mat.base_rect);
+    }
     mat.base_roughness = vec4<f32>(mat.base_roughness.rgb * color, mat.base_roughness.w);
     return mat;
 }

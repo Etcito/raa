@@ -61,6 +61,13 @@ pub enum DrawClass {
     Fur,
 }
 
+/// Static base colour inputs for mesh rays when a raster material has a custom function.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TraceBaseColor {
+    pub texture: u32,
+    pub factor: [f32; 3],
+}
+
 /// A lit surface material. Colours are linear RGB.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurfaceMaterial {
@@ -103,6 +110,8 @@ pub struct SurfaceMaterial {
     /// `SurfaceMaterialGpu.header.w`, read in WGSL by `raa_material_data_base(in.record)`;
     /// 0 (default) = no data (the reserved zero words).
     pub data: u32,
+    /// Ray-only base colour metadata. This does not alter the raster GPU material record.
+    pub trace_base_color: Option<TraceBaseColor>,
 }
 
 impl Default for SurfaceMaterial {
@@ -128,6 +137,7 @@ impl Default for SurfaceMaterial {
             params: [[0.0; 4]; 8],
             fur: [0.0; 4],
             data: 0,
+            trace_base_color: None,
         }
     }
 }
@@ -189,6 +199,9 @@ impl SurfaceMaterial {
     /// Refusals have code `material.invalid` and name the field.
     pub fn validate(&self) -> Result<(), RaaError> {
         check_color("base_color", self.base_color)?;
+        if let Some(base) = self.trace_base_color {
+            check_color("trace_base_color.factor", base.factor)?;
+        }
         check_color("emissive", self.emissive)?;
         check_color("sheen_color", self.sheen_color)?;
         check_color("attenuation_color", self.attenuation_color)?;

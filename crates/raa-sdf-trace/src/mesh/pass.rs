@@ -5,17 +5,18 @@ use std::{cell::RefCell, rc::Rc, sync::mpsc::sync_channel};
 use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx};
 
-use super::geometry::{GEOMETRY_HEADER_BYTES, storage_limit};
+use super::geometry::{ATTRIBUTE_HEADER_BYTES, GEOMETRY_HEADER_BYTES, storage_limit};
 use super::{
     COUNTER_COUNT, GRID_DIFFUSE_CAPTURE_WORDS, GRID_DIFFUSE_MAX_CAPTURE_ROWS, GridDiffuseCapture,
     GridDiffuseMode, MeshIndirectGrid, MeshTraceScene, MeshTraceSettings, MeshTraceStats,
-    MirrorPriority, PathMode, REFERENCE_SPP, ReflectedFeedback, TraceReadback, TraceReport,
+    MirrorPriority, PathMode, REFERENCE_SPP, ReflectedFeedback, TRACE_MATERIAL_BYTES,
+    TraceReadback, TraceReport,
     hybrid::HybridGpu,
     spherical::{MAX_REFLECTED_RECEIVERS, ReflectedReceiver},
 };
 use crate::wgsl::{
-    MESH_GRAPH_SCREEN, MESH_SPHERICAL_BINDING, MESH_VOLUME_GI, mesh_grid_diffuse_module,
-    mesh_trace_module,
+    MESH_GRAPH_SCREEN, MESH_SPHERICAL_BINDING, MESH_TRACE_ATLAS_BINDING, MESH_VOLUME_GI,
+    mesh_grid_diffuse_module, mesh_trace_module,
 };
 
 pub const MESH_TRACE_NAME: &str = "trace.mesh";
@@ -217,7 +218,11 @@ impl FeaturePass for MeshTracePass {
             }
             return Ok(());
         };
-        let [nodes, triangles, materials] = scene.geometry_buffers(ctx.gpu);
+        let texture_atlas = scene
+            .texture_atlas
+            .clone()
+            .expect("prepared mesh trace atlas");
+        let [nodes, triangles, attributes] = scene.geometry_buffers(ctx.gpu);
         let device = ctx.gpu.device();
         let gpu = self.gpu.get_or_insert_with(|| {
             let source = match settings.grid_diffuse {
@@ -360,7 +365,7 @@ impl FeaturePass for MeshTracePass {
                 buffer_entry(1, &gpu.options),
                 buffer_entry(2, &nodes),
                 buffer_entry(3, &triangles),
-                buffer_entry(4, &materials),
+                buffer_entry(4, &attributes),
                 buffer_entry(5, &counters.storage),
                 image_entry(6, &depth),
                 image_entry(7, &normal),
@@ -390,6 +395,7 @@ impl FeaturePass for MeshTracePass {
                 image_entry(18, &images.terminal_samples),
                 image_entry(19, &images.terminal_surfaces),
                 image_entry(20, &images.terminal_weights),
+                image_entry(MESH_TRACE_ATLAS_BINDING, &texture_atlas),
                 buffer_entry(
                     MESH_SPHERICAL_BINDING,
                     ctx.lighting.spherical_gi_buffer(spherical_routed),
@@ -738,21 +744,26 @@ impl DataBuffer {
         }
     }
 
+    fn ensure_size(&mut self, gpu: &GpuContext, bytes: u64) -> bool {
+        if bytes <= self.buffer.size() {
+            return false;
+        }
+        let size = bytes.next_power_of_two().min(storage_limit(gpu.limits()));
+        self.buffer = buffer(
+            gpu.device(),
+            self.label,
+            size,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        self.revision = None;
+        true
+    }
+
     fn upload(&mut self, gpu: &GpuContext, revision: u64, bytes: &[u8]) {
         if self.revision == Some(revision) {
             return;
         }
-        if bytes.len() as u64 > self.buffer.size() {
-            let size = (bytes.len() as u64)
-                .next_power_of_two()
-                .min(storage_limit(gpu.limits()));
-            self.buffer = buffer(
-                gpu.device(),
-                self.label,
-                size,
-                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            );
-        }
+        self.ensure_size(gpu, bytes.len() as u64);
         if !bytes.is_empty() {
             gpu.queue().write_buffer(&self.buffer, 0, bytes);
         }
@@ -763,7 +774,8 @@ impl DataBuffer {
 pub(super) struct GeometryBuffers {
     nodes: DataBuffer,
     mesh: DataBuffer,
-    materials: DataBuffer,
+    attributes: DataBuffer,
+    uv_revision: Option<u64>,
 }
 
 impl GeometryBuffers {
@@ -771,7 +783,12 @@ impl GeometryBuffers {
         Self {
             nodes: DataBuffer::new(device, "trace.mesh.nodes", 32),
             mesh: DataBuffer::new(device, "trace.mesh.indexed_geometry", GEOMETRY_HEADER_BYTES),
-            materials: DataBuffer::new(device, "trace.mesh.materials", 48),
+            attributes: DataBuffer::new(
+                device,
+                "trace.mesh.attributes",
+                ATTRIBUTE_HEADER_BYTES + TRACE_MATERIAL_BYTES,
+            ),
+            uv_revision: None,
         }
     }
 
@@ -786,12 +803,36 @@ impl GeometryBuffers {
             .upload(gpu, geometry.revision, &geometry.node_bytes);
         self.mesh
             .upload(gpu, geometry.revision, &geometry.mesh_bytes);
-        self.materials
-            .upload(gpu, material_revision, material_bytes);
+        // One storage binding: the header holds the material offset in words.
+        // In-place material edits never resend the local-space vertex UV stream.
+        let material_offset = ATTRIBUTE_HEADER_BYTES + geometry.uv_bytes.len() as u64;
+        let resized = self
+            .attributes
+            .ensure_size(gpu, material_offset + material_bytes.len() as u64);
+        let uv_changed = resized || self.uv_revision != Some(geometry.uv_revision);
+        let queue = gpu.queue();
+        let attribute_buffer = &self.attributes.buffer;
+        if uv_changed {
+            queue.write_buffer(
+                attribute_buffer,
+                0,
+                &((material_offset / 4) as u32).to_le_bytes(),
+            );
+            if !geometry.uv_bytes.is_empty() {
+                queue.write_buffer(attribute_buffer, ATTRIBUTE_HEADER_BYTES, &geometry.uv_bytes);
+            }
+            self.uv_revision = Some(geometry.uv_revision);
+        }
+        if uv_changed || self.attributes.revision != Some(material_revision) {
+            if !material_bytes.is_empty() {
+                queue.write_buffer(attribute_buffer, material_offset, material_bytes);
+            }
+            self.attributes.revision = Some(material_revision);
+        }
         [
             self.nodes.buffer.clone(),
             self.mesh.buffer.clone(),
-            self.materials.buffer.clone(),
+            self.attributes.buffer.clone(),
         ]
     }
 }
@@ -918,6 +959,10 @@ impl Pipelines {
                 entry(19, storage_image(wgpu::TextureFormat::Rgba32Uint)),
                 entry(20, storage_image(HDR_FORMAT)),
                 entry(MESH_SPHERICAL_BINDING, read),
+                entry(
+                    MESH_TRACE_ATLAS_BINDING,
+                    tex(T::Float { filterable: true }, D::D2),
+                ),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

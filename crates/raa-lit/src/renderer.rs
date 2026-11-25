@@ -792,6 +792,16 @@ impl LitRenderer {
         Ok(s.remove_texture(gpu, id))
     }
 
+    /// The same material atlas with an sRGB view for base-colour ray sampling.
+    pub fn trace_texture_atlas(&self) -> wgpu::TextureView {
+        self.shared.borrow().trace_texture_atlas()
+    }
+
+    /// Atlas region and content generation for a live material texture.
+    pub fn texture_content(&self, id: u32) -> Option<(AtlasRect, u64)> {
+        self.shared.borrow().texture_content(id)
+    }
+
     /// The atlas rect of live texture `id`.
     pub fn texture_rect(&self, id: u32) -> Option<AtlasRect> {
         self.shared.borrow().texture_packer().rect(id)

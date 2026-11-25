@@ -201,6 +201,16 @@ impl MeshTraceSettings {
     }
 }
 
+pub(super) const TRACE_MATERIAL_BYTES: u64 = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MeshTraceTexture {
+    /// Atlas x, y, width and height in mip-0 texels.
+    pub rect: [u32; 4],
+    /// Distinguishes new contents at a recycled atlas slot for cached captures.
+    pub generation: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeshTraceMaterial {
     pub base: [f32; 3],
@@ -209,6 +219,7 @@ pub struct MeshTraceMaterial {
     pub metallic: f32,
     pub mirror: bool,
     pub unlit: bool,
+    pub base_texture: Option<MeshTraceTexture>,
 }
 
 /// Opt-in legacy sharp-mirror residency experiment.
@@ -273,6 +284,7 @@ pub struct MeshTraceScene {
     material_bytes: Vec<u8>,
     material_revision: u64,
     frame: Option<Buffer>,
+    texture_atlas: Option<wgpu::TextureView>,
     sky_diffuse: f32,
     report: TraceReport,
     epoch: u64,
@@ -450,20 +462,14 @@ impl MeshTraceScene {
         inputs: &[MeshInput<'_>],
         materials: &[MeshTraceMaterial],
         frame: Buffer,
+        texture_atlas: wgpu::TextureView,
         sky_diffuse: f32,
     ) -> Result<(), RaaError> {
         let storage_limit = geometry::storage_limit(gpu.limits());
-        let material_size = materials.len() as u64 * 48;
-        if material_size > storage_limit {
-            return Err(RaaError::FrameGraph {
-                code: "trace.mesh_capacity",
-                message: format!(
-                    "Mesh trace materials require {material_size} bytes. The device storage binding limit is {storage_limit} bytes."
-                ),
-            });
-        }
-        self.geometry.update(inputs, storage_limit)?;
+        let material_size = materials.len() as u64 * TRACE_MATERIAL_BYTES;
+        self.geometry.update(inputs, storage_limit, material_size)?;
         self.frame = Some(frame);
+        self.texture_atlas = Some(texture_atlas);
         self.sky_diffuse = sky_diffuse;
         if materials != self.materials {
             self.material_revision = self.material_revision.wrapping_add(1);
@@ -481,6 +487,9 @@ impl MeshTraceScene {
                 self.material_bytes.extend(lanes.flat_map(f32::to_le_bytes));
                 self.material_bytes
                     .extend([flags, 0, 0, 0].into_iter().flat_map(u32::to_le_bytes));
+                let rect = material.base_texture.map_or([0; 4], |tex| tex.rect);
+                self.material_bytes
+                    .extend(rect.into_iter().flat_map(u32::to_le_bytes));
             }
         }
         Ok(())

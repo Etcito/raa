@@ -28,6 +28,7 @@ fn triangle(key: u64, positions: &[[f32; 3]; 3]) -> MeshInput<'_> {
         positions,
         normals: &[[1.0, 0.0, 0.0]; 3],
         colors: None,
+        uvs: None,
         indices: &[0, 1, 2],
         material: 0,
         world: Mat4::IDENTITY,
@@ -39,7 +40,7 @@ fn facing_x(x: f32) -> [[f32; 3]; 3] {
 }
 
 fn update_geometry(scene: &mut MeshTraceScene, inputs: &[MeshInput<'_>]) {
-    scene.geometry.update(inputs, 128 << 20).unwrap();
+    scene.geometry.update(inputs, 128 << 20, 0).unwrap();
 }
 
 fn key(shell: u16, face: CubeFace) -> CellKey {

@@ -38,6 +38,9 @@ export type SurfaceBlend = 'opaque' | 'transparent' | 'transmissive';
 export interface SurfaceMaterialDesc {
   /** Enables ideal mirror rays for this opaque material in hybrid/reference tracing. */
   traceMirror?: boolean;
+  /** Mesh-ray base colour. Samples the sRGB atlas texture at repeat UVs and multiplies the linear factor.
+   * With no live texture or UVs, the texture multiplier is white. Raster materials are unaffected. */
+  traceBaseColor?: { texture?: number; factor?: [number, number, number] };
   /** Opt into the cel Direct provider (flag 128); effective when cel and toon are enabled. Default false. */
   cel?: boolean;
   /** Use base + emissive directly, bypassing lighting (flag 64). Default false; takes precedence over cel. */
