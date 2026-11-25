@@ -3,6 +3,11 @@
 // validity and normal. The normal's fourth half is the mirror flag (0 or 1) on a
 // front face; a back face stores -0.25 (or 1.25 for a mirror), so `> 0.5` still
 // means mirror and `< 0 || > 1.1` means back face.
+// hit_position.w is 0 for a miss; a hit stores a float in [1, 2) whose 22 low mantissa
+// bits hold the geometric normal (11-bit octahedral pair), so `> 0.5` still means hit.
+// The free fourth half of the sky, sun and other words holds the hit's diffuse albedo
+// (r, g, b): with the hit position and both normals, the sun and sky groups can be
+// re-shaded in place (spherical_reshade) without the primary ray.
 struct SphericalFaceWork {
     position: vec4<f32>,
     normal: vec4<f32>,
@@ -40,9 +45,92 @@ fn spherical_ordered_float(value: f32) -> u32 {
     return select(bits ^ 0x80000000u, ~bits, (bits & 0x80000000u) != 0u);
 }
 
-fn spherical_pack(rgb: vec3<f32>) -> vec2<u32> {
-    let safe = clamp(rgb, vec3<f32>(0.0), vec3<f32>(65504.0));
-    return vec2<u32>(pack2x16float(safe.xy), pack2x16float(vec2<f32>(safe.z, 0.0)));
+// rgb in three halves and a fourth value (the albedo channel) in the last half. Signed:
+// the sky residual of the transfer may be negative.
+fn spherical_pack(rgb: vec3<f32>, extra: f32) -> vec2<u32> {
+    let safe = clamp(rgb, vec3<f32>(-65504.0), vec3<f32>(65504.0));
+    return vec2<u32>(pack2x16float(safe.xy), pack2x16float(vec2<f32>(safe.z, extra)));
+}
+
+fn spherical_extra(words: vec2<u32>) -> f32 {
+    return unpack2x16float(words.y).y;
+}
+
+fn spherical_albedo(texel: SphericalTexel) -> vec3<f32> {
+    return vec3<f32>(spherical_extra(texel.sky), spherical_extra(texel.sun), spherical_extra(texel.other));
+}
+
+fn spherical_hit_word(ng: vec3<f32>) -> f32 {
+    let q = vec2<u32>(round((spherical_oct_encode(ng) * 0.5 + 0.5) * 2047.0));
+    return bitcast<f32>(0x3f800000u | (min(q.x, 2047u) << 11u) | min(q.y, 2047u));
+}
+
+fn spherical_hit_normal(word: f32) -> vec3<f32> {
+    let bits = bitcast<u32>(word);
+    let e = vec2<f32>(f32((bits >> 11u) & 2047u), f32(bits & 2047u)) / 2047.0 * 2.0 - 1.0;
+    var v = vec3<f32>(e, 1.0 - abs(e.x) - abs(e.y));
+    if v.z < 0.0 {
+        let s = select(vec2<f32>(-1.0), vec2<f32>(1.0), v.xy >= vec2<f32>(0.0));
+        v = vec3<f32>((1.0 - abs(v.yx)) * s, v.z);
+    }
+    return normalize(v);
+}
+
+// ---- Sky transfer (handoff/sky-transfer.md, ported from DDGI) ----
+// The transfer buffer: header rows 0-8 = sky SH L_k (rgb f32, the frame's environment with
+// the cone around the sun left out, written by spherical_sky_project), row 9 x = sky norm
+// (the same value as spherical_sky_norm), row 10 = up to four dense light indices of a reach
+// test and row 11 x their count (CPU). Then two rows per (slot, patch): nine f16 visibility
+// transfer coefficients T_k (sum over the patch's missed texels of Y_k(w) dw) and the
+// residual R (rgb f16, sum of (sky - SH sky) / norm dw). The composed sky miss flux of a
+// patch, in unit-sky units, is sum_k T_k L_k / norm + R (spherical_relight).
+@group(0) @binding(34) var<storage, read_write> spherical_transfer: array<vec4<u32>>;
+@group(0) @binding(35) var<storage, read_write> spherical_reach: array<u32>;
+const SPHERICAL_TRANSFER_HEADER: u32 = 16u;
+const SPHERICAL_TRANSFER_NORM_ROW: u32 = 9u;
+const SPHERICAL_REACH_ROW: u32 = 10u;
+const SPHERICAL_FLAG_TRANSFER: u32 = 1u;
+const SPHERICAL_SKY_PROJECT_SAMPLES: u32 = 4096u;
+// Keep in sync with spherical_gpu.rs SLOT_ROWS and RAA_SPHERICAL_SLOT_ROWS.
+const SPHERICAL_SLOT_ROWS: u32 = 167u;
+
+fn spherical_transfer_on() -> bool {
+    return (options[1].y & SPHERICAL_FLAG_TRANSFER) != 0u;
+}
+
+// The sun disc belongs to the sun group: a cone around it is left out of the sky.
+fn spherical_in_sun_cone(direction: vec3<f32>) -> bool {
+    return dot(direction, -frame.sun_dir.xyz) > bitcast<f32>(options[2].z);
+}
+
+// The 9 real SH basis functions (order 2), raa-ibl order (as ddgi_sh).
+fn spherical_sh(d: vec3<f32>) -> array<f32, 9> {
+    return array<f32, 9>(
+        0.282095,
+        0.488603 * d.y,
+        0.488603 * d.z,
+        0.488603 * d.x,
+        1.092548 * d.x * d.y,
+        1.092548 * d.y * d.z,
+        0.315392 * (3.0 * d.z * d.z - 1.0),
+        1.092548 * d.x * d.z,
+        0.546274 * (d.x * d.x - d.y * d.y),
+    );
+}
+
+fn spherical_sky_coefficient(k: u32) -> vec3<f32> {
+    return bitcast<vec3<f32>>(spherical_transfer[k].xyz);
+}
+
+fn spherical_sh_sky(direction: vec3<f32>) -> vec3<f32> {
+    let y = spherical_sh(direction);
+    var rgb = vec3<f32>(0.0);
+    for (var k = 0u; k < 9u; k++) { rgb += y[k] * spherical_sky_coefficient(k); }
+    return rgb;
+}
+
+fn spherical_transfer_norm() -> f32 {
+    return bitcast<f32>(spherical_transfer[SPHERICAL_TRANSFER_NORM_ROW].x);
 }
 
 fn spherical_unpack(words: vec2<u32>) -> vec3<f32> {
@@ -80,6 +168,54 @@ fn spherical_sky_norm(px: u32) -> f32 {
 fn spherical_sky(direction: vec3<f32>, inv_norm: f32) -> vec3<f32> {
     if options[0].z == 0u { return vec3<f32>(1.0); }
     return inv_norm * textureSampleLevel(sky, raa_linear_clamp, direction, 0.0).rgb;
+}
+
+// What a missed texel stores in the sky group: the unit sky, or with the transfer only the
+// residual the order-2 SH does not carry (zero in the sun cone).
+fn spherical_miss_sky(direction: vec3<f32>, inv_norm: f32) -> vec3<f32> {
+    if !spherical_transfer_on() { return spherical_sky(direction, inv_norm); }
+    if spherical_in_sun_cone(direction) { return vec3<f32>(0.0); }
+    return inv_norm * (textureSampleLevel(sky, raa_linear_clamp, direction, 0.0).rgb
+        - spherical_sh_sky(direction));
+}
+
+// Sky reaching a hit through a bounce ray (unit sky; the sun disc left out with the transfer).
+fn spherical_bounce_sky(direction: vec3<f32>, inv_norm: f32) -> vec3<f32> {
+    if spherical_transfer_on() && spherical_in_sun_cone(direction) { return vec3<f32>(0.0); }
+    return spherical_sky(direction, inv_norm);
+}
+
+// Cosine sky samples at a hit (the seed continues the capture's own sequence).
+fn spherical_sky_bounce(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, albedo: vec3<f32>,
+                        limit: f32, inv_norm: f32, seed: ptr<function, u32>) -> vec3<f32> {
+    let sky_samples = options[3].y;
+    var sky_sum = vec3<f32>(0.0);
+    for (var k = 0u; k < sky_samples; k++) {
+        let u = random(seed);
+        let phi = 2.0 * PI * random(seed);
+        let bounce = basis(n) * vec3<f32>(sqrt(u) * cos(phi), sqrt(u) * sin(phi), sqrt(1.0 - u));
+        if dot(ng, bounce) > 0.0 && closest(Ray(p + ng * (2.0 * EPS), bounce), limit, true).object == MISS {
+            sky_sum += spherical_bounce_sky(bounce, inv_norm);
+        }
+    }
+    if sky_samples == 0u { return vec3<f32>(0.0); }
+    return albedo * sky_sum / f32(sky_samples);
+}
+
+// The capture's per-texel random sequence (also replayed by the re-shade).
+fn spherical_seed(slot: u32, face: u32, px: u32) -> u32 {
+    return (slot * 747796405u + face * 277803737u + px) ^ 0x85ebca6bu;
+}
+
+// Unit sun at a stored hit: diffuse albedo / pi x n.l x one shadow ray.
+fn spherical_unit_sun_albedo(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, albedo: vec3<f32>) -> vec3<f32> {
+    let sun = -frame.sun_dir.xyz;
+    let nl = saturate(dot(n, sun));
+    if nl > 0.0 && dot(ng, sun) > 0.0
+        && closest(Ray(p + ng * (2.0 * EPS), sun), frame.clip.y, true).object == MISS {
+        return albedo * (nl / PI);
+    }
+    return vec3<f32>(0.0);
 }
 
 // Unit-intensity sun group: the response to a white unit sun (mesh_sun_at_hit without
@@ -130,8 +266,9 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
     var sky_rgb = vec3<f32>(0.0);
     var sun_rgb = vec3<f32>(0.0);
     var other_rgb = vec3<f32>(0.0);
+    var albedo = vec3<f32>(0.0);
     if hit.object == MISS {
-        sky_rgb = spherical_sky(direction, inv_norm);
+        sky_rgb = spherical_miss_sky(direction, inv_norm);
     } else {
         let tri = mesh_triangle(hit.object);
         let material = hit_material(tri, hit.bary);
@@ -146,7 +283,7 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
             let candidate = normalize(blended);
             n = select(-candidate, candidate, dot(candidate, ng) >= 0.0);
         }
-        hit_position = vec4<f32>(p, 1.0);
+        hit_position = vec4<f32>(p, spherical_hit_word(ng));
         atomicAdd(&spherical_hit_count, 1u);
         for (var axis = 0u; axis < 3u; axis++) {
             let ordered = spherical_ordered_float(p[axis]);
@@ -160,7 +297,8 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
         if (material.flags.x & 2u) != 0u {
             other_rgb += material.base_roughness.rgb;
         } else if (material.flags.x & 1u) == 0u {
-            var seed = (work.ids.x * 747796405u + work.ids.y * 277803737u + px) ^ 0x85ebca6bu;
+            var seed = spherical_seed(work.ids.x, work.ids.y, px);
+            albedo = diffuse(material);
             sun_rgb = spherical_unit_sun(p, ng, n, -direction, material);
             let shadow_origin = p + ng * (2.0 * EPS);
             let light_count = min(256u, frame.light_info.x);
@@ -199,26 +337,17 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
             }
 
             // Cosine samples estimate sky reflected by the hit surface.
-            let sky_samples = options[3].y;
-            var sky_sum = vec3<f32>(0.0);
-            for (var k = 0u; k < sky_samples; k++) {
-                let u = random(&seed);
-                let phi = 2.0 * PI * random(&seed);
-                let bounce = basis(n) * vec3<f32>(sqrt(u) * cos(phi), sqrt(u) * sin(phi), sqrt(1.0 - u));
-                if dot(ng, bounce) > 0.0 && closest(Ray(p + ng * (2.0 * EPS), bounce), limit, true).object == MISS {
-                    sky_sum += spherical_sky(bounce, inv_norm);
-                }
-            }
-            if sky_samples > 0u {
-                sky_rgb += diffuse(material) * sky_sum / f32(sky_samples);
-            }
+            sky_rgb += spherical_sky_bounce(p, ng, n, albedo, limit, inv_norm, &seed);
         }
     }
     let face = 6u * work.ids.x + work.ids.y;
     spherical_faces[64u * face + px] =
-        SphericalTexel(hit_position, spherical_pack(sky_rgb), spherical_pack(sun_rgb),
-            spherical_pack(other_rgb), hit_normal);
-    let flags = u32(any(sky_rgb > vec3<f32>(0.0))) | (u32(any(sun_rgb > vec3<f32>(0.0))) << 1u);
+        SphericalTexel(hit_position, spherical_pack(sky_rgb, albedo.r), spherical_pack(sun_rgb, albedo.g),
+            spherical_pack(other_rgb, albedo.b), hit_normal);
+    // With the transfer a missed texel holds only the residual, which may be zero or negative.
+    let sky_seen = any(sky_rgb > vec3<f32>(0.0))
+        || (spherical_transfer_on() && hit.object == MISS);
+    let flags = u32(sky_seen) | (u32(any(sun_rgb > vec3<f32>(0.0))) << 1u);
     if flags != 0u { atomicOr(&spherical_global_sources, flags); }
     workgroupBarrier();
     if px == 0u {
@@ -289,10 +418,18 @@ fn spherical_project(@builtin(local_invocation_id) id: vec3<u32>,
     // each reduce one face into a world-axis descriptor.
     let first = max(projection, 1u) - 1u;
     let last = select(projection, 6u, projection == 0u);
+    // With the transfer a missed texel holds only the residual: add the frame's SH sky.
+    let transfer = spherical_transfer_on();
+    let norm = spherical_transfer_norm();
+    let inv_norm = select(0.0, 1.0 / norm, transfer && norm > 1e-7);
     for (var face = first; face < last; face++) {
         let weight = jacobian;
         let texel = spherical_faces[384u * work.ids.x + 64u * face + px];
         sky_rgb += spherical_unpack(texel.sky) * weight;
+        if inv_norm > 0.0 && texel.hit_position.w <= 0.5 {
+            let direction = normalize(raa_spherical_face_direction(face, uv));
+            sky_rgb += spherical_sh_sky(direction) * (inv_norm * weight);
+        }
         sun_rgb += spherical_unpack(texel.sun) * weight;
         other_rgb += spherical_unpack(texel.other) * weight;
         total += weight;
@@ -357,6 +494,8 @@ var<workgroup> spherical_bin_hit: array<vec3<f32>, 64>;
 var<workgroup> spherical_bin_hit_sky: array<vec3<f32>, 64>;
 var<workgroup> spherical_bin_hit_other: array<vec3<f32>, 64>;
 var<workgroup> spherical_bin_miss: array<vec3<f32>, 64>;
+// Per texel: the sky visibility transfer of a missed texel, Y_k(w) dw (zero for a hit).
+var<workgroup> spherical_bin_transfer: array<array<f32, 9>, 64>;
 
 // One workgroup per (probe, face). It reduces the face into 2x2 parallax patches
 // (hit centroid, area, mean normal, intensity normalised so that the patch reproduces
@@ -395,6 +534,12 @@ fn spherical_bins(@builtin(local_invocation_id) id: vec3<u32>,
     } else {
         miss = sky_radiance;
     }
+    var transfer: array<f32, 9>;
+    if texel.hit_position.w <= 0.5 {
+        let y = spherical_sh(direction);
+        for (var k = 0u; k < 9u; k++) { transfer[k] = y[k] * solid_angle; }
+    }
+    spherical_bin_transfer[px] = transfer;
     spherical_bin_area[px] = area;
     spherical_bin_normal[px] = normal;
     spherical_bin_hit[px] = hit;
@@ -411,6 +556,7 @@ fn spherical_bins(@builtin(local_invocation_id) id: vec3<u32>,
         var flux_sky = vec3<f32>(0.0);
         var flux_other = vec3<f32>(0.0);
         var flux_miss = vec3<f32>(0.0);
+        var t_k: array<f32, 9>;
         for (var y = 0u; y < 4u; y++) {
             for (var x = 0u; x < 4u; x++) {
                 let t = corner.x + x + 8u * (corner.y + y);
@@ -420,7 +566,20 @@ fn spherical_bins(@builtin(local_invocation_id) id: vec3<u32>,
                 flux_sky += spherical_bin_hit_sky[t];
                 flux_other += spherical_bin_hit_other[t];
                 flux_miss += spherical_bin_miss[t];
+                for (var k = 0u; k < 9u; k++) { t_k[k] += spherical_bin_transfer[t][k]; }
             }
+        }
+        if spherical_transfer_on() {
+            // flux_miss is the residual here: keep it with the transfer, publish the composite.
+            let patch_index = 24u * work.ids.x + 4u * face + px;
+            let row = SPHERICAL_TRANSFER_HEADER + 2u * patch_index;
+            spherical_transfer[row] = vec4<u32>(pack2x16float(vec2<f32>(t_k[0], t_k[1])),
+                pack2x16float(vec2<f32>(t_k[2], t_k[3])), pack2x16float(vec2<f32>(t_k[4], t_k[5])),
+                pack2x16float(vec2<f32>(t_k[6], t_k[7])));
+            let r = clamp(flux_miss, vec3<f32>(-65504.0), vec3<f32>(65504.0));
+            spherical_transfer[row + 1u] = vec4<u32>(pack2x16float(vec2<f32>(t_k[8], r.x)),
+                pack2x16float(r.yz), 0u, 0u);
+            flux_miss = spherical_patch_sky(patch_index);
         }
         var row0 = vec4<f32>(probe, -1.0);
         var intensity = vec3<f32>(0.0);
@@ -579,4 +738,178 @@ fn spherical_lights(@builtin(local_invocation_index) t: u32,
         spherical_lookup[work.ids.y + SPHERICAL_LIGHT_ROW] = vec4<u32>(bitcast<u32>(hits.x),
             pick.x | (pick.y << 16u), bitcast<u32>(hits.y), bitcast<u32>(hits.z));
     }
+}
+
+// ---- Sky transfer, sun re-shade and light reach (spherical-sky) ----
+
+// Composed sky miss flux of one (slot, patch) in unit-sky units under the frame's sky SH:
+// sum_k T_k L_k / norm + R. The lookup scales it by sky diffuse x norm (row 69).
+fn spherical_patch_sky(patch_index: u32) -> vec3<f32> {
+    let row = SPHERICAL_TRANSFER_HEADER + 2u * patch_index;
+    let a = spherical_transfer[row];
+    let b = spherical_transfer[row + 1u];
+    let t01 = unpack2x16float(a.x);
+    let t23 = unpack2x16float(a.y);
+    let t45 = unpack2x16float(a.z);
+    let t67 = unpack2x16float(a.w);
+    let t8r = unpack2x16float(b.x);
+    let gb = unpack2x16float(b.y);
+    let t = array<f32, 9>(t01.x, t01.y, t23.x, t23.y, t45.x, t45.y, t67.x, t67.y, t8r.x);
+    var sh = vec3<f32>(0.0);
+    for (var k = 0u; k < 9u; k++) { sh += t[k] * spherical_sky_coefficient(k); }
+    let norm = spherical_transfer_norm();
+    let composed = select(vec3<f32>(0.0), sh / norm, norm > 1e-7) + vec3<f32>(t8r.y, gb);
+    return max(composed, vec3<f32>(0.0));
+}
+
+// Sky SH of the frame (the environment cube at mip 0, the sun cone left out) projected from
+// 4096 fixed spherical-Fibonacci directions, and the sky norm, into the transfer header.
+// One workgroup; no CPU readback.
+var<workgroup> spherical_sky_partial: array<array<vec3<f32>, 9>, 64>;
+@compute @workgroup_size(64, 1, 1)
+fn spherical_sky_project(@builtin(local_invocation_index) px: u32) {
+    let norm = spherical_sky_norm(px);
+    var acc: array<vec3<f32>, 9>;
+    if options[0].z != 0u {
+        for (var i = px; i < SPHERICAL_SKY_PROJECT_SAMPLES; i += 64u) {
+            let z = 1.0 - (2.0 * f32(i) + 1.0) / f32(SPHERICAL_SKY_PROJECT_SAMPLES);
+            let r = sqrt(max(0.0, 1.0 - z * z));
+            let phi = f32(i) * 2.39996323;
+            let d = vec3<f32>(r * cos(phi), r * sin(phi), z);
+            if spherical_in_sun_cone(d) { continue; }
+            let rgb = textureSampleLevel(sky, raa_linear_clamp, d, 0.0).rgb;
+            let y = spherical_sh(d);
+            for (var k = 0u; k < 9u; k++) { acc[k] += rgb * y[k]; }
+        }
+    }
+    spherical_sky_partial[px] = acc;
+    workgroupBarrier();
+    if px < 9u {
+        var sum = vec3<f32>(0.0);
+        for (var t = 0u; t < 64u; t++) { sum += spherical_sky_partial[t][px]; }
+        let coefficient = sum * (4.0 * PI / f32(SPHERICAL_SKY_PROJECT_SAMPLES));
+        spherical_transfer[px] = vec4<u32>(bitcast<vec3<u32>>(coefficient), 0u);
+    }
+    if px == 9u {
+        spherical_transfer[SPHERICAL_TRANSFER_NORM_ROW] = vec4<u32>(bitcast<u32>(norm), 0u, 0u, 0u);
+    }
+}
+
+// Relight: one thread per (slot, patch) rebuilds the patch's sky miss flux (lookup row 2 xyz)
+// from its transfer under the frame's sky SH. No ray. options[0].w = lookup row of slot 0.
+@compute @workgroup_size(64, 1, 1)
+fn spherical_relight(@builtin(global_invocation_id) id: vec3<u32>) {
+    let patches = (arrayLength(&spherical_transfer) - SPHERICAL_TRANSFER_HEADER) / 2u;
+    let patch_index = id.x;
+    if patch_index >= patches { return; }
+    let slot = patch_index / 24u;
+    let row = options[0].w + SPHERICAL_SLOT_ROWS * slot + SPHERICAL_PATCH_ROW + 4u * (patch_index % 24u) + 2u;
+    let composed = spherical_patch_sky(patch_index);
+    spherical_lookup[row] = vec4<u32>(bitcast<vec3<u32>>(composed), spherical_lookup[row].w);
+}
+
+// Re-shade: one 8x8 workgroup per (slot, face) job (work entries from options[1].z; ids.z =
+// blend weight alpha as f32, ids.w = groups: 1 sun, 2 sky). From the stored hit position,
+// both normals and the albedo, the sun group is one shadow ray per hit texel and the sky group
+// the capture's own bounce rays (same seeds); a missed texel's sky (or residual) is resampled
+// from the cube. No primary ray. The new value is blended into the stored one by alpha.
+@compute @workgroup_size(8, 8, 1)
+fn spherical_reshade(@builtin(local_invocation_id) id: vec3<u32>,
+                     @builtin(workgroup_id) group: vec3<u32>) {
+    let work = spherical_work[options[1].z + group.z];
+    let px = id.x + 8u * id.y;
+    let sky_norm = spherical_sky_norm(px);
+    let inv_norm = select(0.0, 1.0 / sky_norm, sky_norm > 0.0);
+    let alpha = bitcast<f32>(work.ids.z);
+    let groups = work.ids.w;
+    let index = 64u * (6u * work.ids.x + work.ids.y) + px;
+    var texel = spherical_faces[index];
+    if texel.hit_position.w <= 0.5 {
+        if (groups & 2u) != 0u {
+            let uv = (vec2<f32>(id.xy) + 0.5) * 0.25 - 1.0;
+            let direction = normalize(raa_spherical_face_direction(work.ids.y, uv));
+            let fresh = spherical_miss_sky(direction, inv_norm);
+            texel.sky = spherical_pack(mix(spherical_unpack(texel.sky), fresh, alpha), spherical_extra(texel.sky));
+        }
+    } else {
+        let albedo = spherical_albedo(texel);
+        if any(albedo > vec3<f32>(0.0)) {
+            let p = texel.hit_position.xyz;
+            let ng = spherical_hit_normal(texel.hit_position.w);
+            let n = normalize(vec3<f32>(unpack2x16float(texel.hit_normal.x), unpack2x16float(texel.hit_normal.y).x));
+            if (groups & 1u) != 0u {
+                let fresh = spherical_unit_sun_albedo(p, ng, n, albedo);
+                texel.sun = spherical_pack(mix(spherical_unpack(texel.sun), fresh, alpha), albedo.g);
+            }
+            if (groups & 2u) != 0u {
+                var seed = spherical_seed(work.ids.x, work.ids.y, px);
+                let light_count = min(256u, frame.light_info.x);
+                let light_samples = options[3].z;
+                if light_samples != 0u && light_samples < light_count { _ = random(&seed); }
+                let limit = max(frame.clip.y, bitcast<f32>(options[2].y));
+                let fresh = spherical_sky_bounce(p, ng, n, albedo, limit, inv_norm, &seed);
+                texel.sky = spherical_pack(mix(spherical_unpack(texel.sky), fresh, alpha), albedo.r);
+            }
+        }
+    }
+    spherical_faces[index] = texel;
+}
+
+// Light reach: one 64-thread workgroup per pool face tests every stored hit texel against up to
+// four changed lights (dense indices in transfer row 10, count in row 11 x): the light's
+// unshadowed diffuse contribution must pass the threshold (options[2].w luma, the DDGI
+// `bound`: range, cone, falloff) and one shadow ray must reach it. Bit j of the face word =
+// light j reaches a surface this face sees (read back: only those faces are recaptured).
+var<workgroup> spherical_reach_bits: atomic<u32>;
+@compute @workgroup_size(64, 1, 1)
+fn spherical_reach_test(@builtin(local_invocation_index) px: u32,
+                        @builtin(workgroup_id) group: vec3<u32>) {
+    let face = group.x;
+    if px == 0u { atomicStore(&spherical_reach_bits, 0u); }
+    workgroupBarrier();
+    let texel = spherical_faces[64u * face + px];
+    let albedo = spherical_albedo(texel);
+    let count = min(spherical_transfer[SPHERICAL_REACH_ROW + 1u].x, 4u);
+    let threshold = bitcast<f32>(options[2].w);
+    if texel.hit_position.w > 0.5 && any(albedo > vec3<f32>(0.0)) {
+        let p = texel.hit_position.xyz;
+        let ng = spherical_hit_normal(texel.hit_position.w);
+        let n = normalize(vec3<f32>(unpack2x16float(texel.hit_normal.x), unpack2x16float(texel.hit_normal.y).x));
+        let indices = spherical_transfer[SPHERICAL_REACH_ROW];
+        for (var j = 0u; j < count; j++) {
+            let light = lights[min(indices[j], 255u)];
+            if !any(light.radiance.rgb > vec3<f32>(0.0)) { continue; }
+            let delta = light.position_range.xyz - p;
+            var distance = length(delta);
+            var l = delta / max(distance, EPS);
+            var weight = 1.0;
+            var test = true;
+            if light.kind == 2u {
+                l = -light.direction_outer.xyz;
+                distance = frame.clip.y;
+            } else if light.kind == 3u {
+                // Area panel: reachable within range plus its half diagonal, in front of it.
+                let reach = light.position_range.w + 0.5 * length(vec2<f32>(light.width, light.height));
+                if distance >= reach || dot(light.direction_outer.xyz, -delta) < -reach { continue; }
+                test = false;
+            } else {
+                if distance >= light.position_range.w { continue; }
+                let window = saturate(1.0 - pow(distance / light.position_range.w, 4.0));
+                weight = window * window / max(distance * distance, 0.04);
+                if light.kind == 1u {
+                    weight *= smoothstep(light.direction_outer.w, light.inner, dot(light.direction_outer.xyz, -l));
+                }
+            }
+            if test {
+                let nl = saturate(dot(n, l));
+                if nl <= 0.0 || dot(ng, l) <= 0.0 || weight <= 0.0 { continue; }
+                let c = albedo * (nl * weight / PI) * light.radiance.rgb;
+                if dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)) <= threshold { continue; }
+                if closest(Ray(p + ng * (2.0 * EPS), l), distance - 2.0 * EPS, true).object != MISS { continue; }
+            }
+            atomicOr(&spherical_reach_bits, 1u << j);
+        }
+    }
+    workgroupBarrier();
+    if px == 0u { spherical_reach[face] = atomicLoad(&spherical_reach_bits); }
 }

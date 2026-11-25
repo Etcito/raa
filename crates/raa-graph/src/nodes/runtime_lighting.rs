@@ -17,6 +17,7 @@ use crate::runtime_lighting::{ISOLATION, SPHERICAL, SPHERICAL_TYPE, spherical_ge
 
 const FORWARD: &str = "pass.forward";
 const DEBUG_OPTIONS: &[&str] = &["off", "boundaries", "occupancy", "age", "light-hash"];
+const SUN_REFRESH_OPTIONS: &[&str] = &["reshade", "recapture"];
 
 pub fn family() -> Box<dyn NodeFamily> {
     Box::new(RuntimeLighting)
@@ -165,6 +166,46 @@ impl NodeFamily for RuntimeLighting {
                 "Outer radius from scene bounds",
                 ParamKind::Bool,
                 None,
+                &[][..],
+                Rebuild::None,
+            ),
+            (
+                "sunRefresh",
+                "Sun direction change",
+                ParamKind::Enum,
+                None,
+                SUN_REFRESH_OPTIONS,
+                Rebuild::None,
+            ),
+            (
+                "sunFaces",
+                "Re-shaded faces per frame",
+                ParamKind::Int,
+                Some((6.0, 24576.0)),
+                &[][..],
+                Rebuild::None,
+            ),
+            (
+                "skyTransfer",
+                "Sky SH transfer",
+                ParamKind::Bool,
+                None,
+                &[][..],
+                Rebuild::None,
+            ),
+            (
+                "lightReach",
+                "Per-face light reach test",
+                ParamKind::Bool,
+                None,
+                &[][..],
+                Rebuild::None,
+            ),
+            (
+                "lightThreshold",
+                "Light reach threshold",
+                ParamKind::Number,
+                Some((0.0, 1000.0)),
                 &[][..],
                 Rebuild::None,
             ),

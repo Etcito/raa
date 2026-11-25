@@ -19,7 +19,7 @@ use super::{
     geometry::{Bounds, Geometry},
 };
 use grid::{Surface, dot, point_triangle_distance_sq, sub};
-use lighting::{FaceLighting, light_changes, light_hash};
+use lighting::{FaceLighting, find_light_by_id, light_changes, light_hash};
 use view::ViewOrder;
 
 pub const ALL_FACES: u8 = 0b11_1111;
@@ -121,6 +121,16 @@ pub struct FaceJob {
     ticket: u64,
 }
 
+/// A resident cell's ready faces at one moment (see `SphericalScheduler::face_tokens`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FaceToken {
+    pub key: CellKey,
+    pub slot: u32,
+    pub epoch: u64,
+    pub ready: u8,
+    tickets: [u64; 6],
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SchedulerStats {
     pub cells: u32,
@@ -213,6 +223,18 @@ impl Entry {
         }
     }
 
+    /// Recapture only the faces in `bits`: the epoch stays (the other faces remain valid) and
+    /// the published projection stays visible until the cell is complete again.
+    fn reset_face_bits(&mut self, bits: u8) -> u8 {
+        let bits = bits & self.progress.ready_faces;
+        if bits != 0 {
+            self.progress.ready_faces &= !bits;
+            self.progress.light_hash = 0;
+            self.lighting.forget(bits);
+        }
+        bits
+    }
+
     fn reset_faces(&mut self, serial: &mut u64) {
         *serial += 1;
         self.progress.epoch = *serial;
@@ -259,6 +281,10 @@ pub struct SphericalScheduler {
     serial: u64,
     revisions: Option<(u64, u64, u64)>,
     local_lights: Vec<SphericalLight>,
+    /// Per-face light invalidation with a GPU reach test for added or moved lights
+    /// (otherwise whole cells over their faces' hit bounds, the original rule).
+    light_reach: bool,
+    reach_requests: Vec<u64>,
     light_invalidated_cells: u64,
     light_invalidated_faces: u64,
     origin_epoch: u64,
@@ -304,6 +330,8 @@ impl SphericalScheduler {
             serial: 0,
             revisions: None,
             local_lights: Vec::new(),
+            light_reach: false,
+            reach_requests: Vec::new(),
             light_invalidated_cells: 0,
             light_invalidated_faces: 0,
             origin_epoch: 0,
@@ -496,7 +524,28 @@ impl SphericalScheduler {
             }
             let global_changed = old_light != revisions.2;
             let material_changed = old_material != revisions.1;
-            if global_changed || material_changed || !local_changes.is_empty() {
+            if self.light_reach && !global_changed && !material_changed && !local_changes.is_empty()
+            {
+                let scene_bounds = geometry.world_bounds();
+                for entry in self.cells.values_mut() {
+                    let bits = entry.lighting.affected_faces(
+                        entry.progress.ready_faces,
+                        &local_changes,
+                        scene_bounds,
+                    );
+                    let reset = entry.reset_face_bits(bits);
+                    if reset != 0 {
+                        self.light_invalidated_cells += 1;
+                        self.light_invalidated_faces += u64::from(reset.count_ones());
+                        changed = true;
+                    }
+                }
+                for change in &local_changes {
+                    if let Some(light) = change.reach_target() {
+                        self.reach_requests.push(light.id());
+                    }
+                }
+            } else if global_changed || material_changed || !local_changes.is_empty() {
                 let scene_bounds = geometry.world_bounds();
                 for entry in self.cells.values_mut() {
                     let work = entry.progress.ready_faces | entry.progress.in_flight_faces;
@@ -945,6 +994,94 @@ impl SphericalScheduler {
         entry.progress.light_hash =
             light_hash(global, &entry.lighting.contributors, &self.local_lights);
         true
+    }
+
+    /// Per-face light invalidation with the GPU reach test (see `take_reach_requests`).
+    pub fn set_light_reach(&mut self, on: bool) {
+        self.light_reach = on;
+    }
+
+    /// IDs of lights added, switched on, moved or reshaped since the last call: the caller
+    /// runs the reach test over the ready faces and passes the faces it flags to
+    /// `invalidate_faces` (or `invalidate_light_bounds` when it cannot test them).
+    pub fn take_reach_requests(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.reach_requests)
+    }
+
+    /// The ready faces of every resident cell, by slot, to match a reach readback later.
+    pub fn face_tokens(&self) -> Vec<FaceToken> {
+        self.cells
+            .values()
+            .filter(|entry| entry.progress.ready_faces != 0)
+            .map(|entry| FaceToken {
+                key: entry.progress.key,
+                slot: entry.progress.slot,
+                epoch: entry.progress.epoch,
+                ready: entry.progress.ready_faces,
+                tickets: entry.tickets,
+            })
+            .collect()
+    }
+
+    /// Recapture the faces a reach test flagged, unless they were recaptured since the test.
+    /// Returns the faces reset.
+    pub fn invalidate_faces(&mut self, faces: &[(FaceToken, u8)]) -> u32 {
+        let mut total = 0;
+        for (token, bits) in faces {
+            let Some(entry) = self.cells.get_mut(&token.key) else {
+                continue;
+            };
+            if entry.progress.slot != token.slot || entry.progress.epoch != token.epoch {
+                continue;
+            }
+            let mut current = 0;
+            for face in 0..6 {
+                let bit = 1 << face;
+                if bits & token.ready & bit != 0 && entry.tickets[face] == token.tickets[face] {
+                    current |= bit;
+                }
+            }
+            let reset = entry.reset_face_bits(current);
+            if reset != 0 {
+                self.light_invalidated_cells += 1;
+                self.light_invalidated_faces += u64::from(reset.count_ones());
+                total += reset.count_ones();
+            }
+        }
+        total
+    }
+
+    /// Conservative fallback of the reach test for lights it could not take: the faces whose
+    /// own hit bounds the light may reach.
+    pub(in crate::mesh) fn invalidate_light_bounds(
+        &mut self,
+        ids: &[u64],
+        scene_bounds: Option<Bounds>,
+    ) -> u32 {
+        let mut total = 0;
+        for &id in ids {
+            let Some(light) = find_light_by_id(&self.local_lights, id) else {
+                continue;
+            };
+            for entry in self.cells.values_mut() {
+                let bits =
+                    entry
+                        .lighting
+                        .faces_in_bounds(entry.progress.ready_faces, light, scene_bounds);
+                let reset = entry.reset_face_bits(bits);
+                if reset != 0 {
+                    self.light_invalidated_cells += 1;
+                    self.light_invalidated_faces += u64::from(reset.count_ones());
+                    total += reset.count_ones();
+                }
+            }
+        }
+        total
+    }
+
+    /// 0 inside the view cone (and the centre probe), larger outside: re-shade order.
+    pub fn view_rank(&self, key: CellKey) -> u8 {
+        self.capture_rank(key).0
     }
 
     pub fn stats(&self) -> SchedulerStats {

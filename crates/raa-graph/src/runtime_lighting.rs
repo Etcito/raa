@@ -1,6 +1,6 @@
 //! Parameter conversion shared by spherical GI validation and the executor.
 
-use raa_sdf_trace::mesh::{SphericalGiDebug, SphericalGiSettings};
+use raa_sdf_trace::mesh::{SphericalGiDebug, SphericalGiSettings, SphericalSunRefresh};
 
 use crate::catalog::{FeatureId, ParamValue};
 
@@ -25,7 +25,17 @@ pub(crate) const SPHERICAL_KEYS: &[&str] = &[
     "sphereDirect",
     "directSunRange",
     "autoRange",
+    "sunRefresh",
+    "sunFaces",
+    "skyTransfer",
+    "lightReach",
+    "lightThreshold",
     "enabled",
+];
+
+const SUN_REFRESH: [(&str, SphericalSunRefresh); 2] = [
+    ("reshade", SphericalSunRefresh::Reshade),
+    ("recapture", SphericalSunRefresh::Recapture),
 ];
 
 const DEBUG: [(&str, SphericalGiDebug); 5] = [
@@ -55,6 +65,17 @@ pub(crate) fn spherical_get(settings: SphericalGiSettings, key: &str) -> Option<
         "sphereDirect" => ParamValue::Bool(settings.sphere_direct),
         "directSunRange" => ParamValue::Number(f64::from(settings.direct_sun_range)),
         "autoRange" => ParamValue::Bool(settings.scheduler.auto_range),
+        "sunRefresh" => ParamValue::Enum(
+            SUN_REFRESH
+                .iter()
+                .find(|(_, value)| *value == settings.sun_refresh)?
+                .0
+                .into(),
+        ),
+        "sunFaces" => ParamValue::Int(i64::from(settings.sun_faces)),
+        "skyTransfer" => ParamValue::Bool(settings.sky_transfer),
+        "lightReach" => ParamValue::Bool(settings.light_reach),
+        "lightThreshold" => ParamValue::Number(f64::from(settings.light_threshold)),
         "debug" => ParamValue::Enum(
             DEBUG
                 .iter()
@@ -120,6 +141,21 @@ pub(crate) fn spherical_set(
             settings.direct_sun_range = *value as f32;
         }
         ("autoRange", ParamValue::Bool(value)) => settings.scheduler.auto_range = *value,
+        ("sunRefresh", ParamValue::Enum(value)) => {
+            settings.sun_refresh = SUN_REFRESH
+                .iter()
+                .find(|(name, _)| name == value)
+                .map(|(_, mode)| *mode)
+                .ok_or_else(|| format!("unknown sun refresh '{value}'"))?;
+        }
+        ("sunFaces", ParamValue::Int(value)) if (6..=24576).contains(value) => {
+            settings.sun_faces = *value as u32;
+        }
+        ("skyTransfer", ParamValue::Bool(value)) => settings.sky_transfer = *value,
+        ("lightReach", ParamValue::Bool(value)) => settings.light_reach = *value,
+        ("lightThreshold", ParamValue::Number(value)) if (0.0..=1000.0).contains(value) => {
+            settings.light_threshold = *value as f32;
+        }
         ("debug", ParamValue::Enum(value)) => {
             settings.debug = DEBUG
                 .iter()

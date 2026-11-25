@@ -20,7 +20,7 @@ pub use hybrid::PathMode;
 pub use pass::{GraphMeshTrace, MESH_TRACE_NAME, MeshTraceFeature, MeshTraceHandle};
 pub use spherical_gpu::{
     SPHERICAL_GI_NAME, SphericalGiDebug, SphericalGiFeature, SphericalGiHandle, SphericalGiProbe,
-    SphericalGiSettings, SphericalGiStats,
+    SphericalGiSettings, SphericalGiStats, SphericalSunRefresh,
 };
 
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::mpsc::Receiver};
