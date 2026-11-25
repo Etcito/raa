@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 7] = [
+const OPTIONS: [&str; 16] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
@@ -32,6 +32,15 @@ const OPTIONS: [&str; 7] = [
     "zMax",
     "debug",
     "channelMask",
+    "maxProbes",
+    "captureFaces",
+    "captureMs",
+    "burstMs",
+    "probeCache",
+    "skySamples",
+    "lightSamples",
+    "parallaxRange",
+    "autoRange",
 ];
 
 fn invalid(key: &str, reason: &str) -> RaaError {
@@ -96,6 +105,59 @@ fn read_patch(
                     return Err(invalid(&name, "expected an integer from 0 to 7"));
                 }
                 settings.channels = mask as u32;
+            }
+            "maxProbes" => {
+                let probes = number()?;
+                if !(16.0..=4096.0).contains(&probes) || probes.fract() != 0.0 {
+                    return Err(invalid(&name, "expected an integer from 16 to 4096"));
+                }
+                settings.scheduler.max_cells = probes as u32;
+            }
+            "captureFaces" => {
+                let faces = number()?;
+                if !(1.0..=1024.0).contains(&faces) || faces.fract() != 0.0 {
+                    return Err(invalid(&name, "expected an integer from 1 to 1024"));
+                }
+                settings.budget.near = faces as u32;
+                settings.budget.far = (faces as u32).div_ceil(2);
+            }
+            "captureMs" | "burstMs" => {
+                let ms = number()?;
+                if !(0.0..=50.0).contains(&ms) {
+                    return Err(invalid(&name, "expected milliseconds from 0 to 50"));
+                }
+                if name == "captureMs" {
+                    settings.capture_ms = ms as f32;
+                } else {
+                    settings.burst_ms = ms as f32;
+                }
+            }
+            "parallaxRange" => {
+                let range = number()?;
+                if !(0.0..=10000.0).contains(&range) {
+                    return Err(invalid(&name, "expected metres from 0 to 10000"));
+                }
+                settings.parallax_range = range as f32;
+            }
+            "autoRange" => {
+                settings.scheduler.auto_range = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(&name, "expected a boolean"))?;
+            }
+            "probeCache" | "skySamples" | "lightSamples" => {
+                let count = number()?;
+                let max = if name == "probeCache" { 4096.0 } else { 64.0 };
+                if !(0.0..=max).contains(&count) || count.fract() != 0.0 {
+                    return Err(invalid(
+                        &name,
+                        &format!("expected an integer from 0 to {max}"),
+                    ));
+                }
+                match name.as_str() {
+                    "probeCache" => settings.scheduler.cache_cells = count as u32,
+                    "skySamples" => settings.sky_samples = count as u32,
+                    _ => settings.light_samples = count as u32,
+                }
             }
             "debug" => {
                 settings.debug = match value.as_string().as_deref() {
@@ -164,6 +226,15 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
     put(&result, "zMax", grid.z_max.into());
     put(&result, "debug", debug.into());
     put(&result, "channelMask", settings.channels.into());
+    put(&result, "maxProbes", settings.scheduler.max_cells.into());
+    put(&result, "captureFaces", settings.budget.near.into());
+    put(&result, "captureMs", settings.capture_ms.into());
+    put(&result, "burstMs", settings.burst_ms.into());
+    put(&result, "probeCache", settings.scheduler.cache_cells.into());
+    put(&result, "skySamples", settings.sky_samples.into());
+    put(&result, "lightSamples", settings.light_samples.into());
+    put(&result, "parallaxRange", settings.parallax_range.into());
+    put(&result, "autoRange", settings.scheduler.auto_range.into());
     result.into()
 }
 
@@ -245,6 +316,16 @@ impl Engine {
                 ("gpuBytes", stats.gpu_bytes as f64),
                 ("capturedFaces", stats.captured_faces as f64),
                 ("captureFrames", stats.capture_frames as f64),
+                ("visibleCells", scheduler.visible_cells as f64),
+                (
+                    "visiblePublishedCells",
+                    scheduler.visible_published_cells as f64,
+                ),
+                ("faceBudget", stats.face_budget as f64),
+                ("captureGpuMs", f64::from(stats.capture_gpu_ms)),
+                ("cachedCells", scheduler.cached_cells as f64),
+                ("adoptedCells", scheduler.adopted_cells as f64),
+                ("slotBytes", stats.slot_bytes as f64),
             ] {
                 put(&result, name, value.into());
             }
@@ -254,6 +335,17 @@ impl Engine {
                 format!("{:016x}", stats.light_revision).into(),
             );
             put(&result, "origin", number_array(stats.origin).into());
+            put(&result, "burst", stats.burst.into());
+            put(
+                &result,
+                "discoveryPending",
+                scheduler.discovery_pending.into(),
+            );
+            put(
+                &result,
+                "capacityLimited",
+                scheduler.capacity_limited.into(),
+            );
             let shell = Object::new();
             put(&shell, "inner", stats.last_shell.inner.into());
             put(&shell, "center", stats.last_shell.center.into());

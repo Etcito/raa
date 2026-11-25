@@ -116,8 +116,27 @@ not a graph is set.
   spherical node is present. The lookup has no generic compute or history tap. Capture
   uses the primary view and the scene's geometry and lights.
 - The spherical node exposes `sphereSubdivision`, `exponentialPower`, `clipStart`, `zMax`,
-  `channelMask` and the `debug` views from `setSphericalGi`. Node presence enables capture.
-  Set `zMax` above `clipStart`. The `spherical_gi` frozen graph uses the same pass and handles.
+  `channelMask`, `maxProbes`, `captureFaces`, `captureMs`, `burstMs` and the `debug` views from
+  `setSphericalGi`. A non-zero `captureMs` budgets capture in GPU time (timestamps around the
+  capture passes): `burstMs` while visible probes are missing or undiscovered, `captureMs` for
+  later refreshes, and `captureFaces` only before the first timing or without timestamp queries.
+  Capture time is latency bound (a fixed cost per dispatch), so the steady target accumulates
+  as credit and pays for one larger batch every few frames. `autoRange` derives the outer radius
+  from the scene bounds (quarter-octave steps, grow at once, shrink below 1/sqrt(2)); `zMax` is then
+  only the initial radius. `probeCache` keeps that many extra published probes for reuse after a
+  recenter; `skySamples` and `lightSamples` set the sky rays and the stratified local lights per hit.
+  `parallaxRange` (metres, 0 = off) switches receivers beyond it from the 24 parallax patches to
+  the probe's six-face irradiance, blended over the next half of that distance (a cheaper far field).
+  Node presence enables capture. Set `zMax` above `clipStart`. The `spherical_gi` frozen graph
+  uses the same pass and handles.
+- Probes float in free space: each occupied cell captures from its centre pushed away from
+  nearby triangles, and a centre probe covers the sphere of radius `clipStart` around the
+  grid anchor. Shading interpolates the nearest published probes with the receiver's own
+  normal, parallax-corrected patches and depth-moment visibility; captures are world space,
+  so a recenter rekeys probes instead of recapturing them, and new probes fade in. Capture
+  order: never-published probes before refreshes, then inside the view, periphery, behind;
+  nearer shells and the view centre first. Residency stays shell-major, so turning never
+  evicts near probes behind the camera.
 - `pass.gi.volume.volumeAtlas` feeds `pass.gi.screen.volumeAtlas`. Set the screen node's
   `indirect` to `probes` or `restir` and use its `debugView` for volume and screen diagnostics.
   Both modes publish `pass.gi.screen.gi` for `pass.forward.gi`. Spherical GI can coexist with

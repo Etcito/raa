@@ -51,8 +51,16 @@
       "type": "pass.gi.spherical",
       "params": {
         "sphereSubdivision": 3,
+        "exponentialPower": 0.3,
+        "clipStart": 1,
         "zMax": 12,
-        "channelMask": 7
+        "channelMask": 7,
+        "maxProbes": 2048,
+        "captureFaces": 96,
+        "captureMs": 0.75,
+        "burstMs": 4,
+        "parallaxRange": 8,
+        "autoRange": true
       }
     },
     {

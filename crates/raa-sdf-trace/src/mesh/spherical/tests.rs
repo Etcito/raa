@@ -17,6 +17,9 @@ fn config() -> SphericalSchedulerConfig {
     SphericalSchedulerConfig {
         grid: grid_config(),
         near_shells: 1,
+        max_cells: 128,
+        center_probe: false,
+        origin_tolerance: 0.25,
         ..SphericalSchedulerConfig::default()
     }
 }
@@ -195,7 +198,7 @@ fn near_and_far_budgets_track_each_face_and_retry_only_the_aborted_face() {
 }
 
 #[test]
-fn light_and_recenter_reject_old_faces_even_for_the_same_slot_and_key() {
+fn light_change_resets_faces_and_recenter_reissues_in_flight_faces_in_place() {
     let mut scene = MeshTraceScene::default();
     update_geometry(&mut scene, &[triangle(1, &facing_x(1.7))]);
     let mut scheduler = SphericalScheduler::new(config()).unwrap();
@@ -208,50 +211,78 @@ fn light_and_recenter_reject_old_faces_even_for_the_same_slot_and_key() {
     assert_eq!(scheduler.stats().light_revision, 10);
     assert_eq!(scheduler.stats().ready_faces, 0);
     assert!(!scheduler.complete(stale_light_job));
+    let first = scheduler.take_jobs(FaceBudget { near: 1, far: 0 })[0];
+    assert!(scheduler.complete(first));
     let old_origin_job = scheduler.take_jobs(FaceBudget { near: 1, far: 0 })[0];
     assert_eq!(old_origin_job.slot, slot);
+    // The world-space probe keeps its cell, slot, epoch and completed face; only the
+    // in-flight face is reissued because its job named the retired anchor.
     scheduler.update(&scene, [0.3, 0.0, 0.0], 10);
+    assert_eq!(scheduler.grid().origin(), [0.25, 0.0, 0.0]);
+    assert_eq!(scheduler.stats().ready_faces, 1);
+    assert!(!scheduler.take_released_slots().contains(&slot));
     let new_job = scheduler.take_jobs(FaceBudget { near: 1, far: 0 })[0];
     assert_eq!(
-        (new_job.key, new_job.slot),
-        (old_origin_job.key, old_origin_job.slot)
+        (
+            new_job.key,
+            new_job.slot,
+            new_job.epoch,
+            new_job.face,
+            new_job.probe
+        ),
+        (
+            old_origin_job.key,
+            old_origin_job.slot,
+            old_origin_job.epoch,
+            old_origin_job.face,
+            old_origin_job.probe
+        )
     );
     assert_ne!(new_job.center, old_origin_job.center);
-    assert_ne!(new_job.epoch, old_origin_job.epoch);
-    assert!(scheduler.take_released_slots().contains(&slot));
     assert!(!scheduler.complete(old_origin_job));
     assert!(scheduler.complete(new_job));
 }
 
 #[test]
-fn sustained_walk_makes_face_progress_in_each_bounded_origin_epoch() {
+fn sustained_walk_keeps_ready_world_space_probes_across_origin_epochs() {
     let mut scene = MeshTraceScene::default();
-    update_geometry(&mut scene, &[triangle(1, &facing_x(1.9))]);
+    // Walking away from the wall keeps its probes outside the inner sphere.
+    update_geometry(&mut scene, &[triangle(1, &facing_x(-1.9))]);
     let mut scheduler = SphericalScheduler::new(config()).unwrap();
-    let mut ready_epochs = BTreeSet::new();
-    let mut previous = None;
+    let mut epochs = BTreeSet::new();
+    let mut first = None;
+    let mut first_survived_epochs = BTreeSet::new();
     for step in 0..48 {
         let camera = [step as f32 * 0.02, 0.0, 0.0];
         scheduler.update(&scene, camera, 0);
         let anchor = scheduler.grid().origin();
         assert!((camera[0] - anchor[0]).abs() <= config().origin_tolerance);
         let epoch = scheduler.stats().origin_epoch;
-        if let Some((previous_epoch, previous_job)) = previous
-            && epoch != previous_epoch
-        {
-            assert!(ready_epochs.contains(&previous_epoch));
-            assert!(!scheduler.complete(previous_job));
-            assert_eq!(scheduler.stats().ready_faces, 0);
-        }
+        epochs.insert(epoch);
         for job in scheduler.take_jobs(FaceBudget { near: 1, far: 1 }) {
             assert!(scheduler.complete(job));
-            previous = Some((epoch, job));
         }
-        if scheduler.stats().ready_cells == 1 {
-            ready_epochs.insert(epoch);
+        if first.is_some() {
+            // Recentering never leaves the walk without a published probe.
+            assert!(
+                scheduler
+                    .cells()
+                    .any(|cell| cell.is_ready() && cell.published)
+            );
+        } else if let Some(cell) = scheduler.cells().find(|cell| cell.is_ready()) {
+            first = Some(cell.probe);
+        }
+        if let Some(probe) = first
+            && scheduler
+                .cells()
+                .any(|cell| cell.probe == probe && cell.published)
+        {
+            first_survived_epochs.insert(epoch);
         }
     }
-    assert!(ready_epochs.len() >= 3);
+    assert!(epochs.len() >= 3);
+    // The first published probe was reused, not recaptured, after a recenter.
+    assert!(first_survived_epochs.len() >= 2);
 }
 
 #[test]
@@ -543,7 +574,7 @@ fn pending_light_metadata_is_conservative_and_stale_readback_is_rejected() {
 }
 
 #[test]
-fn rotating_view_admits_visible_geometry_without_resetting_retained_faces() {
+fn rotating_view_keeps_near_cells_behind_the_camera() {
     let mut scene = MeshTraceScene::default();
     let visible = [[-0.1, -0.1, -5.0], [0.1, -0.1, -5.0], [0.0, 0.1, -5.0]];
     update_geometry(
@@ -554,40 +585,323 @@ fn rotating_view_admits_visible_geometry_without_resetting_retained_faces() {
             triangle(3, &visible),
         ],
     );
+    let make = |max_cells| {
+        SphericalScheduler::new(SphericalSchedulerConfig {
+            max_cells,
+            cell_queries_per_update: 3,
+            ..config()
+        })
+        .unwrap()
+    };
+    let mut scheduler = make(2);
+    for _ in 0..12 {
+        scheduler.update(&scene, [0.0; 3], 0);
+    }
+    capture_light_metadata(&mut scheduler, |_| vec![]);
+    let retained = key(0, CubeFace::PosX);
+    let behind = key(0, CubeFace::NegX);
+    let visible = key(2, CubeFace::NegZ);
+    let original = *scheduler.progress(retained).unwrap();
+    let behind_cell = *scheduler.progress(behind).unwrap();
+    let anchor_epoch = scheduler.stats().origin_epoch;
+    assert!(scheduler.progress(visible).is_none());
+
+    // Shell-major priority: a far visible cell never displaces a near one.
+    scheduler.set_view_priority([0.0, 0.0, -1.0], 0.87);
+    for _ in 0..12 {
+        scheduler.update(&scene, [0.0; 3], 0);
+    }
+    assert_eq!(scheduler.stats().origin_epoch, anchor_epoch);
+    assert_eq!(scheduler.progress(retained), Some(&original));
+    assert_eq!(scheduler.progress(behind), Some(&behind_cell));
+    assert!(scheduler.progress(visible).is_none());
+    assert!(scheduler.take_released_slots().is_empty());
+
+    let mut roomy = make(3);
+    roomy.set_view_priority([0.0, 0.0, -1.0], 0.87);
+    for _ in 0..12 {
+        roomy.update(&scene, [0.0; 3], 0);
+    }
+    assert!(roomy.progress(behind).is_some());
+    let far_face = roomy
+        .take_jobs(FaceBudget { near: 0, far: 1 })
+        .pop()
+        .unwrap();
+    assert_eq!(far_face.key, visible);
+    roomy.set_view_priority([0.01, 0.0, -1.0], 0.87);
+    roomy.update(&scene, [0.0; 3], 0);
+    assert!(roomy.is_current(far_face));
+}
+
+#[test]
+fn shared_capture_pool_serves_visible_probes_first_then_periphery_then_behind() {
+    let mut scene = MeshTraceScene::default();
+    // Near triangles behind (+Z), to the side (+X) and a far one in view (-Z).
+    let visible = [[-0.1, -0.1, -5.0], [0.1, -0.1, -5.0], [0.0, 0.1, -5.0]];
+    let behind = [[-0.1, -0.1, 1.5], [0.1, -0.1, 1.5], [0.0, 0.1, 1.5]];
+    update_geometry(
+        &mut scene,
+        &[
+            triangle(1, &facing_x(1.5)),
+            triangle(2, &behind),
+            triangle(3, &visible),
+        ],
+    );
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    scheduler.set_view_priority([0.0, 0.0, -1.0], 0.87);
+    for _ in 0..4 {
+        scheduler.update(&scene, [0.0; 3], 0);
+    }
+    let stats = scheduler.stats();
+    assert_eq!(stats.cells, 3);
+    assert_eq!((stats.visible_cells, stats.visible_published_cells), (1, 0));
+    assert!(stats.visible_missing());
+
+    // One shared pool, regardless of bands: the far visible cell first, then the
+    // side cell (periphery), then the near cell behind the camera.
+    let jobs = scheduler.take_jobs_shared(13);
+    assert_eq!(jobs.len(), 13);
+    let order: Vec<_> = jobs.iter().map(|job| job.key).collect();
+    assert_eq!(order[0], key(2, CubeFace::NegZ));
+    assert_eq!(order[6], key(0, CubeFace::PosX));
+    assert_eq!(order[12], key(0, CubeFace::PosZ));
+    for job in jobs {
+        assert!(scheduler.complete(job));
+    }
+    let stats = scheduler.stats();
+    assert_eq!((stats.visible_cells, stats.visible_published_cells), (1, 1));
+
+    // A relight turns every published probe into a refresh: the never-published
+    // remainder of the behind cell still comes first.
+    scheduler.update(&scene, [0.0; 3], 1);
+    let jobs = scheduler.take_jobs_shared(6);
+    assert!(jobs.iter().all(|job| job.key == key(0, CubeFace::PosZ)));
+}
+
+#[test]
+fn probe_cache_keeps_probes_that_leave_the_grid_and_a_walk_back_adopts_them() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(&mut scene, &[triangle(1, &facing_x(-1.5))]);
+    let walk = |cache_cells| {
+        let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+            cache_cells,
+            ..config()
+        })
+        .unwrap();
+        for _ in 0..4 {
+            scheduler.update(&scene, [0.0; 3], 0);
+            for job in scheduler.take_jobs_shared(64) {
+                assert!(scheduler.complete(job));
+            }
+        }
+        let probe = *scheduler.cells().next().expect("captured probe");
+        assert!(probe.published && probe.is_ready());
+        scheduler.take_released_slots();
+        // Walk 12 m away: the wall leaves the 8 m grid.
+        scheduler.update(&scene, [12.0, 0.0, 0.0], 0);
+        assert!(scheduler.cells().all(|cell| cell.probe != probe.probe));
+        let away = scheduler.stats();
+        // Walk back: the cached probe is adopted with its slot and faces.
+        scheduler.update(&scene, [0.0; 3], 0);
+        let back = scheduler
+            .cells()
+            .find(|cell| cell.probe == probe.probe)
+            .copied();
+        (
+            away,
+            back,
+            scheduler.take_adopted_slots(),
+            scheduler.take_released_slots(),
+            probe,
+        )
+    };
+    let (away, back, adopted, released, probe) = walk(8);
+    assert_eq!(away.cached_cells, 1);
+    let back = back.expect("adopted probe");
+    assert_eq!(
+        (back.slot, back.ready_faces, back.published),
+        (probe.slot, ALL_FACES, true)
+    );
+    assert!(adopted.contains(&probe.slot));
+    assert!(!released.contains(&probe.slot));
+
+    // Without a cache the probe is released and comes back unpublished.
+    let (away, back, adopted, released, probe) = walk(0);
+    assert_eq!(away.cached_cells, 0);
+    // Rediscovery places a fresh probe at the same point; it must be captured again.
+    assert!(back.is_none_or(|cell| !cell.published && cell.ready_faces == 0));
+    assert!(adopted.is_empty());
+    assert!(released.contains(&probe.slot));
+}
+
+#[test]
+fn a_light_change_clears_the_probe_cache() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(&mut scene, &[triangle(1, &facing_x(-1.5))]);
     let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
-        max_cells: 2,
-        cell_queries_per_update: 3,
+        cache_cells: 8,
+        ..config()
+    })
+    .unwrap();
+    for _ in 0..4 {
+        scheduler.update(&scene, [0.0; 3], 0);
+        for job in scheduler.take_jobs_shared(64) {
+            assert!(scheduler.complete(job));
+        }
+    }
+    scheduler.update(&scene, [12.0, 0.0, 0.0], 0);
+    assert_eq!(scheduler.stats().cached_cells, 1);
+    scheduler.update(&scene, [12.0, 0.0, 0.0], 1);
+    assert_eq!(scheduler.stats().cached_cells, 0);
+}
+
+#[test]
+fn auto_range_covers_the_scene_bounds_with_hysteresis() {
+    let mut scene = MeshTraceScene::default();
+    // Geometry from x = -1.5 to x = 30: the fixed 8 m grid would cut it.
+    update_geometry(
+        &mut scene,
+        &[triangle(1, &facing_x(-1.5)), triangle(2, &facing_x(30.0))],
+    );
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        auto_range: true,
         ..config()
     })
     .unwrap();
     scheduler.update(&scene, [0.0; 3], 0);
-    capture_light_metadata(&mut scheduler, |_| vec![]);
-    let retained = key(0, CubeFace::PosX);
-    let offscreen = key(0, CubeFace::NegX);
-    let visible = key(2, CubeFace::NegZ);
-    let original = *scheduler.progress(retained).unwrap();
-    let anchor_epoch = scheduler.stats().origin_epoch;
-    let released = scheduler.progress(offscreen).unwrap().slot;
-    assert!(scheduler.progress(visible).is_none());
+    let outer = scheduler.grid().config().z_max;
+    assert!(
+        outer >= 30.0 && outer < 30.0 * 2f32.powf(0.25) * 1.01,
+        "{outer}"
+    );
+    let shell = scheduler.grid().radial_shell(0).unwrap();
+    assert_eq!(shell.inner, 1.0);
+    // Both walls get a probe: the far one is inside the last shell.
+    for _ in 0..8 {
+        scheduler.update(&scene, [0.0; 3], 0);
+    }
+    assert!(scheduler.cells().any(|cell| cell.probe[0] > 20.0));
+    // Walking 2 m toward the far wall keeps the radius (no pumping).
+    let epoch = scheduler.stats().origin_epoch;
+    scheduler.update(&scene, [2.0, 0.0, 0.0], 0);
+    assert_eq!(scheduler.grid().config().z_max, outer);
+    assert_eq!(scheduler.stats().origin_epoch, epoch + 1);
+    // Walking away grows it at once.
+    scheduler.update(&scene, [-6.0, 0.0, 0.0], 0);
+    assert!(scheduler.grid().config().z_max >= 36.0);
+}
 
-    scheduler.set_view_priority([0.0, 0.0, -1.0], 0.87);
-    scheduler.update(&scene, [0.0; 3], 0);
-    assert_eq!(scheduler.stats().last_cell_queries, 3);
-    assert_eq!(scheduler.stats().origin_epoch, anchor_epoch);
-    assert_eq!(scheduler.progress(retained), Some(&original));
-    assert!(scheduler.progress(offscreen).is_none());
-    assert!(scheduler.take_released_slots().contains(&released));
-    let new_face = scheduler.take_jobs(FaceBudget { near: 0, far: 1 })[0];
-    assert_eq!(new_face.key, visible);
-
-    scheduler.set_view_priority([0.01, 0.0, -1.0], 0.87);
-    scheduler.update(&scene, [0.0; 3], 0);
-    assert_eq!(scheduler.progress(retained), Some(&original));
-    assert!(scheduler.is_current(new_face));
+fn center_config() -> SphericalSchedulerConfig {
+    SphericalSchedulerConfig {
+        center_probe: true,
+        ..config()
+    }
 }
 
 #[test]
-fn view_order_is_bijective_and_shell_ranges_exclude_other_shells() {
+fn centre_probe_covers_the_inner_sphere_and_follows_the_camera_beyond_clip_start() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(&mut scene, &[triangle(1, &facing_x(1.5))]);
+    let mut scheduler = SphericalScheduler::new(center_config()).unwrap();
+    scheduler.update(&scene, [0.0; 3], 0);
+    let center = *scheduler.progress(CellKey::CENTER).unwrap();
+    assert_eq!(center.probe, [0.0; 3]);
+    assert_eq!(scheduler.stats().near_cells, 2);
+    // The centre probe draws first from the near budget.
+    let jobs = scheduler.take_jobs(FaceBudget { near: 6, far: 0 });
+    assert!(jobs.iter().all(|job| job.key.is_center()));
+    for job in jobs {
+        assert!(scheduler.complete(job));
+    }
+    assert!(scheduler.progress(CellKey::CENTER).unwrap().published);
+    // Inside clipStart (1 m) the same probe stays the centre without recapture.
+    scheduler.update(&scene, [0.5, 0.0, 0.0], 0);
+    let kept = *scheduler.progress(CellKey::CENTER).unwrap();
+    assert_eq!((kept.slot, kept.probe), (center.slot, center.probe));
+    assert!(kept.is_ready());
+    // Beyond clipStart it becomes the probe of its own cell and a new centre starts.
+    scheduler.update(&scene, [-1.25, 0.0, 0.0], 0);
+    let moved = scheduler.progress(key(0, CubeFace::PosX)).unwrap();
+    assert_eq!((moved.slot, moved.probe), (center.slot, center.probe));
+    assert!(moved.published);
+    let fresh = scheduler.progress(CellKey::CENTER).unwrap();
+    assert_eq!(fresh.probe, [-1.25, 0.0, 0.0]);
+    assert!(!fresh.published);
+}
+
+#[test]
+fn probes_are_pushed_off_triangles_through_the_cell_centre() {
+    let mut scene = MeshTraceScene::default();
+    // A wall through the PosX shell-0 centre (radius 1.5).
+    let wall = [[1.5, -4.0, -4.0], [1.5, 4.0, -4.0], [1.5, 0.0, 6.0]];
+    update_geometry(&mut scene, &[triangle(1, &wall)]);
+    let mut scheduler = SphericalScheduler::new(config()).unwrap();
+    scheduler.update(&scene, [0.0; 3], 0);
+    let cell = scheduler.progress(key(0, CubeFace::PosX)).unwrap();
+    assert_eq!(cell.center, [1.5, 0.0, 0.0]);
+    assert!((cell.probe[0] - 1.5).abs() > 0.05, "probe {:?}", cell.probe);
+    assert_eq!(scheduler.grid().key_at(cell.probe), Some(cell.key));
+}
+
+#[test]
+fn rekey_keeps_the_probe_nearest_each_new_cell_centre() {
+    let mut scene = MeshTraceScene::default();
+    // Off-centre triangles leave both cell centres clear, so probes sit on them.
+    let off = |x: f32| [[x, 0.6, -0.1], [x, 1.0, -0.1], [x, 0.8, 0.2]];
+    let (a, b) = (off(1.5), off(3.0));
+    update_geometry(&mut scene, &[triangle(1, &a), triangle(2, &b)]);
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        origin_tolerance: 0.5,
+        ..config()
+    })
+    .unwrap();
+    scheduler.update(&scene, [0.0; 3], 0);
+    let near = *scheduler.progress(key(0, CubeFace::PosX)).unwrap();
+    let far = *scheduler.progress(key(1, CubeFace::PosX)).unwrap();
+    assert_eq!((near.probe, far.probe), ([1.5, 0.0, 0.0], [3.0, 0.0, 0.0]));
+    // The anchor snaps to -0.5: both probes now fall in PosX shell 1 (radius 2 to 4,
+    // centre 3). The probe at radius 3.5 is nearer that centre than the one at 2.0.
+    scheduler.update(&scene, [-0.6, 0.0, 0.0], 0);
+    assert_eq!(scheduler.grid().origin(), [-0.5, 0.0, 0.0]);
+    let kept = *scheduler.progress(key(1, CubeFace::PosX)).unwrap();
+    assert_eq!((kept.slot, kept.probe), (far.slot, far.probe));
+    assert!(scheduler.take_released_slots().contains(&near.slot));
+}
+
+#[test]
+fn snapped_origin_lies_on_the_tolerance_lattice() {
+    assert_eq!(snap_origin([0.3, -0.13, 0.0], 0.25), [0.25, -0.25, 0.0]);
+    assert_eq!(snap_origin([0.3, -0.13, 0.0], 0.0), [0.3, -0.13, 0.0]);
+}
+
+#[test]
+fn recentred_origin_snaps_to_the_smallest_cell_world_lattice() {
+    let scene = MeshTraceScene::default();
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        origin_tolerance: 0.0,
+        ..config()
+    })
+    .unwrap();
+    let step = scheduler.grid().smallest_cell();
+    let shell = scheduler.grid().radial_shell(0).unwrap();
+    let angular = 2.0 * config().grid.clip_start / f32::from(config().grid.angular_resolution);
+    assert_eq!(step, (shell.outer - shell.inner).min(angular));
+    for camera in [[0.37, -1.21, 2.05], [5.5, 0.01, -3.33], [-7.9, 2.2, 0.6]] {
+        scheduler.update(&scene, camera, 0);
+        let origin = scheduler.grid().origin();
+        for axis in 0..3 {
+            let cells = f64::from(origin[axis]) / f64::from(step);
+            assert!(
+                (cells - cells.round()).abs() < 1e-4,
+                "{origin:?} off the {step} lattice"
+            );
+            assert!((origin[axis] - camera[axis]).abs() <= step * 0.5 + 1e-5);
+        }
+    }
+}
+
+#[test]
+fn view_capture_rank_puts_the_view_cone_first_and_is_a_permutation() {
     for (forward, cos) in [
         ([1.0, 0.0, 0.0], 0.99),
         ([1.0, 1.0, 0.0], 0.75),
@@ -599,18 +913,72 @@ fn view_order_is_bijective_and_shell_ranges_exclude_other_shells() {
         })
         .unwrap();
         let order = ViewOrder::new(&grid, None, forward, cos).unwrap();
-        let total = grid.cells_per_shell() * u32::from(grid.shell_count());
-        for rank in 0..total {
-            assert_eq!(order.rank(&grid, order.key(&grid, rank)), rank);
-        }
-        let ranks: Vec<_> = order.shell_ranges(1..2).into_iter().flatten().collect();
-        assert_eq!(ranks.len() as u32, grid.cells_per_shell());
+        let mut ranks: Vec<_> = (0..grid.cells_per_shell())
+            .map(|index| order.capture_rank(&grid, grid.key(index)))
+            .collect();
+        let classes: Vec<_> = ranks.iter().map(|rank| rank.0).collect();
+        ranks.sort_unstable_by_key(|rank| rank.2);
+        assert!(ranks.windows(2).all(|pair| pair[0].2 + 1 == pair[1].2));
+        // Angular rank orders the whole view cone first.
         assert!(
             ranks
-                .into_iter()
-                .all(|rank| order.key(&grid, rank).shell == 1)
+                .windows(2)
+                .all(|pair| pair[0].0 == 0 || pair[1].0 != 0)
         );
+        assert!(classes.contains(&0));
     }
+}
+
+#[test]
+fn rotating_in_place_never_moves_evicts_or_recaptures_probes() {
+    let mut scene = MeshTraceScene::default();
+    update_geometry(
+        &mut scene,
+        &[
+            triangle(1, &facing_x(1.5)),
+            triangle(2, &facing_x(-1.5)),
+            triangle(
+                3,
+                &[[-0.1, -0.1, -5.0], [0.1, -0.1, -5.0], [0.0, 0.1, -5.0]],
+            ),
+            triangle(4, &[[-0.1, -0.1, 5.0], [0.1, -0.1, 5.0], [0.0, 0.1, 5.0]]),
+        ],
+    );
+    // Capacity below the occupied cells: residency must still not follow the view.
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        max_cells: 3,
+        center_probe: true,
+        ..config()
+    })
+    .unwrap();
+    let camera = [0.05, 0.0, 0.0];
+    for _ in 0..8 {
+        scheduler.update(&scene, camera, 0);
+        for job in scheduler.take_jobs_shared(64) {
+            assert!(scheduler.complete(job));
+        }
+    }
+    let snapshot = |scheduler: &SphericalScheduler| {
+        let mut cells: Vec<_> = scheduler.cells().copied().collect();
+        cells.sort_by_key(|cell| cell.key);
+        cells
+    };
+    let before = snapshot(&scheduler);
+    assert_eq!(before.len(), 3);
+    assert!(before.iter().all(|cell| cell.is_ready() && cell.published));
+    scheduler.take_released_slots();
+    let epoch = scheduler.stats().origin_epoch;
+    let mut recaptures = 0;
+    for step in 0..=72 {
+        let angle = step as f32 * std::f32::consts::TAU / 72.0;
+        scheduler.set_view_priority([angle.sin(), 0.0, -angle.cos()], 0.8);
+        scheduler.update(&scene, camera, 0);
+        recaptures += scheduler.take_jobs_shared(64).len();
+    }
+    assert_eq!(snapshot(&scheduler), before);
+    assert_eq!(recaptures, 0);
+    assert!(scheduler.take_released_slots().is_empty());
+    assert_eq!(scheduler.stats().origin_epoch, epoch);
 }
 
 fn reflected_scene() -> MeshTraceScene {
@@ -801,4 +1169,105 @@ fn reordered_identical_reflected_feedback_does_not_requery_the_bvh() {
     ));
     scheduler.update(&scene, origin, 1);
     assert_eq!(scheduler.stats().last_cell_queries, 0);
+}
+
+/// CPU cost of discovery and probe placement on a real scene. Run with
+/// `SPHERICAL_BENCH_TRIANGLES=<N x 3 x 3 float32 file> cargo test --release -- --ignored bench_`.
+#[test]
+#[ignore]
+fn bench_scheduler_update_on_triangle_file() {
+    let Ok(path) = std::env::var("SPHERICAL_BENCH_TRIANGLES") else {
+        return;
+    };
+    let bytes = std::fs::read(path).unwrap();
+    let positions: Vec<[f32; 3]> = bytes
+        .chunks_exact(12)
+        .map(|c| {
+            std::array::from_fn(|i| f32::from_le_bytes(c[4 * i..4 * i + 4].try_into().unwrap()))
+        })
+        .collect();
+    let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
+    let indices: Vec<u32> = (0..positions.len() as u32).collect();
+    let mut scene = MeshTraceScene::default();
+    let start = std::time::Instant::now();
+    scene
+        .geometry
+        .update(
+            &[MeshInput {
+                key: 1,
+                mesh: 1,
+                positions: &positions,
+                normals: &normals,
+                colors: None,
+                uvs: None,
+                indices: &indices,
+                material: 0,
+                world: Mat4::IDENTITY,
+            }],
+            8 << 30,
+            0,
+        )
+        .unwrap();
+    eprintln!(
+        "bvh {} triangles {:?}",
+        positions.len() / 3,
+        start.elapsed()
+    );
+    let config = SphericalSchedulerConfig {
+        grid: SphericalGridConfig {
+            angular_resolution: 8,
+            radial_growth: 0.3f32.exp2(),
+            clip_start: 1.0,
+            z_max: 12.0,
+            ..SphericalGridConfig::default()
+        },
+        max_cells: std::env::var("SPHERICAL_BENCH_PROBES").map_or(2048, |v| v.parse().unwrap()),
+        cache_cells: 1024,
+        auto_range: true,
+        ..SphericalSchedulerConfig::default()
+    };
+    let views = [
+        ([-8.807f32, 1.592, -0.858], [-3.004f32, 2.762, 0.237]),
+        ([2.703, 1.355, 2.111], [-9.668, 2.493, -2.255]),
+    ];
+    let mut scheduler = SphericalScheduler::new(config).unwrap();
+    for (label, (position, target)) in [("V1", views[0]), ("V2", views[1]), ("V1 again", views[0])]
+    {
+        let forward = std::array::from_fn(|i| target[i] - position[i]);
+        scheduler.set_view_priority(forward, 0.66);
+        let mut total = std::time::Duration::ZERO;
+        for frame in 0..400 {
+            let start = std::time::Instant::now();
+            scheduler.update(&scene, position, 0);
+            let jobs = scheduler.take_jobs_shared(144);
+            let spent = start.elapsed();
+            total += spent;
+            for job in jobs {
+                scheduler.complete(job);
+            }
+            let stats = scheduler.stats();
+            if frame < 8 || !stats.visible_missing() {
+                eprintln!(
+                    "{label} frame {frame}: {:?} cells {} visible {}/{} queries {} discovery {}",
+                    spent,
+                    stats.cells,
+                    stats.visible_published_cells,
+                    stats.visible_cells,
+                    stats.last_cell_queries,
+                    stats.discovery_pending
+                );
+            }
+            if !stats.visible_missing() {
+                eprintln!(
+                    "{label}: visible valid after {} updates, CPU {:?}, outer radius {}, cells {}, capacity limited {}",
+                    frame + 1,
+                    total,
+                    scheduler.grid().config().z_max,
+                    stats.cells,
+                    stats.capacity_limited
+                );
+                break;
+            }
+        }
+    }
 }

@@ -14,6 +14,15 @@ pub(crate) const SPHERICAL_KEYS: &[&str] = &[
     "zMax",
     "channelMask",
     "debug",
+    "maxProbes",
+    "captureFaces",
+    "captureMs",
+    "burstMs",
+    "probeCache",
+    "skySamples",
+    "lightSamples",
+    "parallaxRange",
+    "autoRange",
     "enabled",
 ];
 
@@ -33,6 +42,15 @@ pub(crate) fn spherical_get(settings: SphericalGiSettings, key: &str) -> Option<
         "clipStart" => ParamValue::Number(f64::from(grid.clip_start)),
         "zMax" => ParamValue::Number(f64::from(grid.z_max)),
         "channelMask" => ParamValue::Int(i64::from(settings.channels)),
+        "maxProbes" => ParamValue::Int(i64::from(settings.scheduler.max_cells)),
+        "captureFaces" => ParamValue::Int(i64::from(settings.budget.near)),
+        "captureMs" => ParamValue::Number(f64::from(settings.capture_ms)),
+        "burstMs" => ParamValue::Number(f64::from(settings.burst_ms)),
+        "probeCache" => ParamValue::Int(i64::from(settings.scheduler.cache_cells)),
+        "skySamples" => ParamValue::Int(i64::from(settings.sky_samples)),
+        "lightSamples" => ParamValue::Int(i64::from(settings.light_samples)),
+        "parallaxRange" => ParamValue::Number(f64::from(settings.parallax_range)),
+        "autoRange" => ParamValue::Bool(settings.scheduler.auto_range),
         "debug" => ParamValue::Enum(
             DEBUG
                 .iter()
@@ -67,6 +85,33 @@ pub(crate) fn spherical_set(
         ("channelMask", ParamValue::Int(value)) if (0..=7).contains(value) => {
             settings.channels = *value as u32;
         }
+        ("maxProbes", ParamValue::Int(value)) if (16..=4096).contains(value) => {
+            settings.scheduler.max_cells = *value as u32;
+        }
+        // Far shells get half of the near face budget, as in the original 24/12 split.
+        ("captureFaces", ParamValue::Int(value)) if (1..=1024).contains(value) => {
+            settings.budget.near = *value as u32;
+            settings.budget.far = (*value as u32).div_ceil(2);
+        }
+        ("captureMs", ParamValue::Number(value)) if (0.0..=50.0).contains(value) => {
+            settings.capture_ms = *value as f32;
+        }
+        ("burstMs", ParamValue::Number(value)) if (0.0..=50.0).contains(value) => {
+            settings.burst_ms = *value as f32;
+        }
+        ("probeCache", ParamValue::Int(value)) if (0..=4096).contains(value) => {
+            settings.scheduler.cache_cells = *value as u32;
+        }
+        ("skySamples", ParamValue::Int(value)) if (0..=64).contains(value) => {
+            settings.sky_samples = *value as u32;
+        }
+        ("lightSamples", ParamValue::Int(value)) if (0..=64).contains(value) => {
+            settings.light_samples = *value as u32;
+        }
+        ("parallaxRange", ParamValue::Number(value)) if (0.0..=10000.0).contains(value) => {
+            settings.parallax_range = *value as f32;
+        }
+        ("autoRange", ParamValue::Bool(value)) => settings.scheduler.auto_range = *value,
         ("debug", ParamValue::Enum(value)) => {
             settings.debug = DEBUG
                 .iter()

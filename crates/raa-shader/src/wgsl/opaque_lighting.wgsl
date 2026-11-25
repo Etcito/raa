@@ -59,7 +59,8 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
         c.spherical_diffuse = vec4<f32>(nrc.rgb, select(0.0, 1.0, nrc.a > 0.0));
     } else if !capture && !unlit && raa_feature_enabled(RAA_SPHERICAL_GI_FEATURE)
         && !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
-        let spherical = raa_spherical_evaluate(c.position, s.normal);
+        // Screen-resolved by gi.spherical (half resolution); see raa_spherical_screen.
+        let spherical = raa_spherical_screen(c.position, c.frag.xy, raa_frame.camera_pos.xyz);
         spherical_debug = spherical.debug;
         c.spherical_diffuse = spherical.diffuse;
     }

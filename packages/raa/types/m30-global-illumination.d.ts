@@ -301,7 +301,10 @@ export interface SphericalGiSettings {
   sphereSubdivision: number;
   /** Finite number from 0 to 2. Shell widths grow by a factor of 2 ** exponentialPower. */
   exponentialPower: number;
-  /** Inner radial boundary in world units. Must be nonnegative and smaller than zMax. */
+  /**
+   * Inner radial boundary in world units. Must be nonnegative and smaller than zMax.
+   * It is also the radius of the centre probe's sphere around the grid anchor.
+   */
   clipStart: number;
   /**
    * Finite outer radial boundary in world units, strictly greater than clipStart.
@@ -312,6 +315,44 @@ export interface SphericalGiSettings {
   debug: SphericalGiDebug;
   /** Bit mask for sky (1), sun (2), and other lights (4). Defaults to 7. */
   channelMask: number;
+  /** Integer from 16 to 4096: resident free-space probes, the centre probe included. Defaults to 1024. */
+  maxProbes: number;
+  /**
+   * Integer from 1 to 1024: fixed budget of near-shell cube faces captured per frame; far
+   * shells get half. Used when captureMs is 0 or the device has no timestamp queries, and as
+   * the first burst batch before a GPU timing exists. Defaults to 24.
+   */
+  captureFaces: number;
+  /**
+   * Steady-state capture target in GPU milliseconds per frame, from 0 to 50. Non-zero switches
+   * to the GPU-time budget: faces are issued from one pool, most visible first. Defaults to 0.
+   */
+  captureMs: number;
+  /** Capture target while visible probes are missing (after open or a camera move), 0 to 50. Defaults to 0 (= captureMs). */
+  burstMs: number;
+  /**
+   * Integer from 0 to 4096: extra pool slots that keep published probes which left the grid,
+   * lost a rekey collision or were evicted; a recenter adopts them back without recapture.
+   * Cleared by any light, material or geometry change. Defaults to 0.
+   */
+  probeCache: number;
+  /** Integer from 0 to 64: cosine bounce rays toward the sky per captured hit. Defaults to 1. */
+  skySamples: number;
+  /** Integer from 0 to 64: local lights sampled per captured hit (stratified); 0 = every light. Defaults to 0. */
+  lightSamples: number;
+  /**
+   * Metres from the grid anchor beyond which receivers read each probe's six-face irradiance
+   * (no parallax) instead of its 24 parallax patches, blended over the next half of that
+   * distance; 0 always evaluates the patches. Defaults to 0.
+   */
+  parallaxRange: number;
+  /**
+   * Derive zMax from the scene: the farthest corner of the geometry bounds from the grid
+   * anchor, quantised to quarter octaves, grown at once and shrunk only below 1/sqrt(2) of the
+   * current radius; shells are re-derived from [clipStart, outer radius] and probes rekeyed.
+   * zMax is then only the initial radius; false keeps zMax as a manual radius. Defaults to false.
+   */
+  autoRange: boolean;
 }
 
 export interface SphericalGiStats {
@@ -338,6 +379,22 @@ export interface SphericalGiStats {
   /** Total faces recorded since the active grid was allocated. */
   capturedFaces: number;
   captureFrames: number;
+  /** Resident probes in the view cone (with the centre probe), and how many are published. */
+  visibleCells: number;
+  visiblePublishedCells: number;
+  /** Discovery still has candidate cells to examine. */
+  discoveryPending: boolean;
+  /** maxProbes is reached while farther cells remain: the outer shells use the ambient fallback. */
+  capacityLimited: boolean;
+  /** Capture ran the burst target this frame (visible probes missing or undiscovered). */
+  burst: boolean;
+  /** Faces issued by the latest frame, and the latest measured capture GPU time (0 before a sample). */
+  faceBudget: number;
+  captureGpuMs: number;
+  /** Probes held in the probe cache, cumulative cached probes adopted back, and bytes per pool slot. */
+  cachedCells: number;
+  adoptedCells: number;
+  slotBytes: number;
   /** Revision of the global lighting inputs, encoded as hexadecimal. */
   lightRevision: string;
   /** World-space grid anchor retained across sub-threshold camera movement. */
