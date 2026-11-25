@@ -43,6 +43,11 @@ pub struct SphericalSchedulerConfig {
     /// or were evicted (least recently cached first out). A recenter offers them to the
     /// moved cells again, so walking back reuses them without a recapture.
     pub cache_cells: u32,
+    /// Derive the outer radius (zMax) from the scene: the farthest corner of the
+    /// geometry bounds from the grid anchor, quantised to quarter octaves. It grows as
+    /// soon as the scene would be cut and shrinks only below 1/sqrt(2) of the current
+    /// radius, so walking does not pump the shells. `grid.z_max` is the initial value.
+    pub auto_range: bool,
 }
 
 impl SphericalSchedulerConfig {
@@ -62,6 +67,7 @@ impl Default for SphericalSchedulerConfig {
             origin_tolerance: 0.25,
             center_probe: true,
             cache_cells: 0,
+            auto_range: false,
         }
     }
 }
@@ -142,6 +148,9 @@ pub struct SchedulerStats {
     pub cached_cells: u32,
     /// Cumulative cached probes adopted back into the grid by a recenter.
     pub adopted_cells: u64,
+    /// Residency is full while discovery still has farther candidates: the outer
+    /// shells are cut by maxProbes and fall back to the ambient there.
+    pub capacity_limited: bool,
 }
 
 impl SchedulerStats {
@@ -435,9 +444,30 @@ impl SphericalScheduler {
         );
         let recenter = self.revisions.is_none()
             || dot(displacement, displacement) > f64::from(self.config.origin_tolerance).powi(2);
-        let mut changed = recenter;
-        if recenter {
-            self.grid.origin = snap_origin(camera_origin, self.config.origin_tolerance);
+        let origin = if recenter {
+            snap_origin(camera_origin, self.config.origin_tolerance)
+        } else {
+            self.grid.origin
+        };
+        let regrid = self
+            .auto_outer_radius(geometry, origin)
+            .is_some_and(|z_max| {
+                let config = SphericalGridConfig {
+                    z_max,
+                    ..self.grid.config()
+                };
+                match SphericalGrid::new(config) {
+                    Ok(grid) => {
+                        self.grid = grid;
+                        true
+                    }
+                    Err(_) => false,
+                }
+            });
+        let mut changed = recenter || regrid;
+        if recenter || regrid {
+            // Probes are world space: a new anchor or new shell radii only rekeys them.
+            self.grid.origin = origin;
             self.origin_epoch += 1;
             self.rekey();
         }
@@ -930,6 +960,7 @@ impl SphericalScheduler {
             ..SchedulerStats::default()
         };
         stats.cached_cells = self.cache.len() as u32;
+        stats.capacity_limited = self.resident_full() && !self.discovery.is_empty();
         stats.adopted_cells = self.adopted_cells;
         // A discovery range blocked by the capacity cutoff has nothing left to admit.
         stats.discovery_pending = (!self.discovery.is_empty()
@@ -1076,6 +1107,35 @@ impl SphericalScheduler {
         }
         let cell = self.grid.cell(key);
         (cell.min, cell.max)
+    }
+
+    /// New outer radius when the automatic range must change, see `auto_range`.
+    fn auto_outer_radius(&self, geometry: &Geometry, origin: [f32; 3]) -> Option<f32> {
+        if !self.config.auto_range || geometry.count() == 0 {
+            return None;
+        }
+        let bounds = geometry.world_bounds()?;
+        let mut far = 0.0f64;
+        for corner in 0..8 {
+            let point = [0, 1, 2].map(|axis| {
+                let v = if corner & (1 << axis) != 0 {
+                    bounds.max[axis]
+                } else {
+                    bounds.min[axis]
+                };
+                f64::from(v) - f64::from(origin[axis])
+            });
+            far = far.max(dot(point, point).sqrt());
+        }
+        let config = self.grid.config();
+        let floor = 2.0 * f64::from(config.clip_start) + 0.5;
+        let target = far.max(floor);
+        if !target.is_finite() {
+            return None;
+        }
+        let quantised = ((target.log2() * 4.0).ceil() / 4.0).exp2() as f32;
+        let current = f64::from(config.z_max);
+        (target > current || target * std::f64::consts::SQRT_2 < current).then_some(quantised)
     }
 
     fn priority_rank(&self, key: CellKey) -> u32 {

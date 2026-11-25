@@ -120,6 +120,11 @@ not a graph is set.
   `setSphericalGi`. A non-zero `captureMs` budgets capture in GPU time (timestamps around the
   capture passes): `burstMs` while visible probes are missing or undiscovered, `captureMs` for
   later refreshes, and `captureFaces` only before the first timing or without timestamp queries.
+  Capture time is latency bound (a fixed cost per dispatch), so the steady target accumulates
+  as credit and pays for one larger batch every few frames. `autoRange` derives the outer radius
+  from the scene bounds (quarter-octave steps, grow at once, shrink below 1/sqrt(2)); `zMax` is then
+  only the initial radius. `probeCache` keeps that many extra published probes for reuse after a
+  recenter; `skySamples` and `lightSamples` set the sky rays and the stratified local lights per hit.
   Node presence enables capture. Set `zMax` above `clipStart`. The `spherical_gi` frozen graph
   uses the same pass and handles.
 - Probes float in free space: each occupied cell captures from its centre pushed away from

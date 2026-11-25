@@ -137,6 +137,11 @@ impl SphericalGrid {
         self.origin
     }
 
+    /// The effective configuration (its z_max follows the automatic range).
+    pub fn config(&self) -> SphericalGridConfig {
+        self.config
+    }
+
     pub fn angular_resolution(&self) -> u16 {
         self.config.angular_resolution
     }

@@ -391,6 +391,10 @@ pub fn plan() -> crate::plan::GraphPlan {
                         "lightSamples".to_string(),
                         crate::catalog::ParamValue::Int(0),
                     ),
+                    (
+                        "autoRange".to_string(),
+                        crate::catalog::ParamValue::Bool(true),
+                    ),
                 ],
                 inputs: vec![],
                 compute: None,

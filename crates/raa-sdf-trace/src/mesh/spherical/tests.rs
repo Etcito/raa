@@ -754,6 +754,42 @@ fn a_light_change_clears_the_probe_cache() {
     assert_eq!(scheduler.stats().cached_cells, 0);
 }
 
+#[test]
+fn auto_range_covers_the_scene_bounds_with_hysteresis() {
+    let mut scene = MeshTraceScene::default();
+    // Geometry from x = -1.5 to x = 30: the fixed 8 m grid would cut it.
+    update_geometry(
+        &mut scene,
+        &[triangle(1, &facing_x(-1.5)), triangle(2, &facing_x(30.0))],
+    );
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        auto_range: true,
+        ..config()
+    })
+    .unwrap();
+    scheduler.update(&scene, [0.0; 3], 0);
+    let outer = scheduler.grid().config().z_max;
+    assert!(
+        outer >= 30.0 && outer < 30.0 * 2f32.powf(0.25) * 1.01,
+        "{outer}"
+    );
+    let shell = scheduler.grid().radial_shell(0).unwrap();
+    assert_eq!(shell.inner, 1.0);
+    // Both walls get a probe: the far one is inside the last shell.
+    for _ in 0..8 {
+        scheduler.update(&scene, [0.0; 3], 0);
+    }
+    assert!(scheduler.cells().any(|cell| cell.probe[0] > 20.0));
+    // Walking 2 m toward the far wall keeps the radius (no pumping).
+    let epoch = scheduler.stats().origin_epoch;
+    scheduler.update(&scene, [2.0, 0.0, 0.0], 0);
+    assert_eq!(scheduler.grid().config().z_max, outer);
+    assert_eq!(scheduler.stats().origin_epoch, epoch + 1);
+    // Walking away grows it at once.
+    scheduler.update(&scene, [-6.0, 0.0, 0.0], 0);
+    assert!(scheduler.grid().config().z_max >= 36.0);
+}
+
 fn center_config() -> SphericalSchedulerConfig {
     SphericalSchedulerConfig {
         center_probe: true,
@@ -1104,8 +1140,9 @@ fn bench_scheduler_update_on_triangle_file() {
             z_max: 12.0,
             ..SphericalGridConfig::default()
         },
-        max_cells: 2048,
+        max_cells: std::env::var("SPHERICAL_BENCH_PROBES").map_or(2048, |v| v.parse().unwrap()),
         cache_cells: 1024,
+        auto_range: true,
         ..SphericalSchedulerConfig::default()
     };
     let views = [
@@ -1141,9 +1178,12 @@ fn bench_scheduler_update_on_triangle_file() {
             }
             if !stats.visible_missing() {
                 eprintln!(
-                    "{label}: visible valid after {} updates, CPU {:?}",
+                    "{label}: visible valid after {} updates, CPU {:?}, outer radius {}, cells {}, capacity limited {}",
                     frame + 1,
-                    total
+                    total,
+                    scheduler.grid().config().z_max,
+                    stats.cells,
+                    stats.capacity_limited
                 );
                 break;
             }

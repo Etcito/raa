@@ -741,7 +741,7 @@ impl SphericalGpu {
         let rows = &mut self.lookup_rows;
         rows.fill([0; 4]);
         let grid = scheduler.grid();
-        let config = settings.scheduler.grid;
+        let config = grid.config();
         let mask = self.table_entries - 1;
         let [x, y, z] = grid.origin();
         rows[0] = [x, y, z, settings.intensity].map(f32::to_bits);
@@ -1089,22 +1089,95 @@ impl SphericalGpu {
     }
 }
 
-/// GPU-time face budget. Two timestamps bracket one frame's capture work; the
-/// measured cost per face (an average, so it falls as batches fill the GPU) sizes
-/// the next batches for the target time. Growth is bounded per sample so a stale
-/// estimate cannot issue a frame-long spike.
+/// GPU-time face budget. Two timestamps bracket one frame's capture work (capture,
+/// project, bins); the samples fit an affine cost `a + b * faces` and a credit of
+/// target milliseconds per frame pays for whole batches (see [`CostModel`]).
 struct CaptureClock {
     queries: wgpu::QuerySet,
     resolve: Buffer,
     readback: Buffer,
     ms_per_tick: f64,
     pending: Option<(u32, Receiver<Option<f64>>)>,
-    ms_per_face: Option<f64>,
+    model: CostModel,
     last_ms: f64,
-    last_faces: u32,
 }
 
 const MIN_CLOCK_FACES: u32 = 6;
+
+/// Capture time is latency bound: one face of 64 rays through a large BVH with a
+/// shadow ray per light costs about as much as a hundred faces, so the fixed term
+/// `a` can exceed a small per-frame target. The credit then accumulates over a few
+/// frames and pays for one large batch, keeping the average at the target instead
+/// of trickling a handful of faces per frame.
+#[derive(Clone, Copy, Debug, Default)]
+struct CostModel {
+    s1: f64,
+    sn: f64,
+    sm: f64,
+    snn: f64,
+    snm: f64,
+    max_faces: u32,
+    credit: f64,
+}
+
+impl CostModel {
+    const DECAY: f64 = 0.8;
+
+    fn observe(&mut self, faces: u32, ms: f64) {
+        let n = f64::from(faces);
+        for sum in [
+            &mut self.s1,
+            &mut self.sn,
+            &mut self.sm,
+            &mut self.snn,
+            &mut self.snm,
+        ] {
+            *sum *= Self::DECAY;
+        }
+        self.s1 += 1.0;
+        self.sn += n;
+        self.sm += ms;
+        self.snn += n * n;
+        self.snm += n * ms;
+        self.max_faces = self.max_faces.max(faces);
+    }
+
+    /// Fixed and per-face milliseconds; without spread in batch sizes, all per face.
+    fn cost(&self) -> Option<(f64, f64)> {
+        if self.s1 <= 0.0 || self.sn <= 0.0 {
+            return None;
+        }
+        let spread = self.s1 * self.snn - self.sn * self.sn;
+        let (a, b) = if spread > 1e-3 * self.s1 * self.snn {
+            let b = (self.s1 * self.snm - self.sn * self.sm) / spread;
+            (((self.sm - b * self.sn) / self.s1), b)
+        } else {
+            (0.0, self.sm / self.sn)
+        };
+        let b = b.max(1e-5);
+        Some((a.clamp(0.0, self.sm / self.s1), b))
+    }
+
+    /// Faces to issue this frame: whatever the accumulated credit pays for, at most
+    /// four times the largest measured batch, none while the credit is short.
+    fn faces(&mut self, target_ms: f64, fixed: u32, pending: u32) -> u32 {
+        let Some((a, b)) = self.cost() else {
+            return fixed.min(pending);
+        };
+        self.credit = (self.credit + target_ms).min(4.0 * target_ms);
+        if pending == 0 {
+            return 0;
+        }
+        let affordable = ((self.credit - a) / b).floor().max(0.0) as u32;
+        let cap = 4 * self.max_faces.max(fixed).max(MIN_CLOCK_FACES);
+        let faces = affordable.min(cap).min(MAX_FACES_PER_BUDGET).min(pending);
+        if faces < MIN_CLOCK_FACES.min(pending) {
+            return 0;
+        }
+        self.credit -= a + b * f64::from(faces);
+        faces
+    }
+}
 
 impl CaptureClock {
     fn new(gpu: &GpuContext) -> Self {
@@ -1130,27 +1203,13 @@ impl CaptureClock {
             ),
             ms_per_tick: f64::from(gpu.queue().get_timestamp_period()) / 1e6,
             pending: None,
-            ms_per_face: None,
+            model: CostModel::default(),
             last_ms: 0.0,
-            last_faces: 0,
         }
     }
 
-    /// Faces for this frame: target / measured cost, at most twice the last batch
-    /// (or the fixed budget before the first sample), and never more than pending.
     fn faces(&mut self, target_ms: f32, fixed: u32, pending: u32) -> u32 {
-        let faces = match self.ms_per_face {
-            Some(cost) => {
-                let wanted = (f64::from(target_ms) / cost.max(1e-4)).floor() as u32;
-                wanted.min(2 * self.last_faces.max(fixed / 2).max(MIN_CLOCK_FACES))
-            }
-            None => fixed,
-        };
-        let faces = faces.clamp(MIN_CLOCK_FACES, MAX_FACES_PER_BUDGET);
-        if pending > 0 {
-            self.last_faces = faces.min(pending.max(MIN_CLOCK_FACES));
-        }
-        faces
+        self.model.faces(f64::from(target_ms), fixed, pending)
     }
 
     fn poll(&mut self) {
@@ -1166,8 +1225,7 @@ impl CaptureClock {
         self.pending = None;
         if let Some(ms) = ms.filter(|ms| ms.is_finite() && *ms > 0.0) {
             self.last_ms = ms;
-            let cost = ms / f64::from(faces.max(1));
-            self.ms_per_face = Some(self.ms_per_face.map_or(cost, |old| 0.5 * (old + cost)));
+            self.model.observe(faces, ms);
         }
     }
 
@@ -1376,6 +1434,36 @@ mod tests {
             Some(([-3.0, -0.5, 10.0], [2.0, 0.0, 80.0]))
         );
         assert_eq!(ids, [532, 533, SKY_LIGHT_ID, SUN_LIGHT_ID]);
+    }
+
+    #[test]
+    fn latency_bound_capture_pays_large_batches_from_accumulated_credit() {
+        let mut model = CostModel::default();
+        // Before any sample the fixed budget applies.
+        assert_eq!(model.faces(0.75, 144, 1000), 144);
+        // Measured: 1.7 ms fixed latency plus 2 us per face.
+        for faces in [30, 62, 120, 240] {
+            model.observe(faces, 1.7 + 0.002 * f64::from(faces));
+        }
+        let (a, b) = model.cost().unwrap();
+        assert!((a - 1.7).abs() < 1e-6 && (b - 0.002).abs() < 1e-6);
+        // A 4 ms burst pays (4 - 1.7) / 0.002 faces, capped at four times 240.
+        assert_eq!(model.faces(4.0, 144, 100_000), 960);
+        // A 0.75 ms steady target waits for three frames of credit, then one batch.
+        let mut steady = CostModel {
+            credit: 0.0,
+            ..model
+        };
+        let batches: Vec<_> = (0..6).map(|_| steady.faces(0.75, 144, 100_000)).collect();
+        assert_eq!(&batches[..2], &[0, 0]);
+        assert!(batches[2] > 200);
+        assert_eq!(steady.faces(0.75, 144, 0), 0);
+        let total_ms: f64 = batches
+            .iter()
+            .filter(|&&n| n > 0)
+            .map(|&n| a + b * f64::from(n))
+            .sum();
+        assert!(total_ms <= 6.0 * 0.75 + 1e-9);
     }
 
     #[test]

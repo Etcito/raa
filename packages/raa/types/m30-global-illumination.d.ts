@@ -340,6 +340,13 @@ export interface SphericalGiSettings {
   skySamples: number;
   /** Integer from 0 to 64: local lights sampled per captured hit (stratified); 0 = every light. Defaults to 0. */
   lightSamples: number;
+  /**
+   * Derive zMax from the scene: the farthest corner of the geometry bounds from the grid
+   * anchor, quantised to quarter octaves, grown at once and shrunk only below 1/sqrt(2) of the
+   * current radius; shells are re-derived from [clipStart, outer radius] and probes rekeyed.
+   * zMax is then only the initial radius; false keeps zMax as a manual radius. Defaults to false.
+   */
+  autoRange: boolean;
 }
 
 export interface SphericalGiStats {
@@ -371,6 +378,8 @@ export interface SphericalGiStats {
   visiblePublishedCells: number;
   /** Discovery still has candidate cells to examine. */
   discoveryPending: boolean;
+  /** maxProbes is reached while farther cells remain: the outer shells use the ambient fallback. */
+  capacityLimited: boolean;
   /** Capture ran the burst target this frame (visible probes missing or undiscovered). */
   burst: boolean;
   /** Faces issued by the latest frame, and the latest measured capture GPU time (0 before a sample). */

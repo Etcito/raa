@@ -136,6 +136,14 @@ impl NodeFamily for RuntimeLighting {
                 &[][..],
                 Rebuild::None,
             ),
+            (
+                "autoRange",
+                "Outer radius from scene bounds",
+                ParamKind::Bool,
+                None,
+                &[][..],
+                Rebuild::None,
+            ),
         ];
         vec![NodeTypeSpec {
             id: SPHERICAL_TYPE,

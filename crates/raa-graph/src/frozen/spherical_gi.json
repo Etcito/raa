@@ -58,7 +58,8 @@
         "maxProbes": 2048,
         "captureFaces": 96,
         "captureMs": 0.75,
-        "burstMs": 4
+        "burstMs": 4,
+        "autoRange": true
       }
     },
     {

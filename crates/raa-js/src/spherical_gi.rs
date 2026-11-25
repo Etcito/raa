@@ -24,7 +24,7 @@ pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError
     Ok(())
 }
 
-const OPTIONS: [&str; 14] = [
+const OPTIONS: [&str; 15] = [
     "enabled",
     "sphereSubdivision",
     "exponentialPower",
@@ -39,6 +39,7 @@ const OPTIONS: [&str; 14] = [
     "probeCache",
     "skySamples",
     "lightSamples",
+    "autoRange",
 ];
 
 fn invalid(key: &str, reason: &str) -> RaaError {
@@ -130,6 +131,11 @@ fn read_patch(
                     settings.burst_ms = ms as f32;
                 }
             }
+            "autoRange" => {
+                settings.scheduler.auto_range = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(&name, "expected a boolean"))?;
+            }
             "probeCache" | "skySamples" | "lightSamples" => {
                 let count = number()?;
                 let max = if name == "probeCache" { 4096.0 } else { 64.0 };
@@ -219,6 +225,7 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
     put(&result, "probeCache", settings.scheduler.cache_cells.into());
     put(&result, "skySamples", settings.sky_samples.into());
     put(&result, "lightSamples", settings.light_samples.into());
+    put(&result, "autoRange", settings.scheduler.auto_range.into());
     result.into()
 }
 
@@ -324,6 +331,11 @@ impl Engine {
                 &result,
                 "discoveryPending",
                 scheduler.discovery_pending.into(),
+            );
+            put(
+                &result,
+                "capacityLimited",
+                scheduler.capacity_limited.into(),
             );
             let shell = Object::new();
             put(&shell, "inner", stats.last_shell.inner.into());
