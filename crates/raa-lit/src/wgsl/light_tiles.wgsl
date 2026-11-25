@@ -137,10 +137,10 @@ fn light_tiles(@builtin(workgroup_id) group: vec3<u32>,
         }
     }
     workgroupBarrier();
-    // Exact 256-wide bitonic network: 8 merge widths, 36 compare/exchange stages.
-    // Each lower lane owns both entries of its disjoint pair. All lanes rendezvous
-    // before the next stride reads either entry; no light-dependent loop bound.
-    for (var width = 2u; width <= MAX_LOCAL_LIGHTS; width *= 2u) {
+    // Sort the power-of-two prefix containing every submitted light. The count
+    // comes from the frame uniform, so all lanes execute the same barriers.
+    let light_count = min(raa_frame.light_info.x, MAX_LOCAL_LIGHTS);
+    for (var width = 2u; width / 2u < light_count; width *= 2u) {
         for (var stride = width / 2u; stride > 0u; stride /= 2u) {
             let partner = lane ^ stride;
             if partner > lane {

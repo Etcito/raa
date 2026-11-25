@@ -142,7 +142,7 @@ by `area_light_emits` (0 or 1). Directionals use luminance alone. No surface-nor
 visibility or shadow term enters ranking. Clamp scores to `[0,f32::MAX]`, saturating
 positive overflow and mapping undefined arithmetic to zero; every score is finite.
 
-Retain qualified zero-score candidates too. A fixed 256-wide bitonic sorting network
+Retain qualified zero-score candidates too. A bitonic sorting network sized to the next power of two of the submitted light count
 orders eligible entries first, descending numeric score then ascending stable handle;
 signed zeros tie. Padding has separate eligibility, never a sentinel score/handle.
 GPU indices already follow handle order in `LocalLights::write_gpu`, including after

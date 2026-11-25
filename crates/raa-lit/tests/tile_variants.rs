@@ -84,13 +84,14 @@ fn fixed_capacity_arrays_and_workgroup_fit_core_limits() {
 }
 
 #[test]
-fn fixed_network_ranks_all_candidates_before_emitting() {
+fn bounded_network_ranks_all_candidates_before_emitting() {
     // Structural shader checks only; numeric ranking expectations stay in the
     // tile_selection module's text fixtures, never in a CPU/GPU comparison.
-    let network = LIGHT_TILES_WGSL.split("// Exact 256-wide").nth(1).unwrap();
+    let network = LIGHT_TILES_WGSL.split("// Sort the power-of-two prefix").nth(1).unwrap();
     let (sort, emit) = network.split_once("let qualified =").unwrap();
     for required in [
-        "width = 2u; width <= MAX_LOCAL_LIGHTS; width *= 2u",
+        "let light_count = min(raa_frame.light_info.x, MAX_LOCAL_LIGHTS)",
+        "width = 2u; width / 2u < light_count; width *= 2u",
         "stride = width / 2u; stride > 0u; stride /= 2u",
         "let partner = lane ^ stride",
         "if partner > lane",
