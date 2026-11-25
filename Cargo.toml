@@ -2,6 +2,8 @@
 resolver = "2"
 # Final members list: tests/* is enabled now that tests/raa-ext-test exists.
 members = ["crates/*", "demos/*", "tests/*"]
+# vendor/wgpu is the patched wgpu 30.0.1 of [patch.crates-io] below, not a workspace member.
+exclude = ["vendor/wgpu"]
 
 [workspace.package]
 version = "0.5.0"
@@ -29,6 +31,13 @@ raa-alloc-count = { path = "crates/raa-alloc-count" }
 raa-prims = { path = "crates/raa-prims" }
 raa-loader = { path = "crates/raa-loader" }
 raa-csg = { path = "crates/raa-csg" }
+
+# wgpu 30.0.1 (crates.io source, unchanged except src/backend/webgpu.rs): the WebGPU backend
+# destroys device-created textures and buffers when their last handle is dropped; upstream
+# leaves them to the JS garbage collector, which keeps gigabytes of replaced render targets
+# alive. Diff against the crates.io release: `git log -p vendor/wgpu`.
+[patch.crates-io]
+wgpu = { path = "vendor/wgpu" }
 
 [profile.wasm-release]
 inherits = "release"
