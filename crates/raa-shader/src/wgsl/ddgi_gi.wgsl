@@ -271,9 +271,14 @@ fn raa_ddgi_corners(v: RaaDdgiVolume, p: vec3<f32>, n: vec3<f32>, view_dir: vec3
     return out;
 }
 
-// Weight of one cascade's estimate: its band times its probe coverage.
-fn raa_ddgi_confidence(c: RaaDdgiCorners) -> f32 {
+// Weight of one cascade's estimate. Default far mode: its band alone, as soon as one probe is
+// usable (the estimate is renormalized over the usable probes). Weighting by the probe coverage
+// handed about half the weight of every floor and wall foot (the probes below the floor are
+// inside geometry: coverage ~0.5) to the coarser, leakier cascade: a light halo at pillar feet
+// that came and went with the coarse probes' state (Sponza V4). Legacy: band x coverage.
+fn raa_ddgi_confidence(c: RaaDdgiCorners, clamp_far: bool) -> f32 {
     if c.total <= 0.0 { return 0.0; }
+    if clamp_far { return c.band; }
     return c.band * saturate(4.0 * c.coverage);
 }
 
@@ -296,7 +301,7 @@ fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32>
     for (var k = 0u; k < cascades; k++) {
         let v = raa_ddgi_volume_at(k);
         let c = raa_ddgi_corners(v, p, n, view_dir, k + 1u == cascades, clamp_far);
-        let confidence = raa_ddgi_confidence(c);
+        let confidence = raa_ddgi_confidence(c, clamp_far);
         if confidence <= 0.0 { continue; }
         var sum = vec3<f32>(0.0);
         for (var i = 0u; i < 8u; i++) {
