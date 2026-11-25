@@ -416,9 +416,15 @@ impl MeshTraceScene {
         self.release_gpu_geometry_if_idle();
     }
 
-    /// Whether a legacy or graph trace needs scene geometry this frame.
+    /// Whether a legacy or graph trace is configured for this scene.
     pub fn active(&self) -> bool {
-        self.settings.active() || !self.graph_reports.is_empty()
+        self.needs_trace_geometry(true)
+    }
+
+    /// Graph passes own their installation. The legacy pass can be disabled
+    /// by an active graph while its standalone settings remain configured.
+    pub fn needs_trace_geometry(&self, legacy_pass_enabled: bool) -> bool {
+        (legacy_pass_enabled && self.settings.active()) || !self.graph_reports.is_empty()
     }
 
     fn release_gpu_geometry_if_idle(&mut self) {
@@ -526,5 +532,30 @@ impl TraceReport {
             Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => self.pending = None,
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod trace_routing_tests {
+    use super::*;
+
+    #[test]
+    fn retained_legacy_settings_do_not_prepare_disabled_mesh_tracing() {
+        let mut scene = MeshTraceScene::default();
+        scene.configure(MeshTraceSettings {
+            reflections: true,
+            ..Default::default()
+        });
+        assert!(scene.active());
+        assert!(scene.needs_trace_geometry(true));
+        assert!(!scene.needs_trace_geometry(false));
+
+        scene
+            .graph_reports
+            .insert("trace.mesh#reflections".into(), Default::default());
+        assert!(scene.needs_trace_geometry(false));
+        scene.graph_reports.clear();
+        assert!(!scene.needs_trace_geometry(false));
+        assert!(scene.needs_trace_geometry(true));
     }
 }

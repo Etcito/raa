@@ -49,8 +49,9 @@ pub(crate) fn prepare(st: &EngineState, view: usize) -> Result<(), RaaError> {
     let Some(handle) = st.features.get::<MeshTraceHandle>() else {
         return Ok(());
     };
+    let legacy_enabled = st.pipeline.borrow().entry_enabled(MESH_TRACE_NAME) == Some(true);
     let scene = handle.borrow();
-    let active = scene.active();
+    let active = scene.needs_trace_geometry(legacy_enabled);
     let settings = scene.settings;
     drop(scene);
     let mut spherical = false;
@@ -89,7 +90,7 @@ pub(crate) fn prepare(st: &EngineState, view: usize) -> Result<(), RaaError> {
         return Ok(());
     }
     let lit = st.lit.handle();
-    if settings.active() && !settings.reference {
+    if legacy_enabled && settings.active() && !settings.reference {
         let mut jitter = Mat4::IDENTITY;
         let [x, y] = lit.camera_jitter_ndc();
         jitter.cols[3] = [x, y, 0.0, 1.0];
