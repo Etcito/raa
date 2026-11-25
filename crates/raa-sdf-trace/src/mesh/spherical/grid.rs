@@ -142,6 +142,20 @@ impl SphericalGrid {
         self.config
     }
 
+    /// The smallest cell edge of the grid in metres: the inner shell's radial width or
+    /// its angular width at clipStart, whichever is smaller. Recentred origins snap to
+    /// a world lattice of this step, so the grid moves by whole small cells only.
+    pub fn smallest_cell(&self) -> f32 {
+        let radial = self.edges[1] - self.edges[0];
+        let angular =
+            (2.0 * f64::from(self.config.clip_start) / f64::from(self.angular_resolution())) as f32;
+        if angular > 0.0 {
+            radial.min(angular)
+        } else {
+            radial
+        }
+    }
+
     pub fn angular_resolution(&self) -> u16 {
         self.config.angular_resolution
     }

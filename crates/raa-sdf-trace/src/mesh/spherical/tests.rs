@@ -19,6 +19,7 @@ fn config() -> SphericalSchedulerConfig {
         near_shells: 1,
         max_cells: 128,
         center_probe: false,
+        origin_tolerance: 0.25,
         ..SphericalSchedulerConfig::default()
     }
 }
@@ -874,6 +875,32 @@ fn snapped_origin_lies_on_the_tolerance_lattice() {
 }
 
 #[test]
+fn recentred_origin_snaps_to_the_smallest_cell_world_lattice() {
+    let scene = MeshTraceScene::default();
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        origin_tolerance: 0.0,
+        ..config()
+    })
+    .unwrap();
+    let step = scheduler.grid().smallest_cell();
+    let shell = scheduler.grid().radial_shell(0).unwrap();
+    let angular = 2.0 * config().grid.clip_start / f32::from(config().grid.angular_resolution);
+    assert_eq!(step, (shell.outer - shell.inner).min(angular));
+    for camera in [[0.37, -1.21, 2.05], [5.5, 0.01, -3.33], [-7.9, 2.2, 0.6]] {
+        scheduler.update(&scene, camera, 0);
+        let origin = scheduler.grid().origin();
+        for axis in 0..3 {
+            let cells = f64::from(origin[axis]) / f64::from(step);
+            assert!(
+                (cells - cells.round()).abs() < 1e-4,
+                "{origin:?} off the {step} lattice"
+            );
+            assert!((origin[axis] - camera[axis]).abs() <= step * 0.5 + 1e-5);
+        }
+    }
+}
+
+#[test]
 fn view_capture_rank_puts_the_view_cone_first_and_is_a_permutation() {
     for (forward, cos) in [
         ([1.0, 0.0, 0.0], 0.99),
@@ -893,7 +920,11 @@ fn view_capture_rank_puts_the_view_cone_first_and_is_a_permutation() {
         ranks.sort_unstable_by_key(|rank| rank.2);
         assert!(ranks.windows(2).all(|pair| pair[0].2 + 1 == pair[1].2));
         // Angular rank orders the whole view cone first.
-        assert!(ranks.windows(2).all(|pair| pair[0].0 == 0 || pair[1].0 != 0));
+        assert!(
+            ranks
+                .windows(2)
+                .all(|pair| pair[0].0 == 0 || pair[1].0 != 0)
+        );
         assert!(classes.contains(&0));
     }
 }

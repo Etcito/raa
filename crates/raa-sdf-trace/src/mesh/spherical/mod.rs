@@ -32,10 +32,12 @@ pub struct SphericalSchedulerConfig {
     pub near_shells: u16,
     /// Maximum candidate cells examined per update, including broad-phase rejects.
     pub cell_queries_per_update: u32,
-    /// Maximum camera translation from the current world-space grid anchor, in metres.
-    /// The default is 0.25 metres. A recenter snaps the anchor to a lattice of this
-    /// step and rekeys the world-space probes into the moved cells: captured faces
-    /// survive, only probes that leave the grid or collide in one cell are dropped.
+    /// Maximum camera translation from the current world-space grid anchor, in metres,
+    /// and the step of the world lattice a recenter snaps the anchor to. 0 (the
+    /// default) uses the grid's smallest cell (`SphericalGrid::smallest_cell`), so
+    /// the grid only ever moves by whole small cells. A recenter rekeys the
+    /// world-space probes into the moved cells: captured faces survive, only probes
+    /// that leave the grid or collide in one cell are dropped.
     pub origin_tolerance: f32,
     /// Keep a free-space probe at the grid anchor for the inner sphere below clipStart.
     pub center_probe: bool,
@@ -64,7 +66,7 @@ impl Default for SphericalSchedulerConfig {
             max_cells: 1024,
             near_shells: 4,
             cell_queries_per_update: 768,
-            origin_tolerance: 0.25,
+            origin_tolerance: 0.0,
             center_probe: true,
             cache_cells: 0,
             auto_range: false,
@@ -436,10 +438,18 @@ impl SphericalScheduler {
             camera_origin.map(f64::from),
             self.grid.origin.map(f64::from),
         );
+        // The snapped origin lies within sqrt(3)/2 steps of the camera, inside the
+        // tolerance, so a recenter cannot retrigger on the next update.
+        let step = if self.config.origin_tolerance > 0.0 {
+            self.config.origin_tolerance
+        } else {
+            self.grid.smallest_cell()
+        };
+        let tolerance = step;
         let recenter = self.revisions.is_none()
-            || dot(displacement, displacement) > f64::from(self.config.origin_tolerance).powi(2);
+            || dot(displacement, displacement) > f64::from(tolerance).powi(2);
         let origin = if recenter {
-            snap_origin(camera_origin, self.config.origin_tolerance)
+            snap_origin(camera_origin, step)
         } else {
             self.grid.origin
         };
