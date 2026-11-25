@@ -141,6 +141,8 @@ export interface VirtualGeometryStats {
 export interface Engine {
   /** Merges a settings patch atomically; see {@link VirtualGeometrySettings}. */
   setVirtualGeometry(settings: VirtualGeometrySettings): void;
+  /** Whether runtime-baked clusters preserve authored tangents for normal-mapped meshes. */
+  supportsVirtualGeometryTangents(): boolean;
   /** The effective settings, a fresh {@link ResolvedVirtualGeometry}. */
   virtualGeometry(): ResolvedVirtualGeometry;
   /**

@@ -26,7 +26,6 @@ struct RaaVgSurface {
     slot: u32,
     depth: f32,
     motion: vec2<f32>,
-    debug: u32,
 }
 
 @group(2) @binding(0) var raa_vg_ids: texture_2d<u32>;
@@ -54,7 +53,7 @@ fn raa_vg_default_tangent(n: vec3<f32>) -> vec4<f32> {
     );
 }
 
-// Clusters carry no tangent stream. A virtualized pixel's tangent is the one a linear tangent
+// Old cluster sections carry no tangent. Their reconstructed tangent is the one a linear tangent
 // stream cross(RAA_VG_TANGENT_AXIS, n) of the mesh normals interpolates to, moved by the model
 // as the forward vertex stage moves its tangent: model * cross(axis, n_local), w = +1, where
 // n_local is the world normal brought back to mesh space (the model's transpose undoes the
@@ -77,6 +76,14 @@ fn raa_vg_tangent(model: mat3x3<f32>, world_normal: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(model * raa_vg_t, 1.0);
 }
 
+fn raa_vg_unpack_tangent(word: u32) -> vec4<f32> {
+    let oct = vec2<f32>(f32(word & 32767u), f32((word >> 15u) & 32767u)) * (2.0 / 32767.0) - 1.0;
+    let z = 1.0 - abs(oct.x) - abs(oct.y);
+    let sign = select(vec2<f32>(-1.0), vec2<f32>(1.0), oct >= vec2<f32>(0.0));
+    let xy = select((1.0 - abs(oct.yx)) * sign, oct, z >= 0.0);
+    return vec4<f32>(normalize(vec3<f32>(xy, z)), select(1.0, -1.0, (word & 0x40000000u) != 0u));
+}
+
 fn raa_vg_material_input(frag: vec4<f32>) -> RaaVgSurface {
     var raa_vg_out: RaaVgSurface;
     let raa_vg_pixel = vec2<i32>(frag.xy);
@@ -88,7 +95,6 @@ fn raa_vg_material_input(frag: vec4<f32>) -> RaaVgSurface {
         raa_vg_out.slot = 0u;
         raa_vg_out.depth = 1.0;
         raa_vg_out.motion = vec2<f32>(0.0);
-        raa_vg_out.debug = 0u;
         return raa_vg_out;
     }
     let raa_vg_slot = raa_vg_ids_word.x - 1u;
@@ -120,7 +126,13 @@ fn raa_vg_material_input(frag: vec4<f32>) -> RaaVgSurface {
         raa_vg_inst.model2.xyz,
     );
     // The tangent follows the stored (unflipped) normal, as the forward tangent stream does.
-    let raa_vg_tangent_value = raa_vg_tangent(raa_vg_model, raa_vg_normal);
+    let raa_vg_tangent_word = raa_vg_ids_word.z;
+    var raa_vg_tangent_value: vec4<f32>;
+    if (raa_vg_tangent_word & 0x80000000u) != 0u {
+        raa_vg_tangent_value = raa_vg_unpack_tangent(raa_vg_tangent_word);
+    } else {
+        raa_vg_tangent_value = raa_vg_tangent(raa_vg_model, raa_vg_normal);
+    }
     let raa_vg_front_facing = raa_vg_normal_word.w > 0.0;
     if (!raa_vg_front_facing && (raa_vg_record.header.z & RAA_FLAG_DOUBLE_SIDED) != 0u) {
         raa_vg_normal = -raa_vg_normal;
@@ -150,7 +162,6 @@ fn raa_vg_material_input(frag: vec4<f32>) -> RaaVgSurface {
     raa_vg_out.slot = raa_vg_slot;
     raa_vg_out.depth = raa_vg_depth;
     raa_vg_out.motion = raa_vg_uv_motion_word.zw;
-    raa_vg_out.debug = raa_vg_ids_word.z;
     return raa_vg_out;
 }
 "#;

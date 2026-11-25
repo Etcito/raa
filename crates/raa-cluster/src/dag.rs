@@ -823,7 +823,7 @@ fn pack_vertex(welded: &WeldedMesh, corner: Corner) -> Result<PackedVertex, Clus
             normal[1] as u16,
             uv(0),
             uv(1),
-            0,
+            attribute.tangent,
         ],
     })
 }

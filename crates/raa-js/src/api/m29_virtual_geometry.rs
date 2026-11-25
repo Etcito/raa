@@ -432,14 +432,9 @@ mod web {
             return;
         };
         let started = source
-            .cluster_inputs()
-            .map_err(|e| cluster_error(&e))
-            .and_then(|inputs| {
-                store
-                    .borrow_mut()
-                    .start_bake(key, inputs, &BuildOptions::default())
-                    .map_err(|e| cluster_error(&e))
-            });
+            .cluster_bakes(&BuildOptions::default())
+            .map(|bakes| store.borrow_mut().start_bakes(key, bakes))
+            .map_err(|error| cluster_error(&error));
         if let Err(error) = started {
             record_refusal(store, key, error);
         }
@@ -618,6 +613,12 @@ mod web {
         #[wasm_bindgen(js_name = setVirtualGeometry)]
         pub fn set_virtual_geometry(&mut self, settings: JsValue) -> Result<(), JsValue> {
             self.with_state(|_, st| set_settings(st, &settings))
+        }
+
+        /// Runtime-baked clusters preserve an authored tangent frame for normal-mapped meshes.
+        #[wasm_bindgen(js_name = supportsVirtualGeometryTangents)]
+        pub fn supports_virtual_geometry_tangents(&self) -> Result<bool, JsValue> {
+            self.with_state(|_, _| Ok(true))
         }
 
         /// The resolved settings (`ResolvedVirtualGeometry`), as a fresh object.

@@ -981,13 +981,11 @@ mod web {
     fn bake_mesh(st: &mut EngineState, mesh: u32, options: &JsValue) -> Result<(), RaaError> {
         st.mesh(mesh)?;
         let options = build_options(&read_options(options)?)?;
-        let inputs = retained_source(st.features.get::<MeshSources>(), mesh)?
-            .cluster_inputs()
+        let bakes = retained_source(st.features.get::<MeshSources>(), mesh)?
+            .cluster_bakes(&options)
             .map_err(|e| cluster_error(&e))?;
-        cluster_store(st)?
-            .borrow_mut()
-            .start_bake(mesh, inputs, &options)
-            .map_err(|e| cluster_error(&e))
+        cluster_store(st)?.borrow_mut().start_bakes(mesh, bakes);
+        Ok(())
     }
 
     /// `clearMeshClusters(mesh)`: cancels a bake and drops the clusters of the mesh.

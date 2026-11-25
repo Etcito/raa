@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use raa_cluster::{ClusterError, ClusterStore, OwnedClusterInput};
+use raa_cluster::{BuildOptions, ClusterBake, ClusterError, ClusterStore, OwnedClusterInput};
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError, wgpu};
 use raa_csg::CsgResolver;
 use raa_geom::{GeometryRegistry, MeshData};
@@ -105,6 +105,7 @@ pub(crate) struct MeshEntry {
 pub(crate) struct MeshSource {
     pub mesh: MeshData,
     pub uvs: Option<Vec<[f32; 2]>>,
+    pub tangents: Option<Vec<[f32; 4]>>,
     pub submeshes: Vec<(u32, u32)>,
     pub colors: Option<Vec<[f32; 4]>>,
 }
@@ -121,6 +122,32 @@ impl MeshSource {
                     first as usize,
                     count as usize,
                 )
+            })
+            .collect()
+    }
+
+    pub(crate) fn cluster_bakes(
+        &self,
+        options: &BuildOptions,
+    ) -> Result<Vec<ClusterBake>, ClusterError> {
+        let Some(tangents) = self.tangents.as_deref() else {
+            return self
+                .cluster_inputs()?
+                .iter()
+                .map(|input| ClusterBake::new(input.as_input(), options))
+                .collect();
+        };
+        self.submeshes
+            .iter()
+            .map(|&(first, count)| {
+                let (input, source) = OwnedClusterInput::from_index_range_with_sources(
+                    &self.mesh,
+                    self.uvs.as_deref(),
+                    first as usize,
+                    count as usize,
+                )?;
+                let tangents: Vec<_> = source.into_iter().map(|index| tangents[index]).collect();
+                ClusterBake::with_tangents(input.as_input(), options, &tangents)
             })
             .collect()
     }
@@ -151,8 +178,13 @@ impl MeshSources {
             MeshSource {
                 mesh: mesh.base.clone(),
                 uvs: mesh.uvs.clone(),
+                tangents: mesh.tangents.clone(),
                 submeshes,
-                colors: mesh.colors.as_ref().filter(|_| trace_vertex_colors).cloned(),
+                colors: mesh
+                    .colors
+                    .as_ref()
+                    .filter(|_| trace_vertex_colors)
+                    .cloned(),
             },
         );
     }

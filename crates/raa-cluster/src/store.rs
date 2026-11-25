@@ -86,8 +86,13 @@ impl ClusterStore {
             .iter()
             .map(|input| ClusterBake::new(input.as_input(), options))
             .collect::<Result<Vec<_>, _>>()?;
-        self.put(key, Entry::Baking { bakes });
+        self.start_bakes(key, bakes);
         Ok(())
+    }
+
+    /// Atomically starts sections whose input and attributes have already been validated.
+    pub fn start_bakes(&mut self, key: u32, bakes: Vec<ClusterBake>) {
+        self.put(key, Entry::Baking { bakes });
     }
 
     /// Drops the key's data and cancels its bake: state None.

@@ -76,6 +76,30 @@ struct VgMaterial {
 // outside the texture (the 1x1 white placeholder) is white and keeps its cluster uv.
 @group(2) @binding(13) var vertex_colors: texture_2d<u32>;
 
+// S29 packs optional tangent-plane angle and handedness in the high half of d.
+fn authored_tangent(instance: VgInstance, vertex: PackedVertex) -> vec4<f32> {
+    let word = vertex.d >> 16u;
+    if (word & 0x8000u) == 0u { return vec4<f32>(0.0); }
+    let n = decode_normal(vertex);
+    let axis = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(n.z) < 0.875);
+    let x = normalize(cross(axis, n));
+    let y = cross(n, x);
+    let angle = f32(word & 0x3fffu) * (6.283185307179586 / 16384.0);
+    let t = x * cos(angle) + y * sin(angle);
+    return vec4<f32>((instance.model * vec4<f32>(t, 0.0)).xyz, select(1.0, -1.0, (word & 0x4000u) != 0u));
+}
+
+// Octahedral direction, handedness, and presence in the existing surface ID word.
+fn pack_surface_tangent(tangent: vec4<f32>) -> u32 {
+    let magnitude = dot(abs(tangent.xyz), vec3<f32>(1.0));
+    if magnitude <= 1.0e-12 { return 0u; }
+    let unit = tangent.xyz / magnitude;
+    let sign = select(vec2<f32>(-1.0), vec2<f32>(1.0), unit.xy >= vec2<f32>(0.0));
+    let oct = select((1.0 - abs(unit.yx)) * sign, unit.xy, unit.z >= 0.0);
+    let bits = vec2<u32>(round(clamp(oct * 0.5 + 0.5, vec2<f32>(0.0), vec2<f32>(1.0)) * 32767.0));
+    return bits.x | (bits.y << 15u) | select(0u, 0x40000000u, tangent.w < 0.0) | 0x80000000u;
+}
+
 // `VG_COLOR_WIDTH` of vg/scene.rs.
 const VG_COLOR_WIDTH: u32 = 4096u;
 
@@ -295,11 +319,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let level = min(cluster_level(cluster), 63u);
-    var debug_word = cluster_index;
-    debug_word = debug_word | (level << 24u);
-    debug_word = debug_word | (entry.cluster & VISIBLE_SOFTWARE);
-    debug_word = debug_word | (entry.cluster & VISIBLE_SECOND);
-
     var material_fn = 0u;
     if (material.header.x == MATERIAL_MODEL_FUNCTION) {
         material_fn = material.header.y;
@@ -331,10 +350,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         albedo_out = vertex_rgba;
     }
 
+    let t0 = authored_tangent(instance, v0);
+    let t1 = authored_tangent(instance, v1);
+    let t2 = authored_tangent(instance, v2);
+    var tangent_word = 0u;
+    if t0.w * t1.w * t2.w != 0.0 {
+        tangent_word = pack_surface_tangent(interp4(b, t0, t1, t2));
+    }
     textureStore(
         out_ids,
         pixel,
-        vec4<u32>(instance.ids.x + 1u, material_fn, debug_word, bitcast<u32>(depth)),
+        vec4<u32>(instance.ids.x + 1u, material_fn, tangent_word, bitcast<u32>(depth)),
     );
     textureStore(out_normal, pixel, vec4<f32>(normal, face_sign));
     textureStore(out_uv_motion, pixel, vec4<f32>(uv, motion));

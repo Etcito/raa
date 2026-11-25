@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 pub struct Attribute {
     pub normal: Vec3,
     pub uv: [f32; 2],
+    pub tangent: u16,
 }
 
 /// A triangle corner: which welded position and which attribute it uses.
@@ -865,7 +866,11 @@ mod tests {
     }
 
     fn attribute(uv: [f32; 2], normal: Vec3) -> Attribute {
-        Attribute { normal, uv }
+        Attribute {
+            normal,
+            uv,
+            tangent: 0,
+        }
     }
 
     #[test]
@@ -944,6 +949,7 @@ mod tests {
         ];
         let attributes = vec![
             Attribute {
+                tangent: 0,
                 normal: Vec3::Z,
                 uv: [0.0; 2]
             };
@@ -1025,6 +1031,7 @@ mod tests {
         let attributes: Vec<Attribute> = positions
             .iter()
             .map(|p| Attribute {
+                tangent: 0,
                 normal: Vec3::Y,
                 uv: [p.x, p.z],
             })
@@ -1133,6 +1140,7 @@ mod tests {
                 positions.push(Vec3::new(x as f32, 0.0, z as f32));
                 let shift = if x > seam { jump } else { 0.0 };
                 attributes.push(Attribute {
+                    tangent: 0,
                     normal: Vec3::Y,
                     uv: [x as f32 + shift, z as f32],
                 });
@@ -1141,6 +1149,7 @@ mod tests {
         for z in 0..side {
             for x in 0..side {
                 attributes.push(Attribute {
+                    tangent: 0,
                     normal: Vec3::Y,
                     uv: [x as f32 + jump, z as f32],
                 });

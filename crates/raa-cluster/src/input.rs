@@ -88,6 +88,29 @@ impl OwnedClusterInput {
         first_index: usize,
         index_count: usize,
     ) -> Result<OwnedClusterInput, ClusterError> {
+        Self::copy_index_range(mesh, uvs, first_index, index_count, |_| {})
+    }
+
+    /// As above, also records the original index of each copied vertex, in first-use order.
+    pub fn from_index_range_with_sources(
+        mesh: &MeshData,
+        uvs: Option<&[[f32; 2]]>,
+        first_index: usize,
+        index_count: usize,
+    ) -> Result<(Self, Vec<usize>), ClusterError> {
+        let mut sources = Vec::new();
+        let input =
+            Self::copy_index_range(mesh, uvs, first_index, index_count, |src| sources.push(src))?;
+        Ok((input, sources))
+    }
+
+    fn copy_index_range(
+        mesh: &MeshData,
+        uvs: Option<&[[f32; 2]]>,
+        first_index: usize,
+        index_count: usize,
+        mut record_source: impl FnMut(usize),
+    ) -> Result<OwnedClusterInput, ClusterError> {
         let end = first_index
             .checked_add(index_count)
             .ok_or_else(|| ClusterError::at(INVALID_MESH, "indices", "index range overflows"))?;
@@ -138,6 +161,7 @@ impl OwnedClusterInput {
                 Some(slot) => {
                     let new_index = out.mesh.positions.len() as u32;
                     *slot = new_index;
+                    record_source(src);
                     out.mesh.positions.push(position);
                     out.mesh.normals.push(normal);
                     if let (Some(out_uvs), Some(uv)) = (out.uvs.as_mut(), uv) {

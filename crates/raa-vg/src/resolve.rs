@@ -105,7 +105,7 @@ fn surface_view(
         .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
-/// The four S32 resolve outputs of one surface size: the instance/material/debug/depth words,
+/// The four S32 resolve outputs of one surface size: the instance/material/tangent/depth words,
 /// the world normal with its facing sign, the uv and S12 motion, and the base or debug colour.
 /// They are write storage textures to `vg.resolve` and read textures to `vg.gbuffer` and
 /// `vg.shade`; a resize creates a new surface and drops this one.

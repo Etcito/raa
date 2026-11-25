@@ -102,6 +102,26 @@ pub struct ClusterBake {
 }
 
 impl ClusterBake {
+    /// Retains the authored tangent frame in otherwise identical runtime cluster sections.
+    pub fn with_tangents(
+        input: ClusterInput<'_>,
+        options: &BuildOptions,
+        tangents: &[[f32; 4]],
+    ) -> Result<Self, ClusterError> {
+        if tangents.len() != input.mesh.positions.len()
+            || tangents.iter().any(|t| t.iter().any(|v| !v.is_finite()))
+        {
+            return Err(ClusterError::at(
+                crate::error::INVALID_MESH,
+                "tangents",
+                "expected a finite frame for every vertex",
+            ));
+        }
+        let mut bake = Self::new(input, options)?;
+        bake.weld.set_tangents(&bake.input.mesh.normals, tangents);
+        Ok(bake)
+    }
+
     /// Copies the input and prepares the bake. Refuses invalid options, an invalid mesh and a
     /// mesh without triangle before any work.
     pub fn new(
@@ -439,4 +459,42 @@ pub fn bake(input: ClusterInput<'_>, options: &BuildOptions) -> Result<ClusterMe
     let mut bake = ClusterBake::new(input, options)?;
     while bake.step(WorkBudget { units: u32::MAX }) == BakeStatus::Working {}
     bake.finish()
+}
+
+#[cfg(test)]
+mod tangent_tests {
+    use super::*;
+    use raa_geom::MeshData;
+
+    #[test]
+    fn runtime_bake_keeps_authored_angle_and_mirrored_handedness() {
+        let mesh = MeshData {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            indices: vec![0, 1, 2],
+        };
+        let input = ClusterInput {
+            mesh: &mesh,
+            uvs: None,
+        };
+        let options = BuildOptions::default();
+        let legacy = bake(input, &options).unwrap();
+        let tangents = [
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, -1.0],
+            [-1.0, 0.0, 0.0, 1.0],
+        ];
+        let mut runtime = ClusterBake::with_tangents(input, &options, &tangents).unwrap();
+        while runtime.step(WorkBudget { units: 100 }) == BakeStatus::Working {}
+        let packed = runtime.finish().unwrap();
+        assert_eq!(legacy.triangles, packed.triangles);
+        let mut frames = Vec::new();
+        for (old, new) in legacy.vertices.iter().zip(&packed.vertices) {
+            assert_eq!(old.data[7], 0);
+            assert_eq!(old.data[..7], new.data[..7]);
+            frames.push(new.data[7]);
+        }
+        frames.sort_unstable();
+        assert_eq!(frames, [0x8000, 0xa000, 0xd000]);
+    }
 }

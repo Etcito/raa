@@ -83,6 +83,19 @@ pub fn encode_octahedral(normal: Vec3) -> [i16; 2] {
     [octahedral_word(fx), octahedral_word(fy)]
 }
 
+// The formerly reserved vertex word stores a tangent-plane angle. Older sections have
+// zero here. Bit 15 marks presence, bit 14 stores negative handedness and bits 0..13
+// cover one revolution. The basis is computed from the decoded packed normal.
+fn pack_tangent(n: Vec3, t: [f32; 4]) -> u16 {
+    let axis = if n.z.abs() < 0.875 { Vec3::Z } else { Vec3::Y };
+    let x = axis.cross(n).normalize_or_zero();
+    let y = n.cross(x);
+    let v = Vec3::new(t[0], t[1], t[2]);
+    let turns = (v.dot(y).atan2(v.dot(x)) / std::f32::consts::TAU).rem_euclid(1.0);
+    let angle = ((turns * 16384.0).round() as u16) & 0x3fff;
+    0x8000 | if t[3] < 0.0 { 0x4000 } else { 0 } | angle
+}
+
 fn octahedral_word(v: f32) -> i16 {
     (v.clamp(-1.0, 1.0) * 32767.0).round() as i16
 }
@@ -114,7 +127,8 @@ pub struct WeldState {
     uv_origin: [f32; 2],
     uv_step: [f32; 2],
     position_ids: BTreeMap<[u16; 3], u32>,
-    attribute_ids: BTreeMap<[u32; 4], u32>,
+    attribute_ids: BTreeMap<[u32; 5], u32>,
+    tangents: Vec<u16>,
     position_cache: Vec<u32>,
     attribute_cache: Vec<u32>,
     positions: Vec<Vec3>,
@@ -143,6 +157,7 @@ impl WeldState {
             uv_step: uv_size.map(|s| (s / GRID_MAX).max(1.0e-9)),
             position_ids: BTreeMap::new(),
             attribute_ids: BTreeMap::new(),
+            tangents: Vec::new(),
             position_cache: Vec::new(),
             attribute_cache: Vec::new(),
             positions: Vec::new(),
@@ -151,6 +166,19 @@ impl WeldState {
             next_triangle: 0,
             done: false,
         }
+    }
+
+    pub(crate) fn set_tangents(&mut self, normals: &[[f32; 3]], tangents: &[[f32; 4]]) {
+        self.tangents = normals
+            .iter()
+            .zip(tangents)
+            .map(|(&normal, &tangent)| {
+                pack_tangent(
+                    decode_octahedral(encode_octahedral(Vec3::from_array(normal))),
+                    tangent,
+                )
+            })
+            .collect();
     }
 
     /// Welds the corners of the next `WELD_BATCH` input triangles in index order. A triangle with
@@ -253,11 +281,13 @@ impl WeldState {
             .copied()
             .unwrap_or([0.0, 0.0]);
         let octahedral = encode_octahedral(normal);
+        let tangent = self.tangents.get(v).copied().unwrap_or(0);
         let key = [
             u32::from(octahedral[0] as u16),
             u32::from(octahedral[1] as u16),
             uv_index(uv[0], self.uv_origin[0], self.uv_step[0]),
             uv_index(uv[1], self.uv_origin[1], self.uv_step[1]),
+            u32::from(tangent),
         ];
         let id = match self.attribute_ids.get(&key) {
             Some(&id) => id,
@@ -266,6 +296,7 @@ impl WeldState {
                 self.attributes.push(Attribute {
                     normal: unit_or_up(normal),
                     uv,
+                    tangent,
                 });
                 self.attribute_ids.insert(key, id);
                 id
