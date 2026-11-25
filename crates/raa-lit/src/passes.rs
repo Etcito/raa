@@ -26,7 +26,9 @@ use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{
     FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
 };
-use raa_shader::{PassKind, VariantKey};
+use raa_shader::{
+    LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, PassKind, VARIANT_FLAG_NO_AREA_LIGHTS, VariantKey,
+};
 
 use crate::handle::{DrawMemo, LitHandle, PipelineSpec};
 use crate::material::{DrawClass, FLAG_DOUBLE_SIDED};
@@ -199,6 +201,25 @@ fn draw_lit(
         }
     }
     Ok(())
+}
+
+/// [`VARIANT_FLAG_NO_AREA_LIGHTS`] when no light record of this frame is an area light (kind 3
+/// at byte 52 of `LightGpu`), else 0. Records past the active count are also scanned, so a
+/// stale area record only keeps the full variant. Switching between the two variants compiles
+/// the other pipeline once per material function; it is cached afterwards.
+fn area_free_flag(lighting: &raa_pipeline::LightingResources) -> u32 {
+    let has_area = (0..MAX_LOCAL_LIGHTS as u32).any(|i| {
+        lighting
+            .local_light_record(i)
+            .is_some_and(|record: &[u8; LIGHT_GPU_SIZE]| {
+                u32::from_le_bytes([record[52], record[53], record[54], record[55]]) == 3
+            })
+    });
+    if has_area {
+        0
+    } else {
+        VARIANT_FLAG_NO_AREA_LIGHTS
+    }
 }
 
 /// The `prepass` feature pass; see the module docs.
@@ -464,7 +485,7 @@ impl ForwardPass {
             PassKind::Forward,
             self.msaa,
             &self.specs,
-            DrawSource::Camera(0),
+            DrawSource::Camera(area_free_flag(ctx.lighting)),
         )?;
         if let (Some(view), Some(targets)) = (reflection, self.reflection.as_ref()) {
             targets.composite(ctx.gpu, &mut pass, &self.lit, view);

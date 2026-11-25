@@ -152,6 +152,14 @@ pub const VARIANT_FLAG_TINT_GRAPH: u32 = 1 << 30;
 /// pass section, and `pass_prepass.wgsl` tests it as `RAA_VARIANT_MOTION_DEFORM`.
 pub const VARIANT_FLAG_MOTION_DEFORM: u32 = 1 << 29;
 
+/// [`VariantKey::flags`] bit of a camera forward variant composed for a frame whose light records
+/// hold no area light (kind 3). `local_lighting.wgsl` tests it as the module constant
+/// `RAA_VARIANT_NO_AREA_LIGHTS` and returns before the area branch, so the compiler drops the
+/// LTC, form-factor and area shadow code from the uber-shader: that code costs registers (and
+/// occupancy) on every pixel even when no area light exists. A key without the bit composes the
+/// full module, so a frame with an area light keeps exact shading.
+pub const VARIANT_FLAG_NO_AREA_LIGHTS: u32 = 1 << 28;
+
 impl TintMode {
     /// The [`VariantKey::flags`] bit of this mode: [`VARIANT_FLAG_TINT_GRAPH`] or 0.
     pub fn variant_flag(self) -> u32 {
@@ -565,6 +573,32 @@ fn depth_probe() {{
         Composer::validate(&wgsl).expect("the flagged prepass validates");
         assert!(PASS_PREPASS_WGSL.contains("const RAA_VARIANT_MOTION_DEFORM: u32 = 0x20000000u;"));
         assert!(PASS_PREPASS_WGSL.contains("time - raa_frame.clip.w"));
+    }
+
+    #[test]
+    fn no_area_lights_flag_composes_a_valid_forward() {
+        assert_eq!(VARIANT_FLAG_NO_AREA_LIGHTS, 0x1000_0000);
+        assert_eq!(
+            VARIANT_FLAG_NO_AREA_LIGHTS
+                & (VARIANT_FLAG_MOTION_DEFORM | VARIANT_FLAG_TINT_GRAPH | 1 << 31),
+            0,
+            "the area-free bit is distinct from the prepass, tint and posed bits"
+        );
+        let composer = stub_composer();
+        let reg = MaterialFnRegistry::new();
+        let k = VariantKey {
+            flags: VARIANT_FLAG_NO_AREA_LIGHTS,
+            ..key(MaterialFnId::STANDARD, PassKind::Forward)
+        };
+        let wgsl = composer.compose(&reg, &k).expect("compose");
+        assert!(wgsl.contains("const RAA_VARIANT_FLAGS: u32 = 268435456u;"));
+        Composer::validate(&wgsl).expect("the area-free forward validates");
+        assert!(
+            LOCAL_LIGHTING_WGSL.contains("const RAA_VARIANT_NO_AREA_LIGHTS: u32 = 0x10000000u;")
+        );
+        assert!(LOCAL_LIGHTING_WGSL.contains(
+            "if (RAA_VARIANT_FLAGS & RAA_VARIANT_NO_AREA_LIGHTS) != 0u { return vec3<f32>(0.0); }"
+        ));
     }
 
     #[test]

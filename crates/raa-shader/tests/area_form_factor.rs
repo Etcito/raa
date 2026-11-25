@@ -163,12 +163,16 @@ fn form_factor_mode_has_no_specular_in_any_tier() {
     let otherwise = area[gate..].find("} else {").expect("else of the gate") + gate;
     let ltc = area.find("raa_area_ltc(light, s, c)").unwrap();
     assert!(gate < diffuse && diffuse < otherwise && otherwise < ltc);
-    // The only returned colour is the selected shading times scalar weights.
+    // The only returned colour is the selected shading times scalar weights, besides the
+    // compile-time zero of the area-free variant (VARIANT_FLAG_NO_AREA_LIGHTS).
     assert_eq!(
         area.matches("return ").count(),
-        4,
+        5,
         "area branch returns changed"
     );
+    assert!(area.contains(
+        "if (RAA_VARIANT_FLAGS & RAA_VARIANT_NO_AREA_LIGHTS) != 0u { return vec3<f32>(0.0); }"
+    ));
     assert!(area.contains("return shading * (window * area_visibility * fade);"));
     for forbidden in [
         "raa_slot_direct",
