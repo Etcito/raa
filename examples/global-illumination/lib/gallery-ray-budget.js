@@ -10,7 +10,7 @@ import {
 const size = [160, 90];
 const pixels = size[0] * size[1];
 const budgetSteps = { reflection: [1, 2, 4, 8, 12, 16, 20, 24], area: [2, 3, 5, 6, 7, 8, 9, 16] };
-const timedPasses = {
+export const timedPasses = {
   reflection: ['ssr.hiz#hiz', 'ssr.trace#ssrTrace', 'ssr.incident#incident', 'ssr.replace#replace'],
   area: ['area.trace#trace', 'area.mask#mask', 'forward', 'ssr.replace#replace'],
 };
@@ -42,7 +42,7 @@ function denoiseRoute(graph, head, mode, params = {}) {
   return graph;
 }
 
-function route(base, head, budget, model, denoise) {
+export function route(base, head, budget, model, denoise) {
   const graph = structuredClone(base);
   if (budget) {
     const target = graph.nodes.find(node => node.id === (head === 'area' ? 'trace' : 'incident'));
