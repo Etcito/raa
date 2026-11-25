@@ -6,7 +6,8 @@
 //
 // Header rows: 0 anchor xyz + intensity; 1 angular n, shells, table mask, debug;
 // 2 clipStart, zMax, frame, channel mask; 3 x = table row of the centre probe (0 none),
-// y = parallax range (f32 metres, 0 = always parallax patches);
+// y = parallax range (f32 metres, 0 = always parallax patches), z = first screen-resolve
+// row (0 none), w = resolve width | height << 16;
 // 4.. shell inner, centre, outer. Entry rows: key, slot, first publication frame,
 // light hash; probe xyz + spacing; reserved xyz + published.
 
@@ -21,6 +22,8 @@ const RAA_SPHERICAL_INFO_ROW: u32 = 141u;
 const RAA_SPHERICAL_EMPTY: u32 = 0xffffffffu;
 const RAA_SPHERICAL_CENTER: u32 = 0xffffu;
 const RAA_SPHERICAL_FADE_FRAMES: f32 = 8.0;
+// The screen resolve runs at 1/RAA_SPHERICAL_RESOLVE_SCALE of the frame on each axis.
+const RAA_SPHERICAL_RESOLVE_SCALE: u32 = 2u;
 
 fn raa_spherical_hash(key: u32) -> u32 {
     let x = (key ^ (key >> 16u)) * 0x7feb352du;
@@ -283,6 +286,49 @@ fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult
     }
 
     return RaaSphericalResult(raa_spherical_diffuse_at(p, normal, cell), vec4<f32>(0.0));
+}
+
+// Forward entry: the screen-resolved lookup at a forward pixel. A joint-bilateral blend of
+// the four nearest resolve texels, keeping those resolved for a surface at this camera
+// distance (within 2%), else any resolved neighbour; no resolve gives no spherical light.
+// Forward never runs the probe lookup itself (its registers and ~150 loads per pixel).
+fn raa_spherical_screen(p: vec3<f32>, frag: vec2<f32>, eye: vec3<f32>) -> RaaSphericalResult {
+    let screen = raa_spherical_data[3];
+    if screen.z == 0u { return RaaSphericalResult(); }
+    let size = vec2<i32>(i32(screen.w & 0xffffu), i32(screen.w >> 16u));
+    let distance = length(p - eye);
+    let at = frag / f32(RAA_SPHERICAL_RESOLVE_SCALE) - 0.5;
+    let corner = floor(at);
+    let f = at - corner;
+    var sum = vec4<f32>(0.0);
+    var total = 0.0;
+    var any_sum = vec4<f32>(0.0);
+    var any_total = 0.0;
+    var flags = 0u;
+    for (var i = 0u; i < 4u; i++) {
+        let o = vec2<u32>(i & 1u, i >> 1u);
+        let texel = clamp(vec2<i32>(corner) + vec2<i32>(o), vec2<i32>(0), size - 1);
+        let row = raa_spherical_data[screen.z + u32(texel.y * size.x + texel.x)];
+        // Row layout: see mesh_spherical_resolve.wgsl (rgb f32, distance | blend | flags).
+        if (row.w & 1u) == 0u { continue; }
+        flags |= row.w & 3u;
+        let w = select(1.0 - f.x, f.x, o.x == 1u) * select(1.0 - f.y, f.y, o.y == 1u) + 1e-3;
+        let value = vec4<f32>(bitcast<vec3<f32>>(row.xyz), f32((row.w >> 2u) & 1023u) / 1023.0);
+        any_sum += w * value;
+        any_total += w;
+        if abs(bitcast<f32>(row.w & 0xfffff000u) - distance) <= 0.02 * distance + 0.002 {
+            sum += w * value;
+            total += w;
+        }
+    }
+    var value = vec4<f32>(0.0);
+    if total > 0.0 {
+        value = sum / total;
+    } else if any_total > 0.0 {
+        value = any_sum / any_total;
+    }
+    if (flags & 2u) != 0u { return RaaSphericalResult(vec4<f32>(0.0), value); }
+    return RaaSphericalResult(value, vec4<f32>(0.0));
 }
 
 // The three strongest supported probes, kept in scalars (no dynamically indexed

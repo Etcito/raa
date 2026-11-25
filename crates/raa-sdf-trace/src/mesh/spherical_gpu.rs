@@ -437,6 +437,7 @@ impl FeaturePass for SphericalPass {
         for slot in scheduler.take_adopted_slots() {
             gpu.ready_at[slot as usize] = Some((ctx.frame as u32).max(1));
         }
+        gpu.set_screen(ctx.gpu, ctx.size);
         gpu.update_lookup(ctx.gpu, scheduler, settings, ctx.frame as u32);
         ctx.lighting
             .set_spherical_gi(Some((gpu.lookup.clone(), gpu.faces.clone())));
@@ -502,6 +503,9 @@ impl FeaturePass for SphericalPass {
                 state.settings.channels,
                 [state.settings.sky_samples, state.settings.light_samples],
             );
+        }
+        if let Some(frame) = self.mesh.borrow().frame.clone() {
+            gpu.record_resolve(ctx, &frame);
         }
         self.staged.recorded = true;
         self.staged.feedback = gpu.record_light_feedback(ctx);
@@ -634,6 +638,12 @@ struct SphericalGpu {
     capture: wgpu::ComputePipeline,
     project: wgpu::ComputePipeline,
     bins: wgpu::ComputePipeline,
+    /// Half-resolution screen resolve of the lookup (rows after the slots, forward reads them).
+    resolve: wgpu::ComputePipeline,
+    /// Resolve size this frame, when it fits the storage binding.
+    screen: Option<(u32, u32)>,
+    /// Resolve rows the lookup buffer holds after its slots (grows, never shrinks).
+    resolve_rows: usize,
     /// Channel mask of the published projections; a change reprojects every probe.
     projected_channels: u32,
     options: Buffer,
@@ -676,6 +686,18 @@ impl SphericalGpu {
                 cache: None,
             })
         };
+        let resolve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("gi.spherical.resolve"),
+            source: wgpu::ShaderSource::Wgsl(spherical_resolve_module().into()),
+        });
+        let resolve = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("gi.spherical.resolve"),
+            layout: None,
+            module: &resolve_shader,
+            entry_point: Some("spherical_resolve"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let slots = capacity as usize;
         let table_entries = (2 * slots).next_power_of_two();
         let lookup_rows = LOOKUP_HEADER + LOOKUP_ENTRY * table_entries;
@@ -686,6 +708,9 @@ impl SphericalGpu {
             capture: pipeline("spherical_capture"),
             project: pipeline("spherical_project"),
             bins: pipeline("spherical_bins"),
+            resolve,
+            screen: None,
+            resolve_rows: 0,
             projected_channels: u32::MAX,
             options: sized("gi.spherical.options", 64, Usage::UNIFORM | Usage::COPY_DST),
             work: sized(
@@ -708,7 +733,7 @@ impl SphericalGpu {
             lookup: sized(
                 "gi.spherical.lookup",
                 16 * (lookup_rows + SLOT_ROWS * slots),
-                Usage::STORAGE | Usage::COPY_DST,
+                Usage::STORAGE | Usage::COPY_DST | Usage::COPY_SRC,
             ),
             table_entries,
             lookup_rows: vec![[0; 4]; lookup_rows],
@@ -724,6 +749,78 @@ impl SphericalGpu {
             face_budget: 0,
             burst: false,
         }
+    }
+
+    fn resolve_first_row(&self) -> usize {
+        self.lookup_rows.len() + SLOT_ROWS * self.capacity as usize
+    }
+
+    /// Size the screen resolve for a frame of `size` pixels. The rows follow the slots in
+    /// the one lookup buffer forward binds; a larger frame grows that buffer and copies the
+    /// lookup and slots over (no recapture). Off when the rows would exceed the binding limit.
+    fn set_screen(&mut self, gpu: &GpuContext, size: (u32, u32)) {
+        let width = size.0.div_ceil(RESOLVE_SCALE).min(0xffff);
+        let height = size.1.div_ceil(RESOLVE_SCALE).min(0xffff);
+        let rows = width as usize * height as usize;
+        let first = self.resolve_first_row();
+        let bytes = 16 * (first + rows) as u64;
+        if rows == 0 || bytes > u64::from(gpu.device().limits().max_storage_buffer_binding_size) {
+            self.screen = None;
+            return;
+        }
+        if rows > self.resolve_rows {
+            // Headroom so a window that grows a little does not reallocate every frame.
+            let grown = rows + rows / 4;
+            let total = (16 * (first + grown) as u64).min(u64::from(
+                gpu.device().limits().max_storage_buffer_binding_size,
+            ));
+            let lookup = buffer(
+                gpu.device(),
+                "gi.spherical.lookup",
+                total,
+                Usage::STORAGE | Usage::COPY_DST | Usage::COPY_SRC,
+            );
+            let mut encoder =
+                gpu.device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("gi.spherical.lookup-grow"),
+                    });
+            encoder.copy_buffer_to_buffer(&self.lookup, 0, &lookup, 0, 16 * first as u64);
+            gpu.queue().submit([encoder.finish()]);
+            self.lookup = lookup;
+            self.resolve_rows = (total / 16) as usize - first;
+        }
+        self.screen = Some((width, height));
+    }
+
+    fn record_resolve(&self, ctx: &mut RecordCtx<'_>, frame: &Buffer) {
+        let Some((width, height)) = self.screen else {
+            return;
+        };
+        let depth = ctx.targets.depth_input(ctx.resources, SPHERICAL_GI_NAME);
+        let normal = ctx.targets.normal_input(ctx.resources, SPHERICAL_GI_NAME);
+        let group = ctx
+            .gpu
+            .device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gi.spherical.resolve"),
+                layout: &self.resolve.get_bind_group_layout(0),
+                entries: &[
+                    buffer_entry(0, frame),
+                    image_entry(6, &depth),
+                    image_entry(7, &normal),
+                    buffer_entry(crate::wgsl::MESH_SPHERICAL_BINDING, &self.lookup),
+                ],
+            });
+        let mut pass = ctx
+            .encoder
+            .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("gi.spherical.resolve"),
+                ..Default::default()
+            });
+        pass.set_pipeline(&self.resolve);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
     }
 
     fn bytes(&self) -> u64 {
@@ -745,6 +842,7 @@ impl SphericalGpu {
         settings: SphericalGiSettings,
         frame: u32,
     ) {
+        let resolve_first_row = self.resolve_first_row() as u32;
         let rows = &mut self.lookup_rows;
         rows.fill([0; 4]);
         let grid = scheduler.grid();
@@ -766,6 +864,10 @@ impl SphericalGpu {
             settings.channels,
         ];
         rows[3][1] = settings.parallax_range.to_bits();
+        if let Some((width, height)) = self.screen {
+            rows[3][2] = resolve_first_row;
+            rows[3][3] = width | (height << 16);
+        }
         for index in 0..grid.shell_count() {
             let shell = grid.radial_shell(index).expect("validated radial shell");
             rows[4 + usize::from(index)] =
@@ -1322,6 +1424,32 @@ fn decode_face_lights(
     })
 }
 
+/// The screen resolve runs at 1/RESOLVE_SCALE of the frame on each axis
+/// (RAA_SPHERICAL_RESOLVE_SCALE in spherical_gi.wgsl).
+const RESOLVE_SCALE: u32 = 2;
+
+/// The resolve kernel: the mesh-trace frame uniform, the G-buffer depth and normal, and the
+/// lookup buffer read-write (it reads probes and writes its own rows), with the shared lookup.
+fn spherical_resolve_module() -> String {
+    let mesh = include_str!("../wgsl/mesh_trace.wgsl");
+    let start = mesh
+        .find("struct Frame {")
+        .expect("mesh trace frame struct");
+    let end = start + mesh[start..].find("\n}\n").expect("frame struct end") + 3;
+    format!(
+        "{}\n@group(0) @binding(0) var<uniform> frame: Frame;\n\
+         @group(0) @binding(6) var depth: texture_depth_2d;\n\
+         @group(0) @binding(7) var normals: texture_2d<f32>;\n\
+         @group(0) @binding({}) var<storage, read_write> raa_spherical_data: array<vec4<u32>>;\n\
+         {}{}{}",
+        &mesh[start..end],
+        crate::wgsl::MESH_SPHERICAL_BINDING,
+        raa_shader::SPHERICAL_CUBE_WGSL,
+        raa_shader::SPHERICAL_GI_WGSL,
+        include_str!("../wgsl/mesh_spherical_resolve.wgsl"),
+    )
+}
+
 fn spherical_module() -> String {
     format!(
         "{}\n{}",
@@ -1472,6 +1600,14 @@ mod tests {
             .map(|&n| a + b * f64::from(n))
             .sum();
         assert!(total_ms <= 6.0 * 0.75 + 1e-9);
+    }
+
+    #[test]
+    fn resolve_module_validates_and_matches_the_forward_scale() {
+        raa_shader::Composer::validate(&spherical_resolve_module()).expect("resolve WGSL");
+        assert!(raa_shader::SPHERICAL_GI_WGSL.contains(&format!(
+            "RAA_SPHERICAL_RESOLVE_SCALE: u32 = {RESOLVE_SCALE}u;"
+        )));
     }
 
     #[test]
