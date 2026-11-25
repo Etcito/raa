@@ -73,6 +73,9 @@ pub struct SphericalGiSettings {
     pub debug: SphericalGiDebug,
     /// Bit 0 selects sky, bit 1 sun and bit 2 other.
     pub channels: u32,
+    /// Multiply the spherical irradiance by the screen-space AO (min(material AO, GTAO)) as the
+    /// ambient term it replaces is (header row 2.w bit 16), like DDGI's `screen_ao`.
+    pub screen_ao: bool,
 }
 
 impl Default for SphericalGiSettings {
@@ -89,6 +92,7 @@ impl Default for SphericalGiSettings {
             intensity: 1.0,
             debug: SphericalGiDebug::Off,
             channels: 7,
+            screen_ao: true,
         }
     }
 }
@@ -861,7 +865,7 @@ impl SphericalGpu {
             config.clip_start.to_bits(),
             config.z_max.to_bits(),
             frame,
-            settings.channels,
+            settings.channels | (u32::from(settings.screen_ao) << 16),
         ];
         rows[3][1] = settings.parallax_range.to_bits();
         if let Some((width, height)) = self.screen {

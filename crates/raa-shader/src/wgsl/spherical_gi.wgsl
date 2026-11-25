@@ -181,7 +181,7 @@ fn raa_spherical_probe_irradiance(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f
 // The weights sum to 1 for any unit n, so uniform radiance L gives exactly L.
 fn raa_spherical_probe_cube(entry: u32, mask: u32, n: vec3<f32>) -> vec3<f32> {
     let slot = raa_spherical_slot(entry, mask);
-    let channels = raa_spherical_data[2].w;
+    let channels = raa_spherical_data[2].w & 7u;
     var e = vec3<f32>(0.0);
     for (var face = 0u; face < 6u; face++) {
         let axis = face / 2u;
@@ -292,6 +292,11 @@ fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult
 // the four nearest resolve texels, keeping those resolved for a surface at this camera
 // distance (within 2%), else any resolved neighbour; no resolve gives no spherical light.
 // Forward never runs the probe lookup itself (its registers and ~150 loads per pixel).
+// Whether the spherical term takes the screen AO (header row 2.w bit 16).
+fn raa_spherical_screen_ao() -> bool {
+    return (raa_spherical_data[2].w & 0x10000u) != 0u;
+}
+
 fn raa_spherical_screen(p: vec3<f32>, frag: vec2<f32>, eye: vec3<f32>) -> RaaSphericalResult {
     let screen = raa_spherical_data[3];
     if screen.z == 0u { return RaaSphericalResult(); }

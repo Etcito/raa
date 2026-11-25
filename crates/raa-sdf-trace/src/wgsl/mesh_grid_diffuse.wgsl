@@ -12,7 +12,7 @@ fn grid_diffuse_neighbor(p: vec3<f32>, n: vec3<f32>, entry: u32, mask: u32,
     let normal = bitcast<vec3<f32>>(raa_spherical_data[entry + 2u].xyz);
     let delta = clamp((p - surface.xyz) / surface.w, vec3<f32>(-2.5), vec3<f32>(2.5));
     let base = raa_spherical_slot(entry, mask) + 3u;
-    let channels = raa_spherical_data[2].w;
+    let channels = raa_spherical_data[2].w & 7u;
     var projected = vec3<f32>(0.0);
     var moment = vec3<f32>(0.0);
     for (var face = 0u; face < 6u; face++) {

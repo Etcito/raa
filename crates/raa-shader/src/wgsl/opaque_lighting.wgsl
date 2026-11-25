@@ -70,6 +70,11 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
         let spherical = raa_spherical_screen(c.position, c.frag.xy, raa_frame.camera_pos.xyz);
         spherical_debug = spherical.debug;
         c.spherical_diffuse = spherical.diffuse;
+        if raa_spherical_screen_ao() {
+            // Same as DDGI: the probe term takes the screen AO like the ambient it replaces.
+            c.spherical_diffuse = vec4<f32>(spherical.diffuse.rgb * (c.ao / max(s.ao, 1e-4)),
+                spherical.diffuse.w);
+        }
     }
     let direct = raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
             raa_directional_radiance(raa_frame.sun_color.rgb) * shadow);

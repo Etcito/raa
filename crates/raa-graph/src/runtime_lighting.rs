@@ -23,6 +23,7 @@ pub(crate) const SPHERICAL_KEYS: &[&str] = &[
     "lightSamples",
     "parallaxRange",
     "autoRange",
+    "screenAo",
     "enabled",
 ];
 
@@ -51,6 +52,7 @@ pub(crate) fn spherical_get(settings: SphericalGiSettings, key: &str) -> Option<
         "lightSamples" => ParamValue::Int(i64::from(settings.light_samples)),
         "parallaxRange" => ParamValue::Number(f64::from(settings.parallax_range)),
         "autoRange" => ParamValue::Bool(settings.scheduler.auto_range),
+        "screenAo" => ParamValue::Bool(settings.screen_ao),
         "debug" => ParamValue::Enum(
             DEBUG
                 .iter()
@@ -112,6 +114,7 @@ pub(crate) fn spherical_set(
             settings.parallax_range = *value as f32;
         }
         ("autoRange", ParamValue::Bool(value)) => settings.scheduler.auto_range = *value,
+        ("screenAo", ParamValue::Bool(value)) => settings.screen_ao = *value,
         ("debug", ParamValue::Enum(value)) => {
             settings.debug = DEBUG
                 .iter()
