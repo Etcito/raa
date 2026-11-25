@@ -97,8 +97,17 @@ fn raa_spherical_oct_decode(e: vec2<f32>) -> vec3<f32> {
     return normalize(v);
 }
 
+fn raa_spherical_moments(slot: u32, face: u32, bin: vec2<u32>) -> vec2<f32> {
+    let index = 16u * face + 4u * bin.y + bin.x;
+    let row = bitcast<vec4<f32>>(raa_spherical_data[slot + RAA_SPHERICAL_MOMENT_ROW + index / 2u]);
+    return select(row.xy, row.zw, (index & 1u) != 0u);
+}
+
 // Chebyshev visibility of p from the probe on the stored depth moments (DDGI style),
-// queried slightly off the surface along its normal.
+// queried slightly off the surface along its normal. The moments of the four nearest
+// 4x4 bins of the face are interpolated bilinearly (clamped at the face border) before
+// the test: with the nearest bin, a bin boundary drew a hard-edged block of leaked light
+// on the wall behind it (sphB-dense V2, left of the fountain).
 fn raa_spherical_visibility(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f32>) -> f32 {
     let probe = bitcast<vec4<f32>>(raa_spherical_data[entry + 1u]);
     let biased = p + n * max(0.02, 0.05 * probe.w);
@@ -106,11 +115,16 @@ fn raa_spherical_visibility(entry: u32, mask: u32, p: vec3<f32>, n: vec3<f32>) -
     let distance = length(offset);
     if distance < 1e-5 { return 1.0; }
     let face_uv = raa_spherical_face_uv(offset);
-    let bin = clamp(vec2<u32>((face_uv.xy + 1.0) * 2.0), vec2<u32>(0u), vec2<u32>(3u));
-    let index = 16u * u32(face_uv.z) + 4u * bin.y + bin.x;
-    let row = bitcast<vec4<f32>>(raa_spherical_data[raa_spherical_slot(entry, mask)
-        + RAA_SPHERICAL_MOMENT_ROW + index / 2u]);
-    let moments = select(row.xy, row.zw, (index & 1u) != 0u);
+    let face = u32(face_uv.z);
+    let slot = raa_spherical_slot(entry, mask);
+    let t = clamp((face_uv.xy + 1.0) * 2.0 - 0.5, vec2<f32>(0.0), vec2<f32>(3.0));
+    let b0 = min(vec2<u32>(floor(t)), vec2<u32>(2u));
+    let f = t - vec2<f32>(b0);
+    let m00 = raa_spherical_moments(slot, face, b0);
+    let m10 = raa_spherical_moments(slot, face, b0 + vec2<u32>(1u, 0u));
+    let m01 = raa_spherical_moments(slot, face, b0 + vec2<u32>(0u, 1u));
+    let m11 = raa_spherical_moments(slot, face, b0 + vec2<u32>(1u, 1u));
+    let moments = mix(mix(m00, m10, f.x), mix(m01, m11, f.x), f.y);
     if distance <= moments.x { return 1.0; }
     let variance = max(abs(moments.y - moments.x * moments.x), 1e-4 * probe.w * probe.w);
     let d = distance - moments.x;
@@ -529,7 +543,10 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
     }
     // Low coverage: the floored corners, then the centre probe and the shell's 3x3 ring,
     // faded in continuously as the trilinear coverage drops below 0.5.
-    let corners = select(vec3<f32>(0.0), sum / max(total, 1e-12), total > 0.0);
+    // Normalisation is capped at 1 / (0.05 x the published coverage): where every corner is
+    // behind the surface or occluded, renormalising would hand the whole weight to the least
+    // occluded, often leaking, probe; such a receiver darkens smoothly instead.
+    let corners = select(vec3<f32>(0.0), sum / max(max(total, 0.05 * coverage), 1e-12), total > 0.0);
     let floor_value = select(vec3<f32>(0.0), floor_sum / max(floor_total, 1e-12), floor_total > 0.0);
     let main_weight = smoothstep(0.0, 0.02, total);
     sum = mix(floor_value, corners, main_weight);
