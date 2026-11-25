@@ -464,25 +464,41 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
     let range = bitcast<f32>(raa_spherical_data[3].y);
     let far = select(0.0, smoothstep(range, 1.5 * range, cell.radius), range > 0.0);
     let interpolation = raa_spherical_interpolation(cell);
+    // Trilinear weights are NOT floored: a corner that is not shared with the next cell
+    // reaches exactly zero on the boundary, so dropping missing corners (renormalising)
+    // stays continuous. The floored sum is only used where every shared corner is gone.
     var sum = vec3<f32>(0.0);
     var total = 0.0;
+    var floor_sum = vec3<f32>(0.0);
+    var floor_total = 0.0;
     var coverage = 0.0;
-    var count = 0u;
     for (var i = 0u; i < select(8u, 4u, interpolation.shell0 == interpolation.shell1); i++) {
         let corner = raa_spherical_corner(i);
         let entry = raa_spherical_find(raa_spherical_corner_key(cell, interpolation, corner), mask);
         if !raa_spherical_published(entry) { continue; }
         let f = select(1.0 - interpolation.fraction, interpolation.fraction, corner);
-        let trilinear = max(f.x * f.y * f.z, 0.001);
+        let trilinear = f.x * f.y * f.z;
         let gates = raa_spherical_support_gates(entry, p, normal);
         coverage += trilinear * gates.z;
-        let w = trilinear * gates.x * gates.y * gates.z;
-        if w <= 1e-6 { continue; }
-        count += 1u;
-        sum += w * raa_spherical_probe_value(entry, mask, p, normal, far);
-        total += w;
+        let support = gates.x * gates.y * gates.z;
+        if support <= 1e-6 { continue; }
+        let value = raa_spherical_probe_value(entry, mask, p, normal, far);
+        sum += trilinear * support * value;
+        total += trilinear * support;
+        floor_sum += 0.001 * support * value;
+        floor_total += 0.001 * support;
     }
-    if coverage < 0.5 && count < 2u {
+    // Low coverage: the floored corners, then the centre probe and the shell's 3x3 ring,
+    // faded in continuously as the trilinear coverage drops below 0.5.
+    let corners = select(vec3<f32>(0.0), sum / max(total, 1e-12), total > 0.0);
+    let floor_value = select(vec3<f32>(0.0), floor_sum / max(floor_total, 1e-12), floor_total > 0.0);
+    let main_weight = smoothstep(0.0, 0.02, total);
+    sum = mix(floor_value, corners, main_weight);
+    total = select(0.0, 1.0, total > 0.0 || floor_total > 0.0);
+    let ring = 1.0 - smoothstep(0.25, 0.5, coverage);
+    if ring > 0.0 {
+        var ring_sum = vec3<f32>(0.0);
+        var ring_total = 0.0;
         let center = vec2<i32>(floor(cell.angular));
         for (var k = 0u; k < 10u; k++) {
             // k == 0 visits the centre probe, then the 3x3 columns of this shell.
@@ -500,8 +516,13 @@ fn raa_spherical_diffuse_at(p: vec3<f32>, normal: vec3<f32>,
             coverage += distance_weight * gates.z;
             let w = distance_weight * gates.x * gates.y * gates.z;
             if w <= 1e-6 { continue; }
-            sum += w * raa_spherical_probe_value(entry, mask, p, normal, far);
-            total += w;
+            ring_sum += w * raa_spherical_probe_value(entry, mask, p, normal, far);
+            ring_total += w;
+        }
+        if ring_total > 0.0 {
+            let ring_value = ring_sum / ring_total;
+            sum = select(ring_value, mix(sum, ring_value, ring), total > 0.0);
+            total = 1.0;
         }
     }
     if total <= 1e-7 { return vec4<f32>(0.0); }
