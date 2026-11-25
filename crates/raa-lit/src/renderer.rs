@@ -1141,10 +1141,11 @@ impl LitRenderer {
         if let Some((index, observation, submitted)) = self.pending_resolve.take() {
             ReadbackCoordinator::resolve(&self.readback, gpu, index, observation, submitted);
         }
-        let (viewport, encode_srgb, tiling, taa_enabled) = {
+        let (viewport, display_size, encode_srgb, tiling, taa_enabled) = {
             let p = self.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
             (
                 p.targets().map_or((1, 1), |t| t.size()),
+                p.targets().map_or((1, 1), |t| t.display_rect().size),
                 !p.surface_is_srgb(),
                 p.entry_enabled(LIGHT_TILES_NAME).unwrap_or(false),
                 jitter_consumer(p.entry_enabled(TAA_PASS_NAME)),
@@ -1385,6 +1386,7 @@ impl LitRenderer {
             msaa: self.opts.msaa,
             frame_index: camera.frame_index,
             camera_jitter_ndc: camera.current_jitter,
+            texture_lod_bias: crate::frame::taau_texture_lod_bias(jitter, viewport, display_size),
             previous_jitter_ndc: camera.previous_jitter,
             previous_view_proj: camera.previous_view_proj,
             history_valid: camera.history_valid,

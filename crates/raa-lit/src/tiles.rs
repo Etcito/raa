@@ -26,7 +26,7 @@
 
 #![allow(dead_code)] // Retained per-view GPU handles outlive their views; see Handoff.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -184,6 +184,9 @@ struct ViewTiles {
     counter: wgpu::Buffer,
     compute_group: wgpu::BindGroup,
     stamp: u64,
+    /// Every tile word of this view is known to list no light, so a frame without an
+    /// eligible light needs no dispatch.
+    zeroed: Cell<bool>,
 }
 
 /// The `light.tiles` compute pass and its reused per-viewport GPU state.
@@ -196,6 +199,21 @@ pub(crate) struct LightTiles {
     views: Vec<ViewTiles>,
     current: usize,
     clock: u64,
+    /// Records of the last upload the shader can list (non-black radiance).
+    eligible: u32,
+}
+
+/// Number of light records whose radiance is not black: the lights the tiling shader
+/// can list (`any(color_inv_range_sq.rgb != 0)`, record bytes 16..28).
+pub(crate) fn eligible_lights(lights: &[u8; LIGHT_BYTES]) -> u32 {
+    lights
+        .chunks_exact(LIGHT_GPU_SIZE)
+        .filter(|record| {
+            record[16..28]
+                .chunks_exact(4)
+                .any(|c| f32::from_le_bytes(c.try_into().expect("word")) != 0.0)
+        })
+        .count() as u32
 }
 
 impl LightTiles {
@@ -251,6 +269,7 @@ impl LightTiles {
             views: Vec::new(),
             current: 0,
             clock: 0,
+            eligible: 0,
         })
     }
 
@@ -304,6 +323,7 @@ impl LightTiles {
             counter,
             compute_group,
             stamp: self.clock,
+            zeroed: Cell::new(false),
         });
         self.views.len() - 1
     }
@@ -319,6 +339,7 @@ impl LightTiles {
             ctx.gpu
                 .queue()
                 .write_buffer(&self.lights, 0, &inputs.lights);
+            self.eligible = eligible_lights(&inputs.lights);
             inputs.lights_dirty = false;
         }
         ctx.lighting
@@ -339,21 +360,26 @@ impl LightTiles {
         Ok(())
     }
 
-    /// Clears the reused overflow counter and dispatches one workgroup per tile.
+    /// Clears the reused overflow counter and dispatches one workgroup per tile. With no
+    /// eligible light the tile words are all zero counts: they are written once (by the
+    /// dispatch of the first such frame) and the sweep is skipped afterwards.
     fn record_frame(&self, ctx: &mut RecordCtx<'_>) {
         let view = &self.views[self.current];
         ctx.encoder.clear_buffer(&view.counter, 0, None);
-        let mut pass = ctx
-            .encoder
-            .begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("raa.lit.light_tiles"),
-                timestamp_writes: None,
-            });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.frame_group, &[]);
-        pass.set_bind_group(2, &view.compute_group, &[]);
-        pass.dispatch_workgroups(view.grid.0, view.grid.1, 1);
-        drop(pass);
+        let skip = self.eligible == 0 && view.zeroed.get();
+        view.zeroed.set(self.eligible == 0);
+        if !skip {
+            let mut pass = ctx
+                .encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("raa.lit.light_tiles"),
+                    timestamp_writes: None,
+                });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.frame_group, &[]);
+            pass.set_bind_group(2, &view.compute_group, &[]);
+            pass.dispatch_workgroups(view.grid.0, view.grid.1, 1);
+        }
         let inputs = self.inputs.borrow();
         inputs
             .readback
@@ -417,6 +443,22 @@ mod tests {
             (size.width, size.height, size.depth_or_array_layers),
             (3, 2, TILE_WORDS)
         );
+    }
+
+    #[test]
+    fn only_lights_with_radiance_are_eligible() {
+        let mut lights = LocalLights::new();
+        let mut off = crate::local_light::LocalLight::default();
+        off.intensity = 0.0;
+        lights.add(off).expect("off light");
+        let mut bytes = [0u8; LIGHT_BYTES];
+        lights.write_gpu(&mut bytes);
+        assert_eq!(eligible_lights(&bytes), 0, "an off light is never eligible");
+        let mut on = crate::local_light::LocalLight::default();
+        on.intensity = 2.0;
+        lights.add(on).expect("lit light");
+        lights.write_gpu(&mut bytes);
+        assert_eq!(eligible_lights(&bytes), 1);
     }
 
     #[test]

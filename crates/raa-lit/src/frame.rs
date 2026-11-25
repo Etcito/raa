@@ -47,6 +47,20 @@ pub struct FrameParams {
     pub frame_parity: u32,
     pub accumulation_enabled: bool,
     pub history_valid: bool,
+    /// Material texture mip bias in levels (`reserved2[0].x`), added to the lod of
+    /// `raa_texture_grad`. Zero unless camera jitter is active and the scene renders below the
+    /// display size; see [`taau_texture_lod_bias`].
+    pub texture_lod_bias: f32,
+}
+
+/// Negative mip bias that keeps material textures as sharp as the display resolution while a
+/// jittered, temporally upscaled frame renders at `render` pixels: `log2(render / display)` on the
+/// width, 0 when the frame is not jittered or renders at or above the display size.
+pub fn taau_texture_lod_bias(jitter: bool, render: (u32, u32), display: (u32, u32)) -> f32 {
+    if !jitter || render.0 == 0 || display.0 <= render.0 {
+        return 0.0;
+    }
+    (render.0 as f32 / display.0 as f32).log2()
 }
 
 impl Default for FrameParams {
@@ -71,6 +85,7 @@ impl Default for FrameParams {
             frame_parity: 0,
             accumulation_enabled: false,
             history_valid: false,
+            texture_lod_bias: 0.0,
         }
     }
 }
@@ -122,7 +137,7 @@ fn jittered_projection(proj: Mat4, jitter: [f32; 2]) -> Mat4 {
 /// previous_view_proj @512, unjittered_view_proj @576, camera_jitter @640 (current NDC
 /// xy, previous NDC xy), light_info @656 (active count, tile columns, tile rows, tile
 /// stride in words), temporal @672 (parity, accumulation enabled, history valid, 0) and
-/// reserved @688..768 zero.
+/// reserved2 @688 (x: material texture mip bias, rest zero) to 768.
 /// Handoff: `pub const fn feature_address(id: u32) -> Option<(usize, u32)>` from
 /// `crates/raa-shader/src/gpu_constants.rs` (landed first) maps `FrameParams` feature
 /// ids into flags shared with generated WGSL. Its re-exported `FRAME_GPU_SIZE` sizes
@@ -196,7 +211,8 @@ pub(crate) fn write_camera_frame_gpu(
             0,
         ],
     );
-    out[688..FRAME_GPU_SIZE].fill(0);
+    put_f32s(&mut out[688..692], &[p.texture_lod_bias]);
+    out[692..FRAME_GPU_SIZE].fill(0);
     Ok(())
 }
 
@@ -229,6 +245,14 @@ mod tests {
         let mut b = [0u8; 64];
         m.write_le_bytes(&mut b);
         b
+    }
+
+    #[test]
+    fn taau_bias_is_log2_of_the_render_over_display_width() {
+        assert_eq!(taau_texture_lod_bias(true, (1920, 1080), (1920, 1080)), 0.0);
+        assert_eq!(taau_texture_lod_bias(false, (960, 540), (1920, 1080)), 0.0);
+        assert!((taau_texture_lod_bias(true, (960, 540), (1920, 1080)) + 1.0).abs() < 1e-6);
+        assert!((taau_texture_lod_bias(true, (1286, 723), (1920, 1080)) + 0.578).abs() < 1e-2);
     }
 
     #[test]

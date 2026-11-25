@@ -35,6 +35,10 @@ fn raa_area_representative(light: LightGpu, position: vec3<f32>) -> vec3<f32> {
 // lights evaluate the diffuse form factor only, without the LTC tables.
 const RAA_AREA_FORM_FACTOR_FEATURE: u32 = 39u;
 
+// VARIANT_FLAG_NO_AREA_LIGHTS (raa-shader lib.rs): the variant's frame has no area light, so
+// the area branch is compiled out. RAA_VARIANT_FLAGS is emitted by the composer before the pass.
+const RAA_VARIANT_NO_AREA_LIGHTS: u32 = 0x10000000u;
+
 // LTC area light (Heitz, Dupuy, Hill, Neubelt, SIGGRAPH 2016): Lambert x (1 - metallic) over
 // the whole rectangle plus GGX specular through the inverse LTC matrix, both horizon
 // clipped by the clipped-sphere form factor. Table use and Hill's Fresnel follow three.js
@@ -159,6 +163,8 @@ fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f3
                 light.direction_cos_outer.w, light.cos_inner);
         }
     } else if light.kind == 3u {
+        // Compile-time constant: variants of area-free frames drop the whole branch.
+        if (RAA_VARIANT_FLAGS & RAA_VARIANT_NO_AREA_LIGHTS) != 0u { return vec3<f32>(0.0); }
         // S11 area, shaded U x W x V: U integrates the whole rectangle (LTC, or the diffuse
         // form factor under feature 39); the S11 representative point only gives the
         // visibility direction and distance and the range window W. No n.l early-out and
