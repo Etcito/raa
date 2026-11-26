@@ -310,6 +310,8 @@ impl WebApp for EngineApp {
         // M6 group preparation: after dirty-group rebuilding and the installed camera,
         // before lit.prepare.
         s.prepare_billboard_groups(0)?;
+        // M7 foliage groups: beside the billboard groups, after the same camera, before lit.
+        s.prepare_foliage_groups(0)?;
         crate::trace::prepare_view(s, 0, input.size)?;
         // Viewport 0 of the invocation; split views select their slot in the callback.
         let discontinuity = s.scene_invocation.prepare(0);

@@ -572,6 +572,9 @@ pub(crate) fn prepare_view(
             st,
             u8::try_from(index).unwrap_or(u8::MAX),
         )?;
+        // M7 foliage groups: beside the billboard groups, under this viewport's camera and
+        // before its lit.prepare.
+        st.prepare_foliage_groups(u8::try_from(index).unwrap_or(u8::MAX))?;
         // Consume the viewport's one-shot discontinuity mark before staging its camera.
         let discontinuity = st.scene_invocation.prepare(index);
         if discontinuity
