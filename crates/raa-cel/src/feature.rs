@@ -245,6 +245,13 @@ impl FeaturePass for CelPass {
         ORDER
     }
 
+    /// Drops the bind groups over the frame targets, which would keep replaced targets alive;
+    /// `resize` rebuilds them.
+    fn release(&mut self, _gpu: &GpuContext) {
+        self.groups.clear();
+        self.bound_group = None;
+    }
+
     /// Rebuilds the bind group of each texture of the HDR chain.
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
         self.bound_group = None;

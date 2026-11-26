@@ -214,6 +214,12 @@ impl FeaturePass for SharpenPass {
         SHARPEN_ORDER
     }
 
+    /// Drops the bind groups over the frame targets, which would keep replaced targets alive;
+    /// `resize` rebuilds them.
+    fn release(&mut self, _gpu: &GpuContext) {
+        self.groups.clear();
+    }
+
     /// Rebuilds the two groups only when the HDR chain's textures differ from the cached pair.
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
         let hdr = targets.hdr();
