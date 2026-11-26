@@ -1409,7 +1409,8 @@ impl LitRenderer {
         let mut lighting_view = None;
         for id in (0..64u32).filter(|&id| self.frame_features & (1u64 << id) != 0) {
             if matches!(id, RAA_DIRECT_ONLY_FEATURE | RAA_INDIRECT_ONLY_FEATURE) {
-                lighting_view = Some(id);
+                // Both set: forward's "shadow" isolation view (see opaque_lighting.wgsl).
+                lighting_view = Some(lighting_view.unwrap_or(0u64) | (1u64 << id));
             } else {
                 params.set_feature(id, true);
             }
@@ -1495,7 +1496,11 @@ impl LitRenderer {
                 })
             });
             let mut preview = self.frame_bytes;
-            params.set_feature(feature, true);
+            for id in [RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE] {
+                if feature & (1u64 << id) != 0 {
+                    params.set_feature(id, true);
+                }
+            }
             write_frame_flags(&mut preview, &params);
             gpu.queue().write_buffer(buffer, 0, &preview);
         } else {
