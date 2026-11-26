@@ -869,7 +869,7 @@ impl LitRenderer {
         gpu: &GpuContext,
         source: FoliageSource,
         settings: FoliageBakeSettings,
-    ) -> impl std::future::Future<Output = Result<FoliageAsset, RaaError>> + 'static {
+    ) -> impl std::future::Future<Output = Result<FoliageAsset, RaaError>> + 'static + use<> {
         let checked = (|| {
             let route = settings.validate()?;
             crate::foliage_bake::validate_source(&source, &settings.params)?;
