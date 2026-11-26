@@ -28,6 +28,12 @@ struct DdgiParams {
     extra: vec4<f32>,
     // relocation: largest offset per axis (fraction of the spacing), rule (0 nearest, 1 RTXGI)
     place: vec4<f32>,
+    // irradiance blend: fast and slow time constants (s), squared change threshold (in standard
+    // deviations of one update), mode (0 per update = `tuning.x`, 1 time constant, 2 adaptive)
+    blend: vec4<f32>,
+    // probes per workgroup, guided ray fraction (0 = uniform rays), converge age (updates),
+    // light cull (1 = rays evaluate the lights of the probe's scan mask)
+    sampling: vec4<f32>,
 }
 
 @group(0) @binding(27) var<storage, read_write> ddgi_probes: array<vec4<u32>>;
@@ -57,21 +63,33 @@ const DDGI_GROUP_ROWS: u32 = 5u;
 const DDGI_SCRATCH_ROWS: u32 = 4u;
 const DDGI_SKY_SAMPLES: u32 = 4096u;
 
-// Per ray, f16: sun rgb, residual rgb, other rg (other b rides in ddgi_direction.w).
+// Per ray of the workgroup (probe p, ray r at p * rays + r), f16: sun rgb, residual rgb, other rg
+// (other b rides in ddgi_direction.w).
 var<workgroup> ddgi_ray: array<vec4<u32>, 256>;
 var<workgroup> ddgi_direction: array<vec4<f32>, 256>;
 var<workgroup> ddgi_distance: array<f32, 256>;
+// Inverse ray density (1 / (4 pi pdf)): 1 for uniform rays.
+var<workgroup> ddgi_ray_weight: array<f32, 256>;
+// Guided rays: f16 luma | octahedral cell << 16.
+var<workgroup> ddgi_ray_tag: array<u32, 256>;
 var<workgroup> ddgi_irr: array<vec3<f32>, 64>;
+var<workgroup> ddgi_guide_out: array<f32, 64>;
 var<workgroup> ddgi_depth_tile: array<vec2<f32>, 256>;
-// slot, run (0 skip, 1 trace; 3 trace and request surface probes), fresh, geometry age
-var<workgroup> ddgi_job: vec4<u32>;
+// Per probe of the workgroup: slot, run (0 skip, 1 trace; 3 trace and request surface probes),
+// fresh, geometry age.
+const DDGI_MAX_PACK: u32 = 8u;
+var<workgroup> ddgi_job: array<vec4<u32>, 8>;
 // Whether this thread's probe may request surface probes: only a probe known to be in free space
 // (updated before, not inside geometry) speaks for the surfaces it sees.
 var<private> ddgi_may_request: bool;
-// sun age, other age, groups, replace the light mask
-var<workgroup> ddgi_job_groups: vec4<u32>;
-var<workgroup> ddgi_origin: vec4<f32>;
-var<workgroup> ddgi_light_bits: array<atomic<u32>, 8>;
+// First light-mask word of this thread's probe in `ddgi_light_bits`.
+var<private> ddgi_light_base: u32;
+// Per probe: sun age, other age, groups, replace the light mask | elapsed-time code << 1.
+var<workgroup> ddgi_job_groups: array<vec4<u32>, 8>;
+var<workgroup> ddgi_origin: array<vec4<f32>, 8>;
+var<workgroup> ddgi_light_bits: array<atomic<u32>, 64>;
+// Guided rays: per probe, the cumulative distribution of the 64 octahedral cells (row-major).
+var<workgroup> ddgi_cdf: array<array<f32, 64>, 8>;
 var<workgroup> ddgi_sky_partial: array<array<vec3<f32>, 9>, 64>;
 
 // Header row 10: first row of the texel groups, of the sky SH (9 rows, rgb f32), of the ray
@@ -141,6 +159,8 @@ struct DdgiDirect {
 struct DdgiTexel {
     direct: DdgiDirect,
     transfer: array<vec2<f32>, 14>,
+    // Adaptive blend: running mean of the squared relative luma change of one update (0 unknown).
+    spread: f32,
 }
 
 fn ddgi_direct_unpack(r0: vec4<u32>, r1x: u32) -> DdgiDirect {
@@ -153,6 +173,7 @@ fn ddgi_texel_load(row: u32) -> DdgiTexel {
     var t: DdgiTexel;
     let r1 = ddgi_probes[row + 1u];
     t.direct = ddgi_direct_unpack(ddgi_probes[row], r1.x);
+    t.spread = unpack2x16float(r1.x).y;
     t.transfer[0] = unpack2x16float(r1.y);
     t.transfer[1] = unpack2x16float(r1.z);
     t.transfer[2] = unpack2x16float(r1.w);
@@ -182,7 +203,7 @@ fn ddgi_direct_pack(d: DdgiDirect) -> vec4<u32> {
 // Stores the direct groups, and the transfer rows too when `transfer` is set.
 fn ddgi_texel_store(row: u32, texel: DdgiTexel, transfer: bool) {
     ddgi_probes[row] = ddgi_direct_pack(texel.direct);
-    let b = ddgi_pack(vec2<f32>(texel.direct.other.z, 0.0));
+    let b = ddgi_pack(vec2<f32>(texel.direct.other.z, texel.spread));
     if !transfer {
         let old = ddgi_probes[row + 1u];
         ddgi_probes[row + 1u] = vec4<u32>(b, old.yzw);
@@ -527,8 +548,26 @@ fn ddgi_luma(c: vec3<f32>) -> f32 {
 // times that light's visibility (unbiased; the probe hysteresis averages the noise). Area panels
 // keep the shared one-tap estimator with its own shadow ray. Every light whose unshadowed
 // contribution is noticeable sets its bit of the probe's light mask.
+// Lights the rays of each workgroup probe evaluate (8 words per probe): every light, or under
+// light cull the probe's stored mask (see `ddgi_job_setup`).
+var<workgroup> ddgi_scan: array<u32, 64>;
+
+// Next light of the scan mask at or after `i` (`count` when none is left).
+fn ddgi_next_light(i: u32, count: u32) -> u32 {
+    var w = i >> 5u;
+    var bits = 0u;
+    if w < 8u { bits = ddgi_scan[ddgi_light_base + w] & (0xffffffffu << (i & 31u)); }
+    loop {
+        if bits != 0u { return min(count, (w << 5u) + firstTrailingBit(bits)); }
+        w++;
+        if w >= 8u || (w << 5u) >= count { return count; }
+        bits = ddgi_scan[ddgi_light_base + w];
+    }
+    return count;
+}
+
 fn ddgi_mark_light(i: u32, luma: f32) {
-    if luma > ddgi_params.extra.w { atomicOr(&ddgi_light_bits[i >> 5u], 1u << (i & 31u)); }
+    if luma > ddgi_params.extra.w { atomicOr(&ddgi_light_bits[ddgi_light_base + (i >> 5u)], 1u << (i & 31u)); }
 }
 
 fn ddgi_local_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: Material,
@@ -537,7 +576,7 @@ fn ddgi_local_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, ma
     let shadow_origin = p + ng * (2.0 * EPS);
     var panels = vec3<f32>(0.0);
     var total = 0.0;
-    for (var i = 0u; i < count; i++) {
+    for (var i = ddgi_next_light(0u, count); i < count; i = ddgi_next_light(i + 1u, count)) {
         let light = lights[i];
         if light.kind == 3u {
             var light_seed = *seed;
@@ -553,7 +592,7 @@ fn ddgi_local_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, ma
     if total <= 0.0 { return panels; }
     let pick = random(seed) * total;
     var running = 0.0;
-    for (var i = 0u; i < count; i++) {
+    for (var i = ddgi_next_light(0u, count); i < count; i = ddgi_next_light(i + 1u, count)) {
         let light = lights[i];
         if light.kind == 3u { continue; }
         let c = ddgi_light_unshadowed(light, p, ng, n, v, mat);
@@ -570,22 +609,36 @@ fn ddgi_local_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, ma
     return panels;
 }
 
-fn ddgi_pack_irr(a: vec3<f32>, b: vec3<f32>) -> vec4<u32> {
+// A composed irradiance tile row holds two texels: rgb f16 each, and in the spare half of each
+// texel's second word the guide of guided rays (mean ray luma seen through that cell).
+fn ddgi_pack_irr(a: vec3<f32>, b: vec3<f32>, ga: f32, gb: f32) -> vec4<u32> {
     let x = clamp(a, vec3<f32>(0.0), vec3<f32>(65504.0));
     let y = clamp(b, vec3<f32>(0.0), vec3<f32>(65504.0));
-    return vec4<u32>(pack2x16float(x.xy), pack2x16float(vec2<f32>(x.z, 0.0)),
-        pack2x16float(y.xy), pack2x16float(vec2<f32>(y.z, 0.0)));
+    return vec4<u32>(pack2x16float(x.xy), pack2x16float(vec2<f32>(x.z, clamp(ga, 0.0, 65504.0))),
+        pack2x16float(y.xy), pack2x16float(vec2<f32>(y.z, clamp(gb, 0.0, 65504.0))));
 }
 
-// Writes the bordered irradiance tile of `slot` from `ddgi_irr`, whole rows per thread.
+// Guide value of interior irradiance cell `c` (row-major 8 x 8) of `slot`.
+fn ddgi_guide_load(v: RaaDdgiVolume, slot: u32, c: u32) -> f32 {
+    let xy = vec2<u32>(c % RAA_DDGI_IRR, c / RAA_DDGI_IRR) + 1u;
+    let t = slot * RAA_DDGI_IRR_TEXELS + xy.y * RAA_DDGI_IRR_TILE + xy.x;
+    let row = ddgi_probes[v.irr_row + t / 2u];
+    let pair = select(row.xy, row.zw, (t & 1u) == 1u);
+    return unpack2x16float(pair.y).y;
+}
+
+// Writes the bordered irradiance tile of `slot` from `ddgi_irr` and `ddgi_guide_out`, whole rows
+// per thread.
 fn ddgi_write_irr_tile(v: RaaDdgiVolume, slot: u32, lid: u32) {
     let irr_first = slot * RAA_DDGI_IRR_TEXELS;
     for (var t = 2u * lid; t < RAA_DDGI_IRR_TEXELS; t += 2u * DDGI_THREADS) {
         let a = ddgi_border_source(vec2<u32>(t % RAA_DDGI_IRR_TILE, t / RAA_DDGI_IRR_TILE), RAA_DDGI_IRR);
         let u = t + 1u;
         let b = ddgi_border_source(vec2<u32>(u % RAA_DDGI_IRR_TILE, u / RAA_DDGI_IRR_TILE), RAA_DDGI_IRR);
+        let ia = a.x + a.y * RAA_DDGI_IRR;
+        let ib = b.x + b.y * RAA_DDGI_IRR;
         ddgi_probes[v.irr_row + (irr_first + t) / 2u] =
-            ddgi_pack_irr(ddgi_irr[a.x + a.y * RAA_DDGI_IRR], ddgi_irr[b.x + b.y * RAA_DDGI_IRR]);
+            ddgi_pack_irr(ddgi_irr[ia], ddgi_irr[ib], ddgi_guide_out[ia], ddgi_guide_out[ib]);
     }
 }
 
@@ -593,194 +646,347 @@ fn ddgi_max3(v: vec3<f32>) -> f32 {
     return max(max(abs(v.x), abs(v.y)), abs(v.z));
 }
 
-// Blend weight of the stored value: a young group averages its first updates progressively
-// (weight 1/(age+1)) before the configured hysteresis takes over; a large change shortens it.
+// Blend weight of the stored value (blend mode 0): a young group averages its first updates
+// progressively (weight 1/(age+1)) before the configured hysteresis takes over; a large change
+// shortens it.
 fn ddgi_hysteresis(age: u32, fresh: bool, change: f32) -> f32 {
     let a = f32(age);
-    var h = select(min(ddgi_params.tuning.x, a / (a + 1.0)), 0.0, fresh);
+    var h = min(ddgi_params.tuning.x, a / (a + 1.0));
+    h = ddgi_young(h, a);
+    h = select(h, 0.0, fresh);
     if change > ddgi_params.tuning.z { h = max(0.0, h - 0.15); }
     return h;
 }
 
-@compute @workgroup_size(64, 1, 1)
-fn ddgi_update(@builtin(local_invocation_index) lid: u32,
-               @builtin(workgroup_id) group: vec3<u32>) {
+// Start of a group under the time-based blends: a running mean of its first updates under the
+// young caps of `ddgi_young`. The early updates of a probe are stale by construction (each
+// bounce generation arrives one update later and the old value of an invalidated group is a
+// prior from before the change): a plain running mean keeps 1/n of them.
+fn ddgi_progressive(h: f32, age: u32, fresh: bool) -> f32 {
+    let a = f32(age);
+    return select(ddgi_young(min(h, a / (a + 1.0)), a), 0.0, fresh);
+}
+
+// Updates of a group's quick phase (the scheduler's QUICK_AGE): an invalidation caps a group's
+// age at 2..12 so its old value is a prior worth that many updates, but that prior is wrong
+// (the light moved) and under a running mean 2/(2+n) of it survives n updates (25% after the
+// quick phase, the room lit through a door that stays a fifth too bright after a sun turn).
+const DDGI_QUICK_AGE: f32 = 8.0;
+
+// Caps the blend weight `h` of a group at age `a`: 0.5 during the quick phase (the prior and
+// the stale bounces of the first updates halve per update: 1.6% left after six), 0.8 until it
+// counts as converged (`sampling.z` updates), so stale early updates decay geometrically.
+fn ddgi_young(h: f32, a: f32) -> f32 {
+    if a < DDGI_QUICK_AGE { return min(h, 0.5); }
+    if a < ddgi_params.sampling.z { return min(h, 0.8); }
+    return h;
+}
+
+// Seconds since the probe's previous update: the job's 7-bit log code (4 ms x 2^(q/8)).
+fn ddgi_elapsed(code: u32) -> f32 {
+    return 0.004 * exp2(f32(code & 127u) / 8.0);
+}
+
+// Unnormalized octahedral point of `uv` in [-1, 1]^2: its length r gives d(solid angle) =
+// d(area) / r^3.
+fn ddgi_oct_point(uv: vec2<f32>) -> vec3<f32> {
+    var n = vec3<f32>(uv, 1.0 - abs(uv.x) - abs(uv.y));
+    if n.z < 0.0 {
+        n = vec3<f32>((1.0 - abs(n.yx)) * raa_ddgi_sign(n.xy), n.z);
+    }
+    return n;
+}
+
+// Solid angle of octahedral cell `c` of the 8 x 8 grid (2 x 2 quadrature of 1 / r^3).
+fn ddgi_cell_solid_angle(c: u32) -> f32 {
+    let base = vec2<f32>(f32(c % 8u), f32(c / 8u));
+    var sum = 0.0;
+    for (var k = 0u; k < 4u; k++) {
+        let uv = (base + vec2<f32>(0.25 + 0.5 * f32(k & 1u), 0.25 + 0.5 * f32(k >> 1u))) / 8.0 * 2.0 - 1.0;
+        let r = length(ddgi_oct_point(uv));
+        sum += 1.0 / (r * r * r);
+    }
+    return sum * 0.25 / 16.0;
+}
+
+fn ddgi_cell_of(direction: vec3<f32>) -> u32 {
+    let uv = raa_ddgi_oct_encode(direction) * 0.5 + 0.5;
+    let xy = vec2<u32>(clamp(floor(uv * 8.0), vec2<f32>(0.0), vec2<f32>(7.0)));
+    return xy.y * 8u + xy.x;
+}
+
+fn ddgi_hash(x: u32) -> u32 {
+    var h = x * 747796405u + 2891336453u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    return (h >> 22u) ^ h;
+}
+
+// Guided ray `r` of `rays` of workgroup probe `p`: a rank-1 lattice in the octahedral square
+// (Cranley-Patterson shifted per update) warped through the probe's cell distribution (marginal
+// rows, then columns: the lattice stays stratified). Returns the direction and the inverse
+// density 1 / (4 pi pdf) the blend weights take.
+fn ddgi_guided_ray(p: u32, r: u32, rays: u32, slot: u32) -> vec4<f32> {
+    let key = ddgi_hash(slot ^ ddgi_hash(ddgi_params.counts.z));
+    let shift = vec2<f32>(f32(key & 0xffffu), f32(key >> 16u)) / 65536.0;
+    let u = fract((f32(r) + 0.5) / f32(rays) + shift.x);
+    let w = fract(f32(r) * 0.6180339887 + shift.y);
+    var y = 0u;
+    for (; y < 7u; y++) {
+        if ddgi_cdf[p][8u * y + 7u] >= u { break; }
+    }
+    let row_start = select(0.0, ddgi_cdf[p][max(8u * y, 1u) - 1u], y > 0u);
+    let row_mass = max(ddgi_cdf[p][8u * y + 7u] - row_start, 1e-12);
+    let goal = row_start + w * row_mass;
+    var x = 0u;
+    for (; x < 7u; x++) {
+        if ddgi_cdf[p][8u * y + x] >= goal { break; }
+    }
+    let c = 8u * y + x;
+    let cell_start = select(0.0, ddgi_cdf[p][max(c, 1u) - 1u], c > 0u);
+    let cell_mass = max(ddgi_cdf[p][c] - cell_start, 1e-12);
+    let f = clamp(vec2<f32>((goal - cell_start) / cell_mass, (u - row_start) / row_mass),
+        vec2<f32>(0.0), vec2<f32>(0.9999));
+    let uv = (vec2<f32>(f32(x), f32(y)) + f) / 8.0 * 2.0 - 1.0;
+    let q = ddgi_oct_point(uv);
+    let len = length(q);
+    let pdf = cell_mass * 16.0 * len * len * len;
+    return vec4<f32>(q / len, 1.0 / (4.0 * PI * max(pdf, 1e-8)));
+}
+
+// Reads job `j` into workgroup probe `p`: whether and how it runs, its origin, groups and ages;
+// and, for guided rays, the probe's cell distribution.
+fn ddgi_job_setup(p: u32, j: u32) {
+    if j >= ddgi_params.counts.y {
+        ddgi_job[p] = vec4<u32>(0u);
+        return;
+    }
+    let job = ddgi_jobs[2u * j];
+    let job_groups = ddgi_jobs[2u * j + 1u];
+    let slot = job & 0xffffu;
     // The cascade (or the surface-probe pool) of the job's slot: its grid, spacing, biases and
-    // distance cap.
-    let v = ddgi_slot_volume(ddgi_jobs[2u * group.x] & 0xffffu);
-    let is_extra = ddgi_is_extra(ddgi_jobs[2u * group.x] & 0xffffu);
-    // A surface probe sits at the centre of its lattice cell plus its offset.
+    // distance cap. A surface probe sits at the centre of its lattice cell plus its offset.
+    let v = ddgi_slot_volume(slot);
+    let is_extra = ddgi_is_extra(slot);
     let cell_centre = select(0.0, 0.5, is_extra);
-    let spacing_scale = v.spacing / max(raa_ddgi_volume().spacing, 1e-6);
-    let rays = min(ddgi_params.counts.x, DDGI_MAX_RAYS);
-    if lid == 0u {
-        let job = ddgi_jobs[2u * group.x];
-        let job_groups = ddgi_jobs[2u * group.x + 1u];
-        let slot = job & 0xffffu;
-        let g = ddgi_slot_coord(v, slot);
-        let row = v.meta_row + RAA_DDGI_META_ROWS * slot;
-        var record = ddgi_probes[row];
-        var offset = bitcast<vec3<f32>>(ddgi_probes[row + 1u].xyz);
-        let fresh = any(bitcast<vec3<i32>>(record.xyz) != g) || (record.w & RAA_DDGI_VALID) == 0u;
+    let g = ddgi_slot_coord(v, slot);
+    let row = v.meta_row + RAA_DDGI_META_ROWS * slot;
+    var record = ddgi_probes[row];
+    var offset = bitcast<vec3<f32>>(ddgi_probes[row + 1u].xyz);
+    let fresh = any(bitcast<vec3<i32>>(record.xyz) != g) || (record.w & RAA_DDGI_VALID) == 0u;
+    if fresh {
+        record = vec4<u32>(bitcast<vec3<u32>>(g), 0u);
+        offset = vec3<f32>(0.0);
+    }
+    let turn = (record.w >> 8u) & 0xffu;
+    var run = 1u;
+    if is_extra {
+        let assigned = ddgi_extra_row(slot).w;
+        // A slot the table no longer assigns is not traced.
+        if (assigned & 1u) == 0u { run = 0u; }
         if fresh {
-            record = vec4<u32>(bitcast<vec3<u32>>(g), 0u);
-            offset = vec3<f32>(0.0);
+            // Starts at the requested point of its cell.
+            let f = vec3<f32>(vec3<u32>(assigned >> 1u, assigned >> 11u, assigned >> 21u) & vec3<u32>(1023u));
+            offset = (f / 1024.0 - 0.5) * v.spacing;
+            ddgi_probes[row + 1u] = vec4<u32>(bitcast<vec3<u32>>(offset), 0u);
         }
-        let turn = (record.w >> 8u) & 0xffu;
-        var run = 1u;
-        if is_extra {
-            let assigned = ddgi_extra_row(slot).w;
-            // A slot the table no longer assigns is not traced.
-            if (assigned & 1u) == 0u { run = 0u; }
-            if fresh {
-                // Starts at the requested point of its cell.
-                let f = vec3<f32>(vec3<u32>(assigned >> 1u, assigned >> 11u, assigned >> 21u) & vec3<u32>(1023u));
-                offset = (f / 1024.0 - 0.5) * v.spacing;
-                ddgi_probes[row + 1u] = vec4<u32>(bitcast<vec3<u32>>(offset), 0u);
+    }
+    // An inactive probe is traced one update in 8, except while its geometry group is young (a
+    // geometry edit restarted it: its classification must be redone now).
+    if !fresh && (record.w & RAA_DDGI_INACTIVE) != 0u && (turn & 7u) != 0u && (job >> 16u) >= 8u {
+        run = 0u;
+        ddgi_probes[row] = vec4<u32>(record.xyz, (record.w & 0xffu) | (((turn + 1u) & 0xffu) << 8u));
+    }
+    if run == 1u && !fresh && (record.w & (RAA_DDGI_VALID | RAA_DDGI_INSIDE)) == RAA_DDGI_VALID {
+        run = 3u;
+    }
+    ddgi_job[p] = vec4<u32>(slot, run, u32(fresh), job >> 16u);
+    // A fresh probe has no group to keep.
+    ddgi_job_groups[p] = vec4<u32>(job_groups & 0xffu, (job_groups >> 8u) & 0xffu,
+        select((job_groups >> 16u) & 7u, 7u, fresh),
+        select((job_groups >> 24u) & 1u, 1u, fresh) | ((job_groups >> 25u) << 1u));
+    // Light cull: the stored mask, except on the first 8 updates after a mask reset and on one
+    // update in 8 (lights that became noticeable where the rays have not looked yet).
+    let age_other = (job_groups >> 8u) & 0xffu;
+    let scan_all = ddgi_params.sampling.w == 0.0 || fresh || ((job_groups >> 24u) & 1u) != 0u
+        || age_other < 8u || (turn & 7u) == 0u;
+    let mask_lo = ddgi_probes[row + 2u];
+    let mask_hi = ddgi_probes[row + 3u];
+    for (var w = 0u; w < 4u; w++) {
+        ddgi_scan[8u * p + w] = select(mask_lo[w], 0xffffffffu, scan_all);
+        ddgi_scan[8u * p + 4u + w] = select(mask_hi[w], 0xffffffffu, scan_all);
+    }
+    // Guided rays need the probe's guide: a fresh probe traces uniform rays.
+    let m = ddgi_params.sampling.y;
+    var guided = 0.0;
+    if m > 0.0 && !fresh && run != 0u {
+        var omega_total = 0.0;
+        var guide_total = 0.0;
+        for (var c = 0u; c < 64u; c++) {
+            let omega = ddgi_cell_solid_angle(c);
+            omega_total += omega;
+            guide_total += omega * ddgi_guide_load(v, slot, c);
+        }
+        if guide_total > 1e-8 {
+            guided = 1.0;
+            var running = 0.0;
+            for (var c = 0u; c < 64u; c++) {
+                let omega = ddgi_cell_solid_angle(c);
+                running += (1.0 - m) * omega / omega_total + m * omega * ddgi_guide_load(v, slot, c) / guide_total;
+                ddgi_cdf[p][c] = running;
+            }
+            ddgi_cdf[p][63] = 1.0;
+        }
+    }
+    ddgi_origin[p] = vec4<f32>((vec3<f32>(g) + cell_centre) * v.spacing + offset, guided);
+}
+
+// Relocation, classification and light mask of workgroup probe `p` (one thread).
+fn ddgi_probe_record(p: u32, rays: u32) {
+    let job = ddgi_job[p];
+    let ages = ddgi_job_groups[p];
+    let slot = job.x;
+    let fresh = job.z != 0u;
+    let groups = ages.z;
+    let v = ddgi_slot_volume(slot);
+    let is_extra = ddgi_is_extra(slot);
+    let spacing_scale = v.spacing / max(raa_ddgi_volume().spacing, 1e-6);
+    let row = v.meta_row + RAA_DDGI_META_ROWS * slot;
+    let first = p * rays;
+    if (groups & DDGI_GEOMETRY) != 0u {
+        let g = ddgi_slot_coord(v, slot);
+        // (A fresh surface probe already stored its start offset.)
+        var offset = select(bitcast<vec3<f32>>(ddgi_probes[row + 1u].xyz), vec3<f32>(0.0),
+            fresh && !is_extra);
+        var far_distance = 0.0;
+        var far_dir = vec3<f32>(0.0);
+        var backfaces = 0.0;
+        var all_rays = 0.0;
+        var back_distance = DDGI_MISS;
+        var back_dir = vec3<f32>(0.0);
+        var front_distance = DDGI_MISS;
+        var front_dir = vec3<f32>(0.0);
+        var near_surface = false;
+        for (var r = first; r < first + rays; r++) {
+            let d = ddgi_distance[r];
+            let dir = ddgi_direction[r].xyz;
+            // Guided rays count with their inverse density.
+            let weight = ddgi_ray_weight[r];
+            all_rays += weight;
+            if d < 0.0 {
+                backfaces += weight;
+                if -5.0 * d < back_distance { back_distance = -5.0 * d; back_dir = dir; }
+            } else if d < DDGI_MISS {
+                if d < front_distance { front_distance = d; front_dir = dir; }
+                if d > far_distance { far_distance = d; far_dir = dir; }
+                let reach = abs(dir * d);
+                if all(reach <= vec3<f32>(v.spacing)) { near_surface = true; }
             }
         }
-        if !fresh && (record.w & RAA_DDGI_INACTIVE) != 0u && (turn & 7u) != 0u {
-            run = 0u;
-            ddgi_probes[row] = vec4<u32>(record.xyz, (record.w & 0xffu) | (((turn + 1u) & 0xffu) << 8u));
+        let backface_fraction = backfaces / max(all_rays, 1e-6);
+        let inside = backface_fraction > ddgi_params.extra.y;
+        let flags = ddgi_params.counts.w;
+        if (flags & DDGI_RELOCATE) != 0u {
+            let min_front = ddgi_params.tuning.w * spacing_scale;
+            var candidate = offset;
+            let rtxgi = ddgi_params.place.y > 0.5;
+            if inside {
+                candidate = offset + back_dir * (back_distance + 0.5 * min_front);
+            } else if front_distance < min_front {
+                if !rtxgi {
+                    candidate = offset - front_dir * (min_front - front_distance);
+                } else if dot(front_dir, far_dir) <= 0.0 {
+                    // RTXGI: toward the farthest front face, unless that way lies the closest.
+                    candidate = offset + far_dir * min(far_distance, min_front);
+                }
+            } else if rtxgi {
+                // RTXGI: nothing close, back toward the grid position.
+                let margin = front_distance - min_front;
+                let back = length(offset);
+                if margin >= back {
+                    candidate = vec3<f32>(0.0);
+                } else if back > 0.0 {
+                    candidate = offset - offset / back * margin;
+                }
+            }
+            if all(abs(candidate) <= vec3<f32>(ddgi_params.place.x * v.spacing)) { offset = candidate; }
         }
-        if run == 1u && !fresh && (record.w & (RAA_DDGI_VALID | RAA_DDGI_INSIDE)) == RAA_DDGI_VALID {
-            run = 3u;
+        var state = RAA_DDGI_VALID;
+        if (flags & DDGI_CLASSIFY) != 0u {
+            if inside { state |= RAA_DDGI_INSIDE | RAA_DDGI_INACTIVE; }
+            if !near_surface { state |= RAA_DDGI_INACTIVE; }
         }
-        ddgi_job = vec4<u32>(slot, run, u32(fresh), job >> 16u);
-        // A fresh probe has no group to keep.
-        ddgi_job_groups = vec4<u32>(job_groups & 0xffu, (job_groups >> 8u) & 0xffu,
-            select((job_groups >> 16u) & 7u, 7u, fresh), select((job_groups >> 24u) & 1u, 1u, fresh));
-        ddgi_origin = vec4<f32>((vec3<f32>(g) + cell_centre) * v.spacing + offset, 0.0);
+        let record = ddgi_probes[row];
+        let turn = select(((record.w >> 8u) + 1u) & 0xffu, 1u, fresh);
+        ddgi_probes[row] = vec4<u32>(bitcast<vec3<u32>>(g), state | (turn << 8u));
+        // Diagnostics of this update: back-face fraction, nearest front face (m).
+        ddgi_probes[row + 1u] = vec4<u32>(bitcast<vec3<u32>>(offset),
+            pack2x16float(vec2<f32>(backface_fraction, min(front_distance, 60000.0))));
     }
-    let job = workgroupUniformLoad(&ddgi_job);
-    let ages = workgroupUniformLoad(&ddgi_job_groups);
-    if job.y == 0u { return; }
-    ddgi_may_request = job.y == 3u;
-    let origin = workgroupUniformLoad(&ddgi_origin).xyz;
+    if (groups & DDGI_OTHER) != 0u {
+        let b = 8u * p;
+        var lo = vec4<u32>(atomicLoad(&ddgi_light_bits[b]), atomicLoad(&ddgi_light_bits[b + 1u]),
+            atomicLoad(&ddgi_light_bits[b + 2u]), atomicLoad(&ddgi_light_bits[b + 3u]));
+        var hi = vec4<u32>(atomicLoad(&ddgi_light_bits[b + 4u]), atomicLoad(&ddgi_light_bits[b + 5u]),
+            atomicLoad(&ddgi_light_bits[b + 6u]), atomicLoad(&ddgi_light_bits[b + 7u]));
+        if (ages.w & 1u) == 0u {
+            lo |= ddgi_probes[row + 2u];
+            hi |= ddgi_probes[row + 3u];
+        }
+        ddgi_probes[row + 2u] = lo;
+        ddgi_probes[row + 3u] = hi;
+    }
+}
+
+// Per probe of the update: the irradiance texel `lid` gathers its rays into the update's raw
+// groups (`raw`, the refreshed groups replaced) next to the stored ones (`hist`); the composed
+// lumas of both go to `ddgi_luma_pair` so the probe's whole change can be tested against its
+// noise (see `ddgi_probe_finish`).
+struct DdgiGathered {
+    hist: DdgiTexel,
+    raw: DdgiTexel,
+    total: f32,
+    guide: f32,
+    // The probe's change noise and drift as stored (texels 0 and 1), read before any texel of
+    // the probe is written.
+    spread: f32,
+    drift: f32,
+}
+
+var<workgroup> ddgi_luma_pair: array<vec2<f32>, 64>;
+
+fn ddgi_probe_gather(p: u32, lid: u32, rays: u32, scratch_first: u32) -> DdgiGathered {
+    let job = ddgi_job[p];
+    let ages = ddgi_job_groups[p];
     let slot = job.x;
     let fresh = job.z != 0u;
     let groups = ages.z;
     let geometry = (groups & DDGI_GEOMETRY) != 0u;
-    let scratch = ddgi_scratch_row() + group.x * rays * DDGI_SCRATCH_ROWS;
-
-    // 1. Trace.
-    let limit = ddgi_params.tuning.y;
-    for (var r = lid; r < rays; r += DDGI_THREADS) {
-        let direction = ddgi_ray_direction(r, rays);
-        var seed = (slot * 747796405u + r * 277803737u + ddgi_params.counts.z * 2891336453u) ^ 0x85ebca6bu;
-        let shaded = ddgi_shade(origin, direction, limit, groups, &seed);
-        let d = shaded.texel.direct;
-        ddgi_ray[r] = ddgi_direct_pack(d);
-        ddgi_direction[r] = vec4<f32>(direction, clamp(d.other.z, -65504.0, 65504.0));
-        ddgi_distance[r] = shaded.distance;
-        // Bounced transfer of a hit: 14 pairs, then a flag in the last pair of the 4 scratch rows.
-        if geometry {
-            let at = scratch + r * DDGI_SCRATCH_ROWS;
-            let t = shaded.texel.transfer;
-            ddgi_probes[at] = vec4<u32>(ddgi_pack(t[0]), ddgi_pack(t[1]), ddgi_pack(t[2]), ddgi_pack(t[3]));
-            ddgi_probes[at + 1u] = vec4<u32>(ddgi_pack(t[4]), ddgi_pack(t[5]), ddgi_pack(t[6]), ddgi_pack(t[7]));
-            ddgi_probes[at + 2u] = vec4<u32>(ddgi_pack(t[8]), ddgi_pack(t[9]), ddgi_pack(t[10]), ddgi_pack(t[11]));
-            ddgi_probes[at + 3u] = vec4<u32>(ddgi_pack(t[12]), ddgi_pack(t[13]), 0u, u32(shaded.bounced));
-        }
-    }
-    workgroupBarrier();
-    storageBarrier();
-
-    // 2. Relocation and classification of this probe, and its light mask (one thread).
-    if lid == 0u {
-        let row = v.meta_row + RAA_DDGI_META_ROWS * slot;
-        if geometry {
-            let g = ddgi_slot_coord(v, slot);
-            // (A fresh surface probe already stored its start offset.)
-            var offset = select(bitcast<vec3<f32>>(ddgi_probes[row + 1u].xyz), vec3<f32>(0.0),
-                fresh && !is_extra);
-            var far_distance = 0.0;
-            var far_dir = vec3<f32>(0.0);
-            var backfaces = 0u;
-            var back_distance = DDGI_MISS;
-            var back_dir = vec3<f32>(0.0);
-            var front_distance = DDGI_MISS;
-            var front_dir = vec3<f32>(0.0);
-            var near_surface = false;
-            for (var r = 0u; r < rays; r++) {
-                let d = ddgi_distance[r];
-                let dir = ddgi_direction[r].xyz;
-                if d < 0.0 {
-                    backfaces++;
-                    if -5.0 * d < back_distance { back_distance = -5.0 * d; back_dir = dir; }
-                } else if d < DDGI_MISS {
-                    if d < front_distance { front_distance = d; front_dir = dir; }
-                    if d > far_distance { far_distance = d; far_dir = dir; }
-                    let reach = abs(dir * d);
-                    if all(reach <= vec3<f32>(v.spacing)) { near_surface = true; }
-                }
-            }
-            let backface_fraction = f32(backfaces) / f32(max(rays, 1u));
-            let inside = backface_fraction > ddgi_params.extra.y;
-            let flags = ddgi_params.counts.w;
-            if (flags & DDGI_RELOCATE) != 0u {
-                let min_front = ddgi_params.tuning.w * spacing_scale;
-                var candidate = offset;
-                let rtxgi = ddgi_params.place.y > 0.5;
-                if inside {
-                    candidate = offset + back_dir * (back_distance + 0.5 * min_front);
-                } else if front_distance < min_front {
-                    if !rtxgi {
-                        candidate = offset - front_dir * (min_front - front_distance);
-                    } else if dot(front_dir, far_dir) <= 0.0 {
-                        // RTXGI: toward the farthest front face, unless that way lies the closest.
-                        candidate = offset + far_dir * min(far_distance, min_front);
-                    }
-                } else if rtxgi {
-                    // RTXGI: nothing close, back toward the grid position.
-                    let margin = front_distance - min_front;
-                    let back = length(offset);
-                    if margin >= back {
-                        candidate = vec3<f32>(0.0);
-                    } else if back > 0.0 {
-                        candidate = offset - offset / back * margin;
-                    }
-                }
-                if all(abs(candidate) <= vec3<f32>(ddgi_params.place.x * v.spacing)) { offset = candidate; }
-            }
-            var state = RAA_DDGI_VALID;
-            if (flags & DDGI_CLASSIFY) != 0u {
-                if inside { state |= RAA_DDGI_INSIDE | RAA_DDGI_INACTIVE; }
-                if !near_surface { state |= RAA_DDGI_INACTIVE; }
-            }
-            let record = ddgi_probes[row];
-            let turn = select(((record.w >> 8u) + 1u) & 0xffu, 1u, fresh);
-            ddgi_probes[row] = vec4<u32>(bitcast<vec3<u32>>(g), state | (turn << 8u));
-            // Diagnostics of this update: back-face fraction, nearest front face (m).
-            ddgi_probes[row + 1u] = vec4<u32>(bitcast<vec3<u32>>(offset),
-                pack2x16float(vec2<f32>(backface_fraction, min(front_distance, 60000.0))));
-        }
-        if (groups & DDGI_OTHER) != 0u {
-            var lo = vec4<u32>(atomicLoad(&ddgi_light_bits[0]), atomicLoad(&ddgi_light_bits[1]),
-                atomicLoad(&ddgi_light_bits[2]), atomicLoad(&ddgi_light_bits[3]));
-            var hi = vec4<u32>(atomicLoad(&ddgi_light_bits[4]), atomicLoad(&ddgi_light_bits[5]),
-                atomicLoad(&ddgi_light_bits[6]), atomicLoad(&ddgi_light_bits[7]));
-            if ages.w == 0u {
-                lo |= ddgi_probes[row + 2u];
-                hi |= ddgi_probes[row + 3u];
-            }
-            ddgi_probes[row + 2u] = lo;
-            ddgi_probes[row + 3u] = hi;
-        }
-    }
-
-    // 3. Blend the groups of one irradiance texel per thread, and four depth moments.
+    let v = ddgi_slot_volume(slot);
+    let first = p * rays;
+    let scratch = scratch_first;
+    let guiding = ddgi_params.sampling.y > 0.0;
+    var out: DdgiGathered;
     {
         let xy = vec2<u32>(lid % RAA_DDGI_IRR, lid / RAA_DDGI_IRR);
         let dir = raa_ddgi_oct_decode((vec2<f32>(xy) + 0.5) / f32(RAA_DDGI_IRR) * 2.0 - 1.0);
         var sum: DdgiTexel;
         var escaped: array<f32, 9>;
         var total = 0.0;
-        for (var r = 0u; r < rays; r++) {
+        var guide_sum = 0.0;
+        var guide_count = 0.0;
+        for (var i = 0u; i < rays; i++) {
+            let r = first + i;
+            if guiding {
+                let tag = ddgi_ray_tag[r];
+                if (tag >> 16u) == lid {
+                    guide_sum += unpack2x16float(tag & 0xffffu).x;
+                    guide_count += 1.0;
+                }
+            }
             let distance = ddgi_distance[r];
             if distance < 0.0 { continue; }
             let ray_dir = ddgi_direction[r];
-            let w = dot(dir, ray_dir.xyz);
+            let w = dot(dir, ray_dir.xyz) * ddgi_ray_weight[r];
             if w <= 0.0 { continue; }
             let shaded = ddgi_ray[r];
             let a = unpack2x16float(shaded.y);
@@ -795,7 +1001,7 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
                 for (var k = 0u; k < 9u; k++) { escaped[k] += w * y[k]; }
                 continue;
             }
-            let at = scratch + r * DDGI_SCRATCH_ROWS;
+            let at = scratch + i * DDGI_SCRATCH_ROWS;
             let r3 = ddgi_probes[at + 3u];
             if r3.w == 0u { continue; }
             let r0 = ddgi_probes[at];
@@ -819,33 +1025,127 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
         let row = ddgi_group_row() + (slot * RAA_DDGI_IRR * RAA_DDGI_IRR + lid) * DDGI_GROUP_ROWS;
         var texel = ddgi_texel_load(row);
         if fresh { texel = DdgiTexel(); }
+        out.hist = texel;
+        out.raw = texel;
+        out.total = total;
         if total > 1e-4 {
             let inv = 1.0 / total;
             if (groups & DDGI_SUN) != 0u {
-                let sun = sum.direct.sun * inv;
-                let residual = sum.direct.residual * inv;
-                let change = max(ddgi_max3((sun - texel.direct.sun) * frame.sun_color.rgb),
-                    ddgi_params.extra.x * ddgi_sky_norm() * ddgi_max3(residual - texel.direct.residual));
-                let h = ddgi_hysteresis(ages.x, fresh, change);
-                texel.direct.sun = mix(sun, texel.direct.sun, h);
-                texel.direct.residual = mix(residual, texel.direct.residual, h);
+                out.raw.direct.sun = sum.direct.sun * inv;
+                out.raw.direct.residual = sum.direct.residual * inv;
             }
-            if (groups & DDGI_OTHER) != 0u {
-                let other = sum.direct.other * inv;
-                let h = ddgi_hysteresis(ages.y, fresh, ddgi_max3(other - texel.direct.other));
-                texel.direct.other = mix(other, texel.direct.other, h);
-            }
+            if (groups & DDGI_OTHER) != 0u { out.raw.direct.other = sum.direct.other * inv; }
             if geometry {
                 for (var e = 0u; e < 27u; e++) { sum.transfer[e >> 1u][e & 1u] += escaped[e / 3u]; }
-                let h = ddgi_hysteresis(job.w, fresh, 0.0);
-                for (var j = 0u; j < 14u; j++) {
-                    texel.transfer[j] = mix(sum.transfer[j] * inv, texel.transfer[j], h);
-                }
+                for (var j = 0u; j < 14u; j++) { out.raw.transfer[j] = sum.transfer[j] * inv; }
             }
         }
-        if fresh || total > 1e-4 { ddgi_texel_store(row, texel, geometry); }
-        ddgi_irr[lid] = ddgi_compose(texel);
+        let lh = ddgi_luma(ddgi_compose(out.hist));
+        ddgi_luma_pair[lid] = vec2<f32>(select(lh, ddgi_luma(ddgi_compose(out.raw)), total > 1e-4), lh);
+        var guide = 0.0;
+        if guiding {
+            guide = select(ddgi_guide_load(v, slot, lid), 0.0, fresh);
+            if guide_count > 0.0 {
+                let mean = guide_sum / guide_count;
+                guide = select(mix(mean, guide, 0.75), mean, guide <= 0.0);
+            }
+        }
+        out.guide = guide;
+        let base = ddgi_group_row() + slot * RAA_DDGI_IRR * RAA_DDGI_IRR * DDGI_GROUP_ROWS;
+        out.spread = select(unpack2x16float(ddgi_probes[base + 1u].x).y, 0.0, fresh);
+        out.drift = select(unpack2x16float(ddgi_probes[base + DDGI_GROUP_ROWS + 1u].x).y, 0.0, fresh);
     }
+    return out;
+}
+
+// Blends irradiance texel `lid` of workgroup probe `p` from its gathered update (into `ddgi_irr`,
+// `ddgi_guide_out`) and four depth moments (`ddgi_depth_tile`). Time-based blends: the weight of
+// the stored value follows the probe's real time since its previous update. Adaptive: the slow
+// time constant while the probe's change (its summed composed luma, relative) agrees with its own
+// update-to-update noise (running mean of the squared change, kept in texel 0's spare half) and
+// with no drift (running mean of the signed change, texel 1's spare half); toward the fast one as
+// either exceeds `blend.z` (squared sigmas) times its noise level. A texel alone must exceed four
+// times that (twice the sigmas).
+fn ddgi_probe_finish(p: u32, lid: u32, rays: u32, g: DdgiGathered) {
+    let job = ddgi_job[p];
+    let ages = ddgi_job_groups[p];
+    let slot = job.x;
+    let fresh = job.z != 0u;
+    let groups = ages.z;
+    let geometry = (groups & DDGI_GEOMETRY) != 0u;
+    let v = ddgi_slot_volume(slot);
+    let first = p * rays;
+    let row = ddgi_group_row() + (slot * RAA_DDGI_IRR * RAA_DDGI_IRR + lid) * DDGI_GROUP_ROWS;
+    var texel = g.hist;
+    let raw = g.raw;
+    let mode = u32(ddgi_params.blend.w);
+    if g.total > 1e-4 {
+        if mode == 0u {
+            if (groups & DDGI_SUN) != 0u {
+                let change = max(ddgi_max3((raw.direct.sun - texel.direct.sun) * frame.sun_color.rgb),
+                    ddgi_params.extra.x * ddgi_sky_norm() * ddgi_max3(raw.direct.residual - texel.direct.residual));
+                let h = ddgi_hysteresis(ages.x, fresh, change);
+                texel.direct.sun = mix(raw.direct.sun, texel.direct.sun, h);
+                texel.direct.residual = mix(raw.direct.residual, texel.direct.residual, h);
+            }
+            if (groups & DDGI_OTHER) != 0u {
+                let h = ddgi_hysteresis(ages.y, fresh, ddgi_max3(raw.direct.other - texel.direct.other));
+                texel.direct.other = mix(raw.direct.other, texel.direct.other, h);
+            }
+            if geometry {
+                let h = ddgi_hysteresis(job.w, fresh, 0.0);
+                for (var j = 0u; j < 14u; j++) { texel.transfer[j] = mix(raw.transfer[j], texel.transfer[j], h); }
+            }
+        } else {
+            var ls = 0.0;
+            var lh = 0.0;
+            for (var t = 0u; t < 64u; t++) {
+                ls += ddgi_luma_pair[t].x;
+                lh += ddgi_luma_pair[t].y;
+            }
+            let d = (ls - lh) / max(max(ls, lh), 1e-4);
+            let pair = ddgi_luma_pair[lid];
+            let dt_texel = (pair.x - pair.y) / max(max(pair.x, pair.y), 1e-4);
+            var spread = g.spread;
+            var drift = g.drift;
+            let dt = ddgi_elapsed(ages.w >> 1u);
+            let slow = exp(-dt / max(ddgi_params.blend.y, 1e-4));
+            let fast = exp(-dt / max(ddgi_params.blend.x, 1e-4));
+            var h = slow;
+            let k2 = ddgi_params.blend.z;
+            if mode == 2u && spread > 0.0 {
+                // EMA(0.3) of the signed change: variance 0.3 / 1.7 of one update's.
+                let drift_next = mix(drift, d, 0.3);
+                let ratio = max(max(d * d / (k2 * spread), drift_next * drift_next / (k2 * 0.18 * spread)),
+                    dt_texel * dt_texel / (4.0 * k2 * spread));
+                if ratio > 1.0 { h = fast + (slow - fast) / ratio; }
+            }
+            if !fresh {
+                if spread <= 0.0 {
+                    spread = max(d * d, 1e-6);
+                } else {
+                    spread = mix(min(d * d, 9.0 * spread), spread, 0.85);
+                }
+                drift = mix(drift, d, 0.3);
+            }
+            if (groups & DDGI_SUN) != 0u {
+                let hs = ddgi_progressive(h, ages.x, fresh);
+                texel.direct.sun = mix(raw.direct.sun, texel.direct.sun, hs);
+                texel.direct.residual = mix(raw.direct.residual, texel.direct.residual, hs);
+            }
+            if (groups & DDGI_OTHER) != 0u {
+                texel.direct.other = mix(raw.direct.other, texel.direct.other, ddgi_progressive(h, ages.y, fresh));
+            }
+            if geometry {
+                let hg = ddgi_progressive(h, job.w, fresh);
+                for (var j = 0u; j < 14u; j++) { texel.transfer[j] = mix(raw.transfer[j], texel.transfer[j], hg); }
+            }
+            texel.spread = clamp(select(spread, drift, lid == 1u), -60000.0, 60000.0);
+        }
+    }
+    if fresh || g.total > 1e-4 { ddgi_texel_store(row, texel, geometry); }
+    ddgi_irr[lid] = ddgi_compose(texel);
+    ddgi_guide_out[lid] = g.guide;
     if geometry {
         let hysteresis = ddgi_hysteresis(job.w, fresh, 0.0);
         let max_depth = v.max_depth;
@@ -855,10 +1155,10 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
             let texel = raa_ddgi_oct_decode((vec2<f32>(xy) + 0.5) / f32(RAA_DDGI_DEPTH) * 2.0 - 1.0);
             var sum = vec2<f32>(0.0);
             var total = 0.0;
-            for (var r = 0u; r < rays; r++) {
+            for (var r = first; r < first + rays; r++) {
                 let c = max(0.0, dot(texel, ddgi_direction[r].xyz));
                 if c <= 0.0 { continue; }
-                let w = pow(c, 50.0);
+                let w = pow(c, 50.0) * ddgi_ray_weight[r];
                 let d = min(abs(ddgi_distance[r]), max_depth);
                 sum += w * vec2<f32>(d, d * d);
                 total += w;
@@ -871,11 +1171,14 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
             ddgi_depth_tile[index] = result;
         }
     }
-    workgroupBarrier();
+}
 
-    // 4. Write both bordered tiles, whole rows per thread (two irradiance or four depth texels).
+// Writes both bordered tiles of workgroup probe `p`, whole rows per thread.
+fn ddgi_probe_write(p: u32, lid: u32) {
+    let slot = ddgi_job[p].x;
+    let v = ddgi_slot_volume(slot);
     ddgi_write_irr_tile(v, slot, lid);
-    if geometry {
+    if (ddgi_job_groups[p].z & DDGI_GEOMETRY) != 0u {
         let depth_first = slot * RAA_DDGI_DEPTH_TEXELS;
         for (var t = 4u * lid; t < RAA_DDGI_DEPTH_TEXELS; t += 4u * DDGI_THREADS) {
             var words = vec4<u32>(0u);
@@ -889,8 +1192,90 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
     }
 }
 
+// Probe update. A 64-thread workgroup takes `sampling.x` probes (64 / rays for fewer than 64 rays,
+// so every thread traces) and traces their rays together, then relocates and classifies each
+// (one thread per probe) and blends their tiles one probe after another (one irradiance texel and
+// four depth moments per thread).
+@compute @workgroup_size(64, 1, 1)
+fn ddgi_update(@builtin(local_invocation_index) lid: u32,
+               @builtin(workgroup_id) group: vec3<u32>) {
+    let rays = min(ddgi_params.counts.x, DDGI_MAX_RAYS);
+    let probes_here = clamp(u32(ddgi_params.sampling.x), 1u, min(DDGI_MAX_PACK, DDGI_MAX_RAYS / rays));
+    if lid < probes_here { ddgi_job_setup(lid, group.x * probes_here + lid); }
+    workgroupBarrier();
+
+    // 1. Trace.
+    let limit = ddgi_params.tuning.y;
+    let guiding = ddgi_params.sampling.y > 0.0;
+    for (var i = lid; i < probes_here * rays; i += DDGI_THREADS) {
+        let p = i / rays;
+        let r = i % rays;
+        let job = ddgi_job[p];
+        if job.y == 0u { continue; }
+        ddgi_may_request = job.y == 3u;
+        ddgi_light_base = 8u * p;
+        let slot = job.x;
+        let groups = ddgi_job_groups[p].z;
+        let origin = ddgi_origin[p];
+        var direction = ddgi_ray_direction(r, rays);
+        var weight = 1.0;
+        if origin.w > 0.5 {
+            let guided = ddgi_guided_ray(p, r, rays, slot);
+            direction = guided.xyz;
+            weight = guided.w;
+        }
+        var seed = (slot * 747796405u + r * 277803737u + ddgi_params.counts.z * 2891336453u) ^ 0x85ebca6bu;
+        let shaded = ddgi_shade(origin.xyz, direction, limit, groups, &seed);
+        let d = shaded.texel.direct;
+        ddgi_ray[i] = ddgi_direct_pack(d);
+        ddgi_direction[i] = vec4<f32>(direction, clamp(d.other.z, -65504.0, 65504.0));
+        ddgi_distance[i] = shaded.distance;
+        ddgi_ray_weight[i] = weight;
+        if guiding {
+            // Luma of what the ray brought, for the guide of its cell (sky transfer of escaped
+            // rays by the frame's sky itself).
+            var luma = ddgi_luma(d.sun * max(frame.sun_color.rgb, vec3<f32>(0.0)) + d.other
+                + ddgi_params.extra.x * ddgi_sky_norm() * d.residual);
+            if shaded.distance >= DDGI_MISS {
+                luma = select(ddgi_params.extra.x * ddgi_luma(ddgi_sky(direction)), 0.0, ddgi_in_sun_cone(direction));
+            }
+            ddgi_ray_tag[i] = (pack2x16float(vec2<f32>(clamp(luma, 0.0, 65504.0), 0.0)) & 0xffffu)
+                | (ddgi_cell_of(direction) << 16u);
+        }
+        // Bounced transfer of a hit: 14 pairs, then a flag in the last pair of the 4 scratch rows.
+        if (groups & DDGI_GEOMETRY) != 0u {
+            let at = ddgi_scratch_row() + ((group.x * probes_here + p) * rays + r) * DDGI_SCRATCH_ROWS;
+            let t = shaded.texel.transfer;
+            ddgi_probes[at] = vec4<u32>(ddgi_pack(t[0]), ddgi_pack(t[1]), ddgi_pack(t[2]), ddgi_pack(t[3]));
+            ddgi_probes[at + 1u] = vec4<u32>(ddgi_pack(t[4]), ddgi_pack(t[5]), ddgi_pack(t[6]), ddgi_pack(t[7]));
+            ddgi_probes[at + 2u] = vec4<u32>(ddgi_pack(t[8]), ddgi_pack(t[9]), ddgi_pack(t[10]), ddgi_pack(t[11]));
+            ddgi_probes[at + 3u] = vec4<u32>(ddgi_pack(t[12]), ddgi_pack(t[13]), 0u, u32(shaded.bounced));
+        }
+    }
+    workgroupBarrier();
+    storageBarrier();
+
+    // 2. Relocation and classification of each probe, and its light mask (one thread each).
+    if lid < probes_here && ddgi_job[lid].y != 0u { ddgi_probe_record(lid, rays); }
+
+    // 3-4. Blend, then write the tiles, one probe after another.
+    for (var p = 0u; p < probes_here; p++) {
+        let live = ddgi_job[p].y != 0u;
+        var gathered: DdgiGathered;
+        if live {
+            gathered = ddgi_probe_gather(p, lid, rays, ddgi_scratch_row() + (group.x * probes_here + p) * rays * DDGI_SCRATCH_ROWS);
+        }
+        workgroupBarrier();
+        if live { ddgi_probe_finish(p, lid, rays, gathered); }
+        workgroupBarrier();
+        if live { ddgi_probe_write(p, lid); }
+        workgroupBarrier();
+    }
+}
+
 // Relight: one workgroup rebuilds the composed irradiance tile of one slot from its stored
-// groups under the frame's sun colour, sky SH and sky scale. No ray is traced.
+// groups under the frame's sun colour, sky SH and sky scale (keeping its ray guide). No ray is
+// traced.
 @compute @workgroup_size(64, 1, 1)
 fn ddgi_relight(@builtin(local_invocation_index) lid: u32,
                 @builtin(workgroup_id) group: vec3<u32>) {
@@ -898,6 +1283,7 @@ fn ddgi_relight(@builtin(local_invocation_index) lid: u32,
     let slot = group.x;
     let row = ddgi_group_row() + (slot * RAA_DDGI_IRR * RAA_DDGI_IRR + lid) * DDGI_GROUP_ROWS;
     ddgi_irr[lid] = ddgi_compose(ddgi_texel_load(row));
+    ddgi_guide_out[lid] = ddgi_guide_load(v, slot, lid);
     workgroupBarrier();
     ddgi_write_irr_tile(v, slot, lid);
 }

@@ -4,8 +4,8 @@
 //! extension `ddgi` (exec_ext/ddgi.rs) converts them with [`settings_from_params`].
 
 use raa_sdf_trace::mesh::{
-    DDGI_GI_NAME, DDGI_MAX_CASCADES, DdgiDebug, DdgiFar, DdgiInvalidation, DdgiRelocation,
-    DdgiSettings,
+    DDGI_GI_NAME, DDGI_MAX_CASCADES, DdgiBlend, DdgiDebug, DdgiFar, DdgiInvalidation,
+    DdgiRelocation, DdgiSettings,
 };
 
 use crate::catalog::{
@@ -27,6 +27,7 @@ const DEBUG_OPTIONS: &[&str] = &[
     "quality",
 ];
 const RELOCATION_OPTIONS: &[&str] = &["nearest", "rtxgi"];
+const BLEND_OPTIONS: &[&str] = &["update", "time", "adaptive"];
 const INVALIDATION_OPTIONS: &[&str] = &["tracked", "all", "none"];
 const FAR_OPTIONS: &[&str] = &["clamp", "ambient"];
 
@@ -123,6 +124,36 @@ impl NodeFamily for Ddgi {
             Rebuild::None,
         );
         invalidation.options = INVALIDATION_OPTIONS;
+        let mut blend = param(
+            "blend",
+            "Irradiance blend (update: fixed hysteresis per update; time: one time constant over the probe's real time between updates; adaptive: slow while stationary, fast on a change)",
+            ParamKind::Enum,
+            ParamValue::Enum(
+                match d.blend {
+                    DdgiBlend::Update => "update",
+                    DdgiBlend::Time => "time",
+                    DdgiBlend::Adaptive => "adaptive",
+                }
+                .into(),
+            ),
+            None,
+            None,
+            "",
+            Rebuild::None,
+        );
+        blend.options = BLEND_OPTIONS;
+        let ms = |key, label, value: f32| {
+            param(
+                key,
+                label,
+                ParamKind::Number,
+                number(value),
+                Some((1.0, 60_000.0)),
+                Some(10.0),
+                "ms",
+                Rebuild::None,
+            )
+        };
         let mut far = param(
             "far",
             "Beyond the finer cascades (clamp: border probes, renormalized; ambient: legacy fade to the flat ambient term)",
@@ -207,8 +238,8 @@ impl NodeFamily for Ddgi {
                 "Rays per probe",
                 ParamKind::Int,
                 ParamValue::Int(i64::from(d.rays_per_probe)),
-                Some((16.0, 256.0)),
-                Some(16.0),
+                Some((8.0, 256.0)),
+                Some(8.0),
                 "",
                 Rebuild::None,
             ),
@@ -221,6 +252,42 @@ impl NodeFamily for Ddgi {
                 Some(0.005),
                 "",
                 Rebuild::None,
+            ),
+            blend,
+            ms(
+                "blendFastMs",
+                "Adaptive blend: time constant on a detected change",
+                d.blend_fast_ms,
+            ),
+            ms(
+                "blendSlowMs",
+                "Time blend / adaptive blend while stationary: time constant",
+                d.blend_slow_ms,
+            ),
+            param(
+                "changeSigma",
+                "Adaptive blend: change threshold (standard deviations of one update)",
+                ParamKind::Number,
+                number(d.change_sigma),
+                Some((0.5, 20.0)),
+                Some(0.5),
+                "",
+                Rebuild::None,
+            ),
+            param(
+                "guide",
+                "Guided rays: fraction drawn from the probe's previous radiance (0 = uniform)",
+                ParamKind::Number,
+                number(d.guide),
+                Some((0.0, 0.95)),
+                Some(0.05),
+                "",
+                Rebuild::None,
+            ),
+            flag(
+                "lightCull",
+                "Many lights: probe rays evaluate the lights of the probe's mask",
+                d.light_cull,
             ),
             param(
                 "updateFraction",
@@ -459,6 +526,18 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> DdgiSetti
             }
             ("hysteresis", ParamValue::Number(x)) => s.hysteresis = *x as f32,
             ("updateFraction", ParamValue::Number(x)) => s.update_fraction = *x as f32,
+            ("blend", ParamValue::Enum(name)) => {
+                s.blend = match name.as_str() {
+                    "time" => DdgiBlend::Time,
+                    "adaptive" => DdgiBlend::Adaptive,
+                    _ => DdgiBlend::Update,
+                }
+            }
+            ("blendFastMs", ParamValue::Number(x)) => s.blend_fast_ms = *x as f32,
+            ("blendSlowMs", ParamValue::Number(x)) => s.blend_slow_ms = *x as f32,
+            ("changeSigma", ParamValue::Number(x)) => s.change_sigma = *x as f32,
+            ("guide", ParamValue::Number(x)) => s.guide = *x as f32,
+            ("lightCull", ParamValue::Bool(b)) => s.light_cull = *b,
             ("budgetMs", ParamValue::Number(x)) => s.budget_ms = *x as f32,
             ("burstMs", ParamValue::Number(x)) => s.burst_ms = *x as f32,
             ("intensity", ParamValue::Number(x)) => s.intensity = *x as f32,

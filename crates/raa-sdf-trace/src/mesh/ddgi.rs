@@ -80,7 +80,7 @@ const LATE_FRAMES: u32 = 240;
 const SUN_CONE_DEGREES: f32 = 2.5;
 const MAX_PROBES: u32 = 32_768;
 const MAX_AXIS: u32 = 128;
-const PARAMS_BYTES: u64 = 112;
+const PARAMS_BYTES: u64 = 144;
 /// Most surface probes (the pool after the cascades).
 const MAX_SURFACE_PROBES: u32 = 16_384;
 const OPTIONS_BYTES: u64 = 64;
@@ -138,6 +138,23 @@ pub enum DdgiFar {
     Ambient = 1,
 }
 
+/// How a probe update blends into the stored irradiance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DdgiBlend {
+    /// Fixed weight per update (`hysteresis`): the lag in time grows with the refresh period of
+    /// the probe (the volume before time-based blending).
+    #[default]
+    Update = 0,
+    /// Weight from the probe's actual time since its previous update and one time constant
+    /// (`blendSlowMs`): every probe lags by the same time whatever its refresh period.
+    Time = 1,
+    /// Time-based, between two time constants: the slow one while an update agrees with the
+    /// texel's own update-to-update noise, toward the fast one as the luma change exceeds
+    /// `changeSigma` times that noise.
+    Adaptive = 2,
+}
+
 /// How a probe that sits in or against geometry moves inside its cell.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
@@ -174,6 +191,21 @@ pub struct DdgiSettings {
     pub screen_ao: bool,
     pub rays_per_probe: u32,
     pub hysteresis: f32,
+    pub blend: DdgiBlend,
+    /// Time constants of the time-based blends (ms): fast (adaptive, on a detected change) and
+    /// slow (time blend; adaptive while the probe is stationary).
+    pub blend_fast_ms: f32,
+    pub blend_slow_ms: f32,
+    /// Adaptive blend: a luma change counts as real past this many standard deviations of the
+    /// texel's update-to-update change.
+    pub change_sigma: f32,
+    /// Fraction of each probe's rays drawn from its previous radiance (per octahedral cell); the
+    /// rest uniform, every ray weighted by its mixture density (0 = uniform Fibonacci rays).
+    pub guide: f32,
+    /// Many lights: a probe's rays evaluate only the lights of its stored light mask (the lights
+    /// noticeable at its hits since the mask's last reset), every light on its first 8 updates
+    /// after a reset and on one update in 8.
+    pub light_cull: bool,
     /// Most probes updated per frame outside a burst, as a fraction of the volume.
     pub update_fraction: f32,
     /// GPU time of the probe update per frame (ms), converted with the measured cost per probe.
@@ -235,6 +267,12 @@ impl Default for DdgiSettings {
             screen_ao: true,
             rays_per_probe: 64,
             hysteresis: 0.97,
+            blend: DdgiBlend::Update,
+            blend_fast_ms: 150.0,
+            blend_slow_ms: 2000.0,
+            change_sigma: 3.0,
+            guide: 0.0,
+            light_cull: false,
             update_fraction: 0.25,
             budget_ms: 0.6,
             burst_ms: 2.0,
@@ -307,7 +345,11 @@ impl DdgiSettings {
         let ok = counts_ok
             && self.spacing.is_finite()
             && (0.05..=100.0).contains(&self.spacing)
-            && (16..=256).contains(&self.rays_per_probe)
+            && (8..=256).contains(&self.rays_per_probe)
+            && (1.0..=60_000.0).contains(&self.blend_fast_ms)
+            && (1.0..=60_000.0).contains(&self.blend_slow_ms)
+            && (0.5..=20.0).contains(&self.change_sigma)
+            && (0.0..=0.95).contains(&self.guide)
             && (0.0..=0.995).contains(&self.hysteresis)
             && self.update_fraction > 0.0
             && self.update_fraction <= 1.0
@@ -322,7 +364,7 @@ impl DdgiSettings {
                 code: "gi.ddgi.invalid_settings",
                 message: format!(
                     "expected 1 to {DDGI_MAX_CASCADES} cascades, probe counts in [2, {MAX_AXIS}] with at most {MAX_PROBES} probes in all, spacing in [0.05, 100] m, \
-                     16-256 rays, hysteresis in [0, 0.995], update fraction in (0, 1], budgets in [0.05, 20] ms, intensity in [0, 16] and biases in [0, 1]"
+                     8-256 rays, blend time constants in [1, 60000] ms, change sigma in [0.5, 20], guide in [0, 0.95], hysteresis in [0, 0.995], update fraction in (0, 1], budgets in [0.05, 20] ms, intensity in [0, 16] and biases in [0, 1]"
                 ),
             });
         }
@@ -446,6 +488,8 @@ impl DdgiFeature {
             batch_ms: 0.0,
             idle_frames: 0,
             lighting: LightingTrack::default(),
+            clock: 0.0,
+            geometry_revision: None,
         }))?;
         pipeline.set_enabled(DDGI_GI_NAME, false)?;
         Ok(state)
@@ -530,6 +574,8 @@ struct Staged {
     interval: u32,
     /// Screen resolve size, when it runs this frame.
     screen: Option<(u32, u32)>,
+    /// Probes per update workgroup.
+    pack: u32,
 }
 
 /// Starting cost model before the first timestamp readback (RTX 3090, Sponza, 64 rays).
@@ -663,6 +709,11 @@ struct DdgiPass {
     batch_ms: f64,
     idle_frames: u32,
     lighting: LightingTrack,
+    /// Seconds of rendered time (frame deltas, each capped at 50 ms so a stall or capture pause
+    /// does not count as time the probes had to converge).
+    clock: f64,
+    /// Revision of the traced geometry the probes were last invalidated against.
+    geometry_revision: Option<u64>,
 }
 
 /// What the lighting looked like when the groups were last invalidated or relit.
@@ -720,6 +771,44 @@ fn sky_change(a: &[[f32; 4]; 9], b: &[[f32; 4]; 9]) -> f32 {
 }
 
 impl DdgiPass {
+    /// Geometry edits: the probes within two cells of a changed bound restart (every group and
+    /// the depth moments, their classification and relocation redone on that first update and
+    /// their light mask rescanned); those within six cells keep their groups as a prior of
+    /// `RELIGHT_AGE` updates (occlusion and bounces changed). Missed revisions (more than one
+    /// since the last frame, only the last delta is kept) relight the whole volume. Returns the
+    /// probes touched.
+    fn invalidate_geometry(&mut self, dirty: &[([f32; 3], [f32; 3])], delta: bool) -> u32 {
+        if !delta {
+            return self.schedule.invalidate_all(GROUP_ALL, RELIGHT_AGE);
+        }
+        let near = |p: [f32; 3], margin: f32| {
+            dirty
+                .iter()
+                .any(|(lo, hi)| (0..3).all(|i| p[i] >= lo[i] - margin && p[i] <= hi[i] + margin))
+        };
+        let mut restart = Vec::new();
+        let mut relight = Vec::new();
+        self.schedule.for_each_probe(|slot, p, spacing| {
+            if near(p, 2.0 * spacing) {
+                restart.push(slot);
+            } else if near(p, 6.0 * spacing) {
+                relight.push(slot);
+            }
+        });
+        let mut n = 0;
+        for slot in restart {
+            self.schedule.restart_slot(slot);
+            n += 1;
+        }
+        for slot in relight {
+            n += u32::from(
+                self.schedule
+                    .invalidate_slot(slot, GROUP_ALL, RELIGHT_AGE, true),
+            );
+        }
+        n
+    }
+
     /// Applies the frame's lighting changes to the schedule; returns the invalidated probe groups
     /// (geometry, sun, other), the light edits and the probes the last edit invalidated.
     fn track_lighting(
@@ -1006,6 +1095,19 @@ impl FeaturePass for DdgiPass {
         }
         let mesh = self.mesh.borrow();
         let bounds = mesh.geometry.world_bounds().map(|b| (b.min, b.max));
+        let geometry_revision = mesh.geometry.revision;
+        let geometry_dirty: Vec<([f32; 3], [f32; 3])> = if self
+            .geometry_revision
+            .is_some_and(|old| old.wrapping_add(1) == geometry_revision)
+        {
+            mesh.geometry
+                .dirty_bounds
+                .iter()
+                .map(|b| (b.min, b.max))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let sky_diffuse = mesh.sky_diffuse;
         let triangles = mesh.geometry.count();
         let traceable = triangles > 0 && mesh.frame.is_some() && mesh.texture_atlas.is_some();
@@ -1029,11 +1131,18 @@ impl FeaturePass for DdgiPass {
                     16 * (gpu.table_row() + u64::from(change.index)),
                     &bytes,
                 );
-                self.schedule.set_extra(grid + change.index, change.position);
+                self.schedule
+                    .set_extra(grid + change.index, change.position);
             }
         }
-        let (invalidated, light_edits, edit_probes) =
+        let (mut invalidated, light_edits, edit_probes) =
             self.track_lighting(settings, &camera, sky_diffuse, ctx.lighting);
+        if let Some(old) = self.geometry_revision.replace(geometry_revision)
+            && old != geometry_revision
+        {
+            invalidated[0] +=
+                self.invalidate_geometry(&geometry_dirty, old.wrapping_add(1) == geometry_revision);
+        }
         let floor = MIN_BATCH.min(probes);
         // The ray scratch bounds a dispatch.
         let job_cap =
@@ -1060,7 +1169,13 @@ impl FeaturePass for DdgiPass {
         } else {
             0
         };
-        let converge_age = converge_age(settings.hysteresis);
+        let converge_age = converge_age_of(&settings);
+        self.clock += if ctx.dt_s > 0.0 {
+            f64::from(ctx.dt_s).min(0.05)
+        } else {
+            1.0 / 60.0
+        };
+        self.schedule.set_clock(self.clock);
         let mut jobs = Vec::with_capacity(burst as usize);
         let (visibility, bursting, refreshed) =
             self.schedule
@@ -1145,6 +1260,24 @@ impl FeaturePass for DdgiPass {
                 0.0,
             ],
         );
+        push_f32(
+            &mut params,
+            [
+                settings.blend_fast_ms / 1000.0,
+                settings.blend_slow_ms / 1000.0,
+                settings.change_sigma * settings.change_sigma,
+                settings.blend as u32 as f32,
+            ],
+        );
+        push_f32(
+            &mut params,
+            [
+                probes_per_group(settings.rays_per_probe) as f32,
+                settings.guide,
+                f32::from(converge_age),
+                f32::from(u8::from(settings.light_cull)),
+            ],
+        );
         let mut options = Vec::with_capacity(OPTIONS_BYTES as usize);
         push_u32(
             &mut options,
@@ -1186,6 +1319,7 @@ impl FeaturePass for DdgiPass {
             converge_age: u32::from(converge_age),
             interval: if bursting { 1 } else { interval },
             screen: resolve,
+            pack: probes_per_group(settings.rays_per_probe),
         });
         Ok(())
     }
@@ -1276,7 +1410,7 @@ impl FeaturePass for DdgiPass {
                     });
                 pass.set_pipeline(&gpu.update);
                 pass.set_bind_group(0, &group, &[]);
-                pass.dispatch_workgroups(jobs, 1, 1);
+                pass.dispatch_workgroups(jobs.div_ceil(staged.pack), 1, 1);
             }
             if timed && let Some(timer) = timer {
                 timer.resolve(ctx.encoder, jobs);
@@ -1377,6 +1511,25 @@ impl FeaturePass for DdgiPass {
     }
 }
 
+/// Probes one 64-thread update workgroup takes: one thread per ray (at most 8 probes).
+fn probes_per_group(rays: u32) -> u32 {
+    (64 / rays.max(1)).clamp(1, 8)
+}
+
+/// Updates after which a probe counts as converged under the configured blend. A time-based
+/// blend converges within a few refreshes (a probe refreshed every ~1 s takes its slow time
+/// constant in updates), but never fewer than 8, so the burst also carries the bounces that
+/// arrive one generation per update.
+fn converge_age_of(settings: &DdgiSettings) -> u16 {
+    match settings.blend {
+        DdgiBlend::Update => converge_age(settings.hysteresis),
+        DdgiBlend::Time | DdgiBlend::Adaptive => {
+            let h = (-1000.0 / settings.blend_slow_ms.max(1.0)).exp();
+            converge_age(h).max(8)
+        }
+    }
+}
+
 /// Updates after which a probe counts as converged: the progressive phase of the blend, where the
 /// running mean's weight 1/(age+1) reaches the configured hysteresis (capped to 4..64).
 fn converge_age(hysteresis: f32) -> u16 {
@@ -1466,10 +1619,8 @@ impl DdgiGpu {
         let sky = pipeline("gi.ddgi.sky", "ddgi_sky_project");
         let pixels = screen.map_or(0, |(w, h)| u64::from(w) * u64::from(h));
         let probes = cascades.iter().map(|c| c.probes).sum::<u32>() + extras;
-        let rows = layout(probes).rows
-            + pixels
-            + SCRATCH_ROWS
-            + TABLE_ROWS_PER_SLOT * u64::from(extras);
+        let rows =
+            layout(probes).rows + pixels + SCRATCH_ROWS + TABLE_ROWS_PER_SLOT * u64::from(extras);
         Self {
             cascades,
             revision,
@@ -1785,6 +1936,8 @@ mod tests {
             batch_ms: 0.0,
             idle_frames: 0,
             lighting: LightingTrack::default(),
+            clock: 0.0,
+            geometry_revision: None,
         };
         for _ in 0..16 {
             let m = pass_rng.random_rotation();

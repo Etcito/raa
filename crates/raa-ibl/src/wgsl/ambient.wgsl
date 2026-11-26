@@ -44,8 +44,9 @@ fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     if !raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE) {
         w_gi = clamp(raa_env_sh.gi.x, 0.0, 1.0);
     }
-    let incoming = mix(raa_ibl_specular(r, roughness) * raa_env_sh.info.x,
-        raa_ibl_gi_irradiance(c.frag) / RAA_IBL_PI, w_gi);
+    let sky = raa_probe_sky_specular(raa_ibl_specular(r, roughness) * raa_env_sh.info.x,
+        raa_ibl_irradiance(n) * raa_env_sh.info.y, c);
+    let incoming = mix(sky, raa_ibl_gi_irradiance(c.frag) / RAA_IBL_PI, w_gi);
     let specular = incoming * raa_ibl_specular_response(f0, dfg, c.n_dot_v, c.ao, roughness);
     return raa_spherical_blend_diffuse(diffuse, s, c) + specular;
 }
