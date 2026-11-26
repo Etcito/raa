@@ -885,9 +885,24 @@ fn ddgi_probe_record(p: u32, rays: u32) {
     }
 }
 
-// Blends irradiance texel `lid` (the groups) and four depth moments of workgroup probe `p` into
-// `ddgi_irr`, `ddgi_guide_out` and `ddgi_depth_tile`.
-fn ddgi_probe_blend(p: u32, lid: u32, rays: u32, scratch_first: u32) {
+// Per probe of the update: the irradiance texel `lid` gathers its rays into the update's raw
+// groups (`raw`, the refreshed groups replaced) next to the stored ones (`hist`); the composed
+// lumas of both go to `ddgi_luma_pair` so the probe's whole change can be tested against its
+// noise (see `ddgi_probe_finish`).
+struct DdgiGathered {
+    hist: DdgiTexel,
+    raw: DdgiTexel,
+    total: f32,
+    guide: f32,
+    // The probe's change noise and drift as stored (texels 0 and 1), read before any texel of
+    // the probe is written.
+    spread: f32,
+    drift: f32,
+}
+
+var<workgroup> ddgi_luma_pair: array<vec2<f32>, 64>;
+
+fn ddgi_probe_gather(p: u32, lid: u32, rays: u32, scratch_first: u32) -> DdgiGathered {
     let job = ddgi_job[p];
     let ages = ddgi_job_groups[p];
     let slot = job.x;
@@ -898,6 +913,7 @@ fn ddgi_probe_blend(p: u32, lid: u32, rays: u32, scratch_first: u32) {
     let first = p * rays;
     let scratch = scratch_first;
     let guiding = ddgi_params.sampling.y > 0.0;
+    var out: DdgiGathered;
     {
         let xy = vec2<u32>(lid % RAA_DDGI_IRR, lid / RAA_DDGI_IRR);
         let dir = raa_ddgi_oct_decode((vec2<f32>(xy) + 0.5) / f32(RAA_DDGI_IRR) * 2.0 - 1.0);
@@ -957,83 +973,23 @@ fn ddgi_probe_blend(p: u32, lid: u32, rays: u32, scratch_first: u32) {
         let row = ddgi_group_row() + (slot * RAA_DDGI_IRR * RAA_DDGI_IRR + lid) * DDGI_GROUP_ROWS;
         var texel = ddgi_texel_load(row);
         if fresh { texel = DdgiTexel(); }
-        let mode = u32(ddgi_params.blend.w);
+        out.hist = texel;
+        out.raw = texel;
+        out.total = total;
         if total > 1e-4 {
             let inv = 1.0 / total;
-            if mode == 0u {
-                if (groups & DDGI_SUN) != 0u {
-                    let sun = sum.direct.sun * inv;
-                    let residual = sum.direct.residual * inv;
-                    let change = max(ddgi_max3((sun - texel.direct.sun) * frame.sun_color.rgb),
-                        ddgi_params.extra.x * ddgi_sky_norm() * ddgi_max3(residual - texel.direct.residual));
-                    let h = ddgi_hysteresis(ages.x, fresh, change);
-                    texel.direct.sun = mix(sun, texel.direct.sun, h);
-                    texel.direct.residual = mix(residual, texel.direct.residual, h);
-                }
-                if (groups & DDGI_OTHER) != 0u {
-                    let other = sum.direct.other * inv;
-                    let h = ddgi_hysteresis(ages.y, fresh, ddgi_max3(other - texel.direct.other));
-                    texel.direct.other = mix(other, texel.direct.other, h);
-                }
-                if geometry {
-                    for (var e = 0u; e < 27u; e++) { sum.transfer[e >> 1u][e & 1u] += escaped[e / 3u]; }
-                    let h = ddgi_hysteresis(job.w, fresh, 0.0);
-                    for (var j = 0u; j < 14u; j++) {
-                        texel.transfer[j] = mix(sum.transfer[j] * inv, texel.transfer[j], h);
-                    }
-                }
-            } else {
-                // Time-based blend: the weight of the stored value follows the probe's actual time
-                // since its previous update (a probe refreshed every 2 s and one refreshed every
-                // frame lag by the same time). Adaptive: the slow time constant while the update
-                // agrees with the texel's own noise, toward the fast one as the luma change grows
-                // past `blend.z` times its running squared change.
-                var raw = texel;
-                if (groups & DDGI_SUN) != 0u {
-                    raw.direct.sun = sum.direct.sun * inv;
-                    raw.direct.residual = sum.direct.residual * inv;
-                }
-                if (groups & DDGI_OTHER) != 0u { raw.direct.other = sum.direct.other * inv; }
-                if geometry {
-                    for (var e = 0u; e < 27u; e++) { sum.transfer[e >> 1u][e & 1u] += escaped[e / 3u]; }
-                    for (var j = 0u; j < 14u; j++) { raw.transfer[j] = sum.transfer[j] * inv; }
-                }
-                let dt = ddgi_elapsed(ages.w >> 1u);
-                let slow = exp(-dt / max(ddgi_params.blend.y, 1e-4));
-                let fast = exp(-dt / max(ddgi_params.blend.x, 1e-4));
-                let lh = ddgi_luma(ddgi_compose(texel));
-                let ls = ddgi_luma(ddgi_compose(raw));
-                let d = (ls - lh) / max(max(ls, lh), 1e-4);
-                var h = slow;
-                var spread = texel.spread;
-                if mode == 2u && spread > 0.0 {
-                    let ratio = d * d / max(ddgi_params.blend.z * spread, 1e-8);
-                    if ratio > 1.0 { h = fast + (slow - fast) / ratio; }
-                }
-                if fresh {
-                    spread = 0.0;
-                } else if spread <= 0.0 {
-                    spread = max(d * d, 1e-6);
-                } else {
-                    spread = mix(min(d * d, 9.0 * spread), spread, 0.85);
-                }
-                if (groups & DDGI_SUN) != 0u {
-                    let hs = ddgi_progressive(h, ages.x, fresh);
-                    texel.direct.sun = mix(raw.direct.sun, texel.direct.sun, hs);
-                    texel.direct.residual = mix(raw.direct.residual, texel.direct.residual, hs);
-                }
-                if (groups & DDGI_OTHER) != 0u {
-                    texel.direct.other = mix(raw.direct.other, texel.direct.other, ddgi_progressive(h, ages.y, fresh));
-                }
-                if geometry {
-                    let hg = ddgi_progressive(h, job.w, fresh);
-                    for (var j = 0u; j < 14u; j++) { texel.transfer[j] = mix(raw.transfer[j], texel.transfer[j], hg); }
-                }
-                texel.spread = clamp(spread, 0.0, 60000.0);
+            if (groups & DDGI_SUN) != 0u {
+                out.raw.direct.sun = sum.direct.sun * inv;
+                out.raw.direct.residual = sum.direct.residual * inv;
+            }
+            if (groups & DDGI_OTHER) != 0u { out.raw.direct.other = sum.direct.other * inv; }
+            if geometry {
+                for (var e = 0u; e < 27u; e++) { sum.transfer[e >> 1u][e & 1u] += escaped[e / 3u]; }
+                for (var j = 0u; j < 14u; j++) { out.raw.transfer[j] = sum.transfer[j] * inv; }
             }
         }
-        if fresh || total > 1e-4 { ddgi_texel_store(row, texel, geometry); }
-        ddgi_irr[lid] = ddgi_compose(texel);
+        let lh = ddgi_luma(ddgi_compose(out.hist));
+        ddgi_luma_pair[lid] = vec2<f32>(select(lh, ddgi_luma(ddgi_compose(out.raw)), total > 1e-4), lh);
         var guide = 0.0;
         if guiding {
             guide = select(ddgi_guide_load(v, slot, lid), 0.0, fresh);
@@ -1042,8 +998,102 @@ fn ddgi_probe_blend(p: u32, lid: u32, rays: u32, scratch_first: u32) {
                 guide = select(mix(mean, guide, 0.75), mean, guide <= 0.0);
             }
         }
-        ddgi_guide_out[lid] = guide;
+        out.guide = guide;
+        let base = ddgi_group_row() + slot * RAA_DDGI_IRR * RAA_DDGI_IRR * DDGI_GROUP_ROWS;
+        out.spread = select(unpack2x16float(ddgi_probes[base + 1u].x).y, 0.0, fresh);
+        out.drift = select(unpack2x16float(ddgi_probes[base + DDGI_GROUP_ROWS + 1u].x).y, 0.0, fresh);
     }
+    return out;
+}
+
+// Blends irradiance texel `lid` of workgroup probe `p` from its gathered update (into `ddgi_irr`,
+// `ddgi_guide_out`) and four depth moments (`ddgi_depth_tile`). Time-based blends: the weight of
+// the stored value follows the probe's real time since its previous update. Adaptive: the slow
+// time constant while the probe's change (its summed composed luma, relative) agrees with its own
+// update-to-update noise (running mean of the squared change, kept in texel 0's spare half) and
+// with no drift (running mean of the signed change, texel 1's spare half); toward the fast one as
+// either exceeds `blend.z` (squared sigmas) times its noise level. A texel alone must exceed four
+// times that (twice the sigmas).
+fn ddgi_probe_finish(p: u32, lid: u32, rays: u32, g: DdgiGathered) {
+    let job = ddgi_job[p];
+    let ages = ddgi_job_groups[p];
+    let slot = job.x;
+    let fresh = job.z != 0u;
+    let groups = ages.z;
+    let geometry = (groups & DDGI_GEOMETRY) != 0u;
+    let v = ddgi_slot_volume(slot);
+    let first = p * rays;
+    let row = ddgi_group_row() + (slot * RAA_DDGI_IRR * RAA_DDGI_IRR + lid) * DDGI_GROUP_ROWS;
+    var texel = g.hist;
+    let raw = g.raw;
+    let mode = u32(ddgi_params.blend.w);
+    if g.total > 1e-4 {
+        if mode == 0u {
+            if (groups & DDGI_SUN) != 0u {
+                let change = max(ddgi_max3((raw.direct.sun - texel.direct.sun) * frame.sun_color.rgb),
+                    ddgi_params.extra.x * ddgi_sky_norm() * ddgi_max3(raw.direct.residual - texel.direct.residual));
+                let h = ddgi_hysteresis(ages.x, fresh, change);
+                texel.direct.sun = mix(raw.direct.sun, texel.direct.sun, h);
+                texel.direct.residual = mix(raw.direct.residual, texel.direct.residual, h);
+            }
+            if (groups & DDGI_OTHER) != 0u {
+                let h = ddgi_hysteresis(ages.y, fresh, ddgi_max3(raw.direct.other - texel.direct.other));
+                texel.direct.other = mix(raw.direct.other, texel.direct.other, h);
+            }
+            if geometry {
+                let h = ddgi_hysteresis(job.w, fresh, 0.0);
+                for (var j = 0u; j < 14u; j++) { texel.transfer[j] = mix(raw.transfer[j], texel.transfer[j], h); }
+            }
+        } else {
+            var ls = 0.0;
+            var lh = 0.0;
+            for (var t = 0u; t < 64u; t++) {
+                ls += ddgi_luma_pair[t].x;
+                lh += ddgi_luma_pair[t].y;
+            }
+            let d = (ls - lh) / max(max(ls, lh), 1e-4);
+            let pair = ddgi_luma_pair[lid];
+            let dt_texel = (pair.x - pair.y) / max(max(pair.x, pair.y), 1e-4);
+            var spread = g.spread;
+            var drift = g.drift;
+            let dt = ddgi_elapsed(ages.w >> 1u);
+            let slow = exp(-dt / max(ddgi_params.blend.y, 1e-4));
+            let fast = exp(-dt / max(ddgi_params.blend.x, 1e-4));
+            var h = slow;
+            let k2 = ddgi_params.blend.z;
+            if mode == 2u && spread > 0.0 {
+                // EMA(0.3) of the signed change: variance 0.3 / 1.7 of one update's.
+                let drift_next = mix(drift, d, 0.3);
+                let ratio = max(max(d * d / (k2 * spread), drift_next * drift_next / (k2 * 0.18 * spread)),
+                    dt_texel * dt_texel / (4.0 * k2 * spread));
+                if ratio > 1.0 { h = fast + (slow - fast) / ratio; }
+            }
+            if !fresh {
+                if spread <= 0.0 {
+                    spread = max(d * d, 1e-6);
+                } else {
+                    spread = mix(min(d * d, 9.0 * spread), spread, 0.85);
+                }
+                drift = mix(drift, d, 0.3);
+            }
+            if (groups & DDGI_SUN) != 0u {
+                let hs = ddgi_progressive(h, ages.x, fresh);
+                texel.direct.sun = mix(raw.direct.sun, texel.direct.sun, hs);
+                texel.direct.residual = mix(raw.direct.residual, texel.direct.residual, hs);
+            }
+            if (groups & DDGI_OTHER) != 0u {
+                texel.direct.other = mix(raw.direct.other, texel.direct.other, ddgi_progressive(h, ages.y, fresh));
+            }
+            if geometry {
+                let hg = ddgi_progressive(h, job.w, fresh);
+                for (var j = 0u; j < 14u; j++) { texel.transfer[j] = mix(raw.transfer[j], texel.transfer[j], hg); }
+            }
+            texel.spread = clamp(select(spread, drift, lid == 1u), -60000.0, 60000.0);
+        }
+    }
+    if fresh || g.total > 1e-4 { ddgi_texel_store(row, texel, geometry); }
+    ddgi_irr[lid] = ddgi_compose(texel);
+    ddgi_guide_out[lid] = g.guide;
     if geometry {
         let hysteresis = ddgi_hysteresis(job.w, fresh, 0.0);
         let max_depth = v.max_depth;
@@ -1159,9 +1209,12 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
     // 3-4. Blend, then write the tiles, one probe after another.
     for (var p = 0u; p < probes_here; p++) {
         let live = ddgi_job[p].y != 0u;
+        var gathered: DdgiGathered;
         if live {
-            ddgi_probe_blend(p, lid, rays, ddgi_scratch_row() + (group.x * probes_here + p) * rays * DDGI_SCRATCH_ROWS);
+            gathered = ddgi_probe_gather(p, lid, rays, ddgi_scratch_row() + (group.x * probes_here + p) * rays * DDGI_SCRATCH_ROWS);
         }
+        workgroupBarrier();
+        if live { ddgi_probe_finish(p, lid, rays, gathered); }
         workgroupBarrier();
         if live { ddgi_probe_write(p, lid); }
         workgroupBarrier();
