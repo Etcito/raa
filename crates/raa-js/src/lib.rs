@@ -102,6 +102,8 @@ mod alloc_log {
         fn console_error(message: &str);
         #[wasm_bindgen(js_namespace = console, js_name = error)]
         fn console_error_value(message: &JsValue);
+        #[wasm_bindgen(js_namespace = console, js_name = info)]
+        fn console_info(message: &str);
     }
 
     /// Frames kept in the stack of a failed allocation.
@@ -220,7 +222,7 @@ mod alloc_log {
         REPORTING.store(false, Ordering::Relaxed);
     }
 
-    /// Writes one foliage stage line to `console.error` and remembers the stage name for a
+    /// Writes one foliage stage line to `console.info` and remembers the stage name for a
     /// later allocation failure.
     pub(crate) fn report_stage(stage: &raa_lit::foliage_bake::FoliageStage) {
         STAGE_PTR.store(stage.stage.as_ptr().cast_mut(), Ordering::Relaxed);
@@ -236,7 +238,8 @@ mod alloc_log {
             LIVE.load(Ordering::Relaxed),
             stage.source_triangles
         );
-        console_error(line.as_str());
+        // A stage line is progress, not a failure: console.error is read as a page error by the scenarios.
+        console_info(line.as_str());
     }
 
     /// The `#[global_allocator]` of raa-js on wasm32: `System` plus live byte counting and
