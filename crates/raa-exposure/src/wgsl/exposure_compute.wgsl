@@ -25,8 +25,8 @@ struct ExposureState {
 }
 
 const BINS: u32 = 128u;
-const MIN_LOG_LUMINANCE: f32 = -8.0;
-const LOG_LUMINANCE_RANGE: f32 = 18.0;
+const MIN_LOG_LUMINANCE: f32 = -20.0;
+const LOG_LUMINANCE_RANGE: f32 = 30.0;
 
 @group(0) @binding(0) var<uniform> params: ExposureParams;
 @group(0) @binding(1) var scene: texture_2d<f32>;
@@ -42,7 +42,7 @@ fn build_histogram(@builtin(global_invocation_id) id: vec3u) {
     }
     let c = textureLoad(scene, vec2i(pixel), 0).rgb;
     let luminance = dot(c, vec3f(0.2126, 0.7152, 0.0722));
-    if luminance < 1.0e-5 {
+    if luminance < 1.0e-7 {
         return;
     }
     let position = (log2(luminance) - MIN_LOG_LUMINANCE) / LOG_LUMINANCE_RANGE;

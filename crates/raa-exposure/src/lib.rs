@@ -24,15 +24,15 @@ pub const AUTO_EXPOSURE_ORDER: u32 = 125;
 /// Histogram bins over the log2 luminance range.
 pub const HISTOGRAM_BINS: u32 = 128;
 /// Log2 luminance of the first bin.
-pub const MIN_LOG_LUMINANCE: f32 = -8.0;
+pub const MIN_LOG_LUMINANCE: f32 = -20.0;
 /// Log2 span covered by the bins, from `MIN_LOG_LUMINANCE` upwards.
-pub const LOG_LUMINANCE_RANGE: f32 = 18.0;
+pub const LOG_LUMINANCE_RANGE: f32 = 30.0;
 /// The histogram samples every 4th pixel in x and y.
 pub const SAMPLE_STRIDE: u32 = 4;
 /// Histogram compute workgroup size, 16 x 16.
 pub const HISTOGRAM_WORKGROUP: u32 = 16;
 /// Luminance below this is not counted in the histogram.
-pub const LUMINANCE_FLOOR: f32 = 1e-5;
+pub const LUMINANCE_FLOOR: f32 = 1e-7;
 /// Middle grey that the average luminance is mapped to.
 pub const MIDDLE_GREY: f32 = 0.18;
 /// Settled threshold: two exposure results closer than this many EV count as settled.
