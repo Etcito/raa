@@ -96,6 +96,9 @@ pub(super) struct Schedule {
     /// Frame of each slot's last update.
     last: Vec<u32>,
     frame: u32,
+    /// Clock (s) of each slot's last update (negative: never), and the clock of this plan.
+    last_time: Vec<f64>,
+    clock: f64,
     keys: Vec<(u64, u32)>,
     /// Surface probes: slots `extra_first..`, the world position of each assigned one.
     extra_first: u32,
@@ -128,7 +131,22 @@ pub(super) const BAND_START: f32 = 0.5;
 pub(super) const BAND_WIDTH: f32 = 1.5;
 const FULL_WEIGHT_CELLS: f32 = BAND_START + BAND_WIDTH + 0.5;
 
+/// Job code of the time since a probe's previous update: 7 bits, 4 ms x 2^(code/8) (9% steps,
+/// up to 4 minutes); 127 for a probe never updated.
+pub(super) fn elapsed_code(seconds: f64) -> u32 {
+    if seconds < 0.0 {
+        return 127;
+    }
+    (8.0 * (seconds.max(0.004) / 0.004).log2()).round().clamp(0.0, 127.0) as u32
+}
+
 impl Schedule {
+    /// Sets the clock (s) of the next plans: the blend of a probe update follows the time since
+    /// that probe's previous update.
+    pub(super) fn set_clock(&mut self, seconds: f64) {
+        self.clock = seconds;
+    }
+
     pub(super) fn reset(&mut self, cascades: &[CascadeLayout], extras: u32, extra_spacing: f32) {
         let grid = cascades.iter().map(|c| c.probes).sum::<u32>();
         let total = (grid + extras) as usize;
@@ -143,6 +161,7 @@ impl Schedule {
             age_other: vec![0; total],
             mask_reset: vec![false; total],
             last: vec![0; total],
+            last_time: vec![-1.0; total],
             ..Self::default()
         };
     }
@@ -306,7 +325,7 @@ impl Schedule {
 
     /// Picks `budget` slots (or `burst` while a visible probe is still invalid or young) and
     /// appends two words per job (`slot | geometry age << 16`, then
-    /// `sun age | other age << 8 | groups << 16 | replace mask << 24`), ageing the refreshed
+    /// `sun age | other age << 8 | groups << 16 | replace mask << 24 | elapsed code << 25`), ageing the refreshed
     /// groups of the picked slots: the young groups, or all of them when none is. Without a view
     /// every probe counts as visible and the order is by age then distance to the volume centre.
     /// The third value counts the refreshed groups (geometry, sun, other).
@@ -415,13 +434,21 @@ impl Schedule {
                 groups = GROUP_ALL;
             }
             let reset = groups & GROUP_OTHER != 0 && std::mem::take(&mut self.mask_reset[i]);
+            let previous = self.last_time[i];
+            let elapsed = if previous < 0.0 || age == 0 {
+                -1.0
+            } else {
+                self.clock - previous
+            };
             out.push(slot | (u32::from(age) << 16));
             out.push(
                 u32::from(sun)
                     | (u32::from(other) << 8)
                     | (groups << 16)
-                    | (u32::from(reset) << 24),
+                    | (u32::from(reset) << 24)
+                    | (elapsed_code(elapsed) << 25),
             );
+            self.last_time[i] = self.clock;
             if groups & GROUP_GEOMETRY != 0 {
                 self.age[i] = age.saturating_add(1);
                 refreshed[0] += 1;
@@ -511,6 +538,19 @@ mod tests {
     }
 
     #[test]
+    fn elapsed_code_is_logarithmic_and_saturates() {
+        assert_eq!(elapsed_code(-1.0), 127);
+        assert_eq!(elapsed_code(0.0), 0);
+        assert_eq!(elapsed_code(0.008), 8);
+        let decode = |c: u32| 0.004 * 2f64.powf(f64::from(c) / 8.0);
+        for t in [0.016, 0.1, 1.5, 30.0] {
+            let back = decode(elapsed_code(t));
+            assert!((back / t - 1.0).abs() < 0.05, "{t} -> {back}");
+        }
+        assert_eq!(elapsed_code(1e6), 127);
+    }
+
+    #[test]
     fn scroll_resets_only_the_planes_that_left() {
         let mut s = Schedule::default();
         s.reset(&one([4, 2, 4]), 0, 1.0);
@@ -536,7 +576,7 @@ mod tests {
                 .all(|j| j[0] >> 16 == 0 && (j[1] >> 16) & 7 == GROUP_ALL)
         );
         assert!(
-            jobs.chunks(2).all(|j| j[1] >> 24 == 1),
+            jobs.chunks(2).all(|j| (j[1] >> 24) & 1 == 1 && j[1] >> 25 == 127),
             "a recycled slot replaces its light mask"
         );
     }
@@ -577,7 +617,7 @@ mod tests {
         assert_eq!(jobs[0] & 0xffff, 2);
         assert_eq!((jobs[1] >> 16) & 7, GROUP_SUN | GROUP_OTHER);
         assert_eq!(jobs[1] & 0xffff, 2 | (1 << 8));
-        assert_eq!(jobs[1] >> 24, 1);
+        assert_eq!((jobs[1] >> 24) & 1, 1);
         assert!(
             jobs.chunks(2)
                 .skip(1)
