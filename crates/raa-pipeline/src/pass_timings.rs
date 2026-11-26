@@ -35,14 +35,14 @@ pub(crate) struct PassTimings {
     pending_generation: u64,
     latest: Option<PassGpuTimingSample>,
     readback_failed: bool,
-    /// Bumped when the pass configuration changes (a render graph switch, a pass enabled or
-    /// disabled, a new order): samples recorded before it describe another pass set.
+    /// Bumped by `invalidate` (a render graph switch): samples recorded before it belong to the
+    /// previous graph, even when its pass list is the same.
     generation: u64,
 }
 
 impl PassTimings {
     /// Forgets the latest sample and ignores the readback in flight: both were recorded with the
-    /// previous pass configuration. The in-flight receiver is kept (its callback still unmaps the
+    /// previous render graph. The in-flight receiver is kept (its callback still unmaps the
     /// readback buffer before the buffer is reused) and its sample is dropped when it arrives.
     pub(crate) fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
@@ -50,7 +50,9 @@ impl PassTimings {
         self.readback_failed = false;
     }
 
-    pub(crate) fn request(&mut self) -> PassGpuTimings<'_> {
+    /// `enabled` lists the passes the next frame records: a sample of another pass list (a
+    /// render graph switch, a pass turned on or off) is dropped instead of returned.
+    pub(crate) fn request(&mut self, enabled: &[String]) -> PassGpuTimings<'_> {
         if let Some(pending) = &self.pending {
             match pending.try_recv() {
                 Ok(_) if self.pending_generation != self.generation => {
@@ -70,6 +72,12 @@ impl PassTimings {
                 }
                 Err(TryRecvError::Empty) => {}
             }
+        }
+        if self.latest.as_ref().is_some_and(|sample| {
+            sample.passes.len() != enabled.len()
+                || sample.passes.iter().zip(enabled).any(|((name, _), e)| name != e)
+        }) {
+            self.latest = None;
         }
         self.requested = self.pending.is_none();
 
