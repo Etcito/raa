@@ -105,6 +105,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                         "distance".to_string(),
                         crate::catalog::ParamValue::Number(60.0),
                     ),
+                    ("cover".to_string(), crate::catalog::ParamValue::Bool(true)),
                     (
                         "resolution".to_string(),
                         crate::catalog::ParamValue::Int(2048),
@@ -404,7 +405,39 @@ pub fn plan() -> crate::plan::GraphPlan {
                         crate::catalog::ParamValue::Number(12.0),
                     ),
                     (
+                        "frontProbes".to_string(),
+                        crate::catalog::ParamValue::Bool(false),
+                    ),
+                    (
                         "autoRange".to_string(),
+                        crate::catalog::ParamValue::Bool(true),
+                    ),
+                    (
+                        "screenAo".to_string(),
+                        crate::catalog::ParamValue::Bool(true),
+                    ),
+                    (
+                        "sunRefresh".to_string(),
+                        crate::catalog::ParamValue::Enum("reshade".to_string()),
+                    ),
+                    (
+                        "sunFaces".to_string(),
+                        crate::catalog::ParamValue::Int(1536),
+                    ),
+                    (
+                        "skyTransfer".to_string(),
+                        crate::catalog::ParamValue::Bool(true),
+                    ),
+                    (
+                        "lightReach".to_string(),
+                        crate::catalog::ParamValue::Bool(true),
+                    ),
+                    (
+                        "lightThreshold".to_string(),
+                        crate::catalog::ParamValue::Number(0.0010000000474974513),
+                    ),
+                    (
+                        "insideCapture".to_string(),
                         crate::catalog::ParamValue::Bool(true),
                     ),
                 ],

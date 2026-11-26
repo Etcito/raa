@@ -25,6 +25,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                         "distance".to_string(),
                         crate::catalog::ParamValue::Number(60.0),
                     ),
+                    ("cover".to_string(), crate::catalog::ParamValue::Bool(true)),
                     (
                         "resolution".to_string(),
                         crate::catalog::ParamValue::Int(2048),

@@ -36,6 +36,7 @@
       "params": {
         "softness": 1,
         "distance": 60,
+        "cover": true,
         "resolution": 2048
       }
     },
