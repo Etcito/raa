@@ -45,6 +45,8 @@ struct Settings {
     q_miss: f32,
     decay: f32,
     jitter_correct: bool,
+    /// Signal-sweep: s at every pixel of an R frame (forward word bit 6, flags bit 2).
+    shadow_full: bool,
     debug: u32,
 }
 
@@ -66,6 +68,7 @@ impl Settings {
             q_miss: number("qMiss", 0.3),
             decay: number("decay", 0.98),
             jitter_correct: matches!(value("jitterCorrect"), Some(ParamValue::Bool(true))),
+            shadow_full: matches!(value("shadowFull"), Some(ParamValue::Bool(true))),
             debug: match value("debug") {
                 Some(ParamValue::Enum(view)) => DEBUG_VIEWS
                     .iter()
@@ -445,7 +448,7 @@ impl ReconstructPass {
     /// The params uniform (layout of `Params` in lighting_reconstruct.wgsl).
     fn param_bytes(&self, size: (u32, u32), real: bool, phase: [u32; 2], jitter_px: [f32; 2]) -> [u8; PARAM_BYTES] {
         let s = &self.settings;
-        let flags = u32::from(self.valid) | (u32::from(real) << 1);
+        let flags = u32::from(self.valid) | (u32::from(real) << 1) | (u32::from(s.shadow_full) << 2);
         let words: [u32; 16] = [
             size.0,
             size.1,
@@ -495,6 +498,8 @@ impl FeaturePass for ReconstructPass {
 
     fn prepare(&mut self, _ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         self.report.borrow_mut().ran = false;
+        raa_pipeline::INTERLACE_SHADOW_FULL
+            .store(self.settings.shadow_full, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 

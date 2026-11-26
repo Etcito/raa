@@ -70,6 +70,18 @@ fn params() -> Vec<ParamSpec> {
         "",
         "Adds (previous - current) camera jitter to the history reprojection.",
     ));
+    params.push(node_param(
+        "shadowFull",
+        "Sun visibility at every pixel",
+        "Reconstruction",
+        ParamKind::Bool,
+        ParamValue::Bool(false),
+        None,
+        None,
+        None,
+        "",
+        "Signal-sweep study: R frames evaluate s at every pixel (AO and irradiance stay at the phase pixel).",
+    ));
     let mut debug = node_param(
         "debug",
         "Debug view",
@@ -153,6 +165,7 @@ mod tests {
                 "qMiss",
                 "decay",
                 "jitterCorrect",
+                "shadowFull",
                 "debug"
             ]
         );

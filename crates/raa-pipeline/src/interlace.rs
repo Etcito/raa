@@ -10,6 +10,12 @@
 /// block whose signals an R frame evaluates.
 pub const INTERLACE_PHASES: [[u32; 2]; 4] = [[0, 0], [1, 1], [1, 0], [0, 1]];
 
+/// Signal-sweep study switch (set by pass.lighting.reconstruct `shadowFull`, read when the
+/// next frame's state is built): an R frame evaluates the sun visibility s at EVERY pixel
+/// (AO and probe irradiance stay at the phase pixel). Word bit 6.
+pub static INTERLACE_SHADOW_FULL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// The interlace state of one frame. `Default` is the mode off (nothing skipped).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LightingInterlace {
@@ -26,6 +32,8 @@ pub struct LightingInterlace {
     pub skip_ao: bool,
     /// G frame: `gi.ddgi` skips its screen resolve (the probe update still runs).
     pub skip_gi_resolve: bool,
+    /// R frames evaluate s at every pixel ([`INTERLACE_SHADOW_FULL`]).
+    pub shadow_full: bool,
 }
 
 impl LightingInterlace {
@@ -35,6 +43,8 @@ impl LightingInterlace {
         LightingInterlace {
             enabled,
             frame,
+            shadow_full: enabled
+                && INTERLACE_SHADOW_FULL.load(std::sync::atomic::Ordering::Relaxed),
             ..LightingInterlace::default()
         }
     }
@@ -55,7 +65,8 @@ impl LightingInterlace {
     }
 
     /// The `FrameGpu.temporal.w` word (`RgFrame.interlace` in compute nodes): 0 with the mode
-    /// off, else bit 0 = 1, bit 1 = R frame, bit 2 = px, bit 3 = py, bits 4.. = (n / 2) % 4.
+    /// off, else bit 0 = 1, bit 1 = R frame, bit 2 = px, bit 3 = py, bits 4..5 = (n / 2) % 4,
+    /// bit 6 = s at every pixel of an R frame.
     pub fn word(&self) -> u32 {
         if !self.enabled {
             return 0;
@@ -65,6 +76,7 @@ impl LightingInterlace {
             | (px << 2)
             | (py << 3)
             | ((((self.frame / 2) % 4) as u32) << 4)
+            | (u32::from(self.shadow_full) << 6)
     }
 
     /// The pipeline entries this state skips, in pipeline order.

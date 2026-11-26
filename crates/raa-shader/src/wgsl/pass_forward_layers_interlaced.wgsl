@@ -25,6 +25,12 @@ fn raa_interlace_sample(frag: vec2<f32>) -> bool {
     return (word & 2u) != 0u && all(pixel == phase);
 }
 
+// Signal-sweep study (word bit 6): an R frame evaluates s at every pixel.
+fn raa_interlace_shadow_all() -> bool {
+    let word = raa_frame.temporal.w;
+    return (word & 2u) != 0u && (word & 64u) != 0u;
+}
+
 @fragment
 fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> RaaForwardLayersInterlaced {
     let in = raa_pass_material_input(v, front_facing);
@@ -37,6 +43,8 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> RaaForw
     g.w = -1.0;
     if raa_interlace_sample(in.frag_coord.xy) {
         g = raa_opaque_signals(in, s);
+    } else if raa_interlace_shadow_all() {
+        g.shadow = raa_opaque_shadow(in, s);
     }
     var out: RaaForwardLayersInterlaced;
     out.d0 = vec4<f32>(l.d0, g.shadow);

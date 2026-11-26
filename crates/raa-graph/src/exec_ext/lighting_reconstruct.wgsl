@@ -43,6 +43,8 @@ struct Params {
 
 const HISTORY_VALID: u32 = 1u;
 const REAL_FRAME: u32 = 2u;
+// Signal-sweep: s is present at every pixel of an R frame (E and a still at the phase pixel).
+const SHADOW_FULL: u32 = 4u;
 
 @group(0) @binding(0) var color_tex: texture_2d<f32>;
 @group(0) @binding(1) var kd_tex: texture_2d<f32>;
@@ -213,12 +215,12 @@ fn reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
                     continue;
                 }
                 let st = textureLoad(color_tex, t, 0).a;
-                if (st < 0.0) {
+                let at = textureLoad(kd_tex, t, 0).a;
+                if (at < 0.0 || st < 0.0) {
                     continue;
                 }
                 let w = b * (guide_w(z, n, linear_z(t), view_normal(t)) + 1e-4);
                 let et = textureLoad(e_tex, t, 0).rgb;
-                let at = textureLoad(kd_tex, t, 0).a;
                 acc = acc + w * vec4<f32>(et, at);
                 acc_s = acc_s + w * st;
                 ws = ws + w;
@@ -226,19 +228,28 @@ fn reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         let has_cur = ws > 0.0;
         let cur = select(vec4<f32>(0.0), acc / max(ws, 1e-30), has_cur);
-        let cur_s = select(0.0, acc_s / max(ws, 1e-30), has_cur);
+        var cur_s = select(0.0, acc_s / max(ws, 1e-30), has_cur);
         let q = select(params.q_miss, 1.0, own);
-        let alpha_s = select(params.alpha.y, params.alpha.x, own);
+        var q_s = q;
+        var alpha_s = select(params.alpha.y, params.alpha.x, own);
+        var has_s = has_cur;
+        if ((params.flags & SHADOW_FULL) != 0u && base.a >= 0.0) {
+            // s sampled at this pixel: exact, weighted like a phase-pixel sample.
+            cur_s = base.a;
+            q_s = 1.0;
+            alpha_s = params.alpha.x;
+            has_s = true;
+        }
         let alpha_e = select(params.alpha.w, params.alpha.z, own);
         let wc_e = select(0.0, alpha_e * q, has_cur);
         let wh_e = (1.0 - alpha_e) * h.c;
-        let wc_s = select(0.0, alpha_s * q, has_cur);
+        let wc_s = select(0.0, alpha_s * q_s, has_s);
         let wh_s = (1.0 - alpha_s) * h.c;
         let den_e = max(wc_e + wh_e, 1e-5);
         let den_s = max(wc_s + wh_s, 1e-5);
         ea = (wc_e * cur + wh_e * h.ea) / den_e;
         s = (wc_s * cur_s + wh_s * h.s) / den_s;
-        let c_new = 0.5 * ((wc_e * q + wh_e * h.c) / den_e + (wc_s * q + wh_s * h.c) / den_s);
+        let c_new = 0.5 * ((wc_e * q + wh_e * h.c) / den_e + (wc_s * q_s + wh_s * h.c) / den_s);
         c_store = clamp(c_new, 0.0, 1.0) * params.decay;
         textureStore(h0_out, p, ea);
         textureStore(h1_out, p, vec4<f32>(s, z, c_store, 0.0));
