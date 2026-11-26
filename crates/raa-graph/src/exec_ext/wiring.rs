@@ -927,6 +927,8 @@ struct State {
     slot_count: usize,
     size: (u32, u32),
     pool: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    /// Whether `pool` holds the HDR chain's own A/B textures (no allocation of its own).
+    pool_aliased: bool,
     display_pool: Vec<Option<wgpu::TextureView>>,
     display_size: (u32, u32),
 }
@@ -952,9 +954,14 @@ impl GraphFrame for WiringFrame {
         let mut guard = self.state.borrow_mut();
         let state = &mut *guard;
         let display_size = ctx.targets.display_rect().size;
-        if state.size != ctx.size {
+        // One or two colour slots at the surface size are the HDR chain's A and B: every pass of the
+        // chain is bound explicitly, so the pool is the same ping-pong pair the fixed pipeline uses
+        // and the 16-bit colour textures are not allocated twice.
+        let alias = (1..=2).contains(&state.slot_count) && display_size == ctx.size;
+        if state.size != ctx.size || state.pool_aliased != alias {
             state.pool.clear();
             state.size = ctx.size;
+            state.pool_aliased = alias;
         }
         if state.display_size != display_size {
             state.display_pool.clear();
@@ -972,6 +979,11 @@ impl GraphFrame for WiringFrame {
             }
         }
         while state.pool.len() < state.slot_count {
+            if alias {
+                let (texture, view) = ctx.targets.hdr().textures()[state.pool.len()];
+                state.pool.push((texture.clone(), view.clone()));
+                continue;
+            }
             let texture = make_color_texture(ctx.gpu, ctx.size);
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             state.pool.push((texture, view));
