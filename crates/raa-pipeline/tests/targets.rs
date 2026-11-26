@@ -9,6 +9,8 @@ use raa_pipeline::{HDR_FORMAT, Targets};
 
 const GBUFFER: wgpu::TextureUsages =
     wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING);
+/// Depth, normal and motion are also copy sources for the training-capture guides (e049eb97).
+const CAPTURE_GUIDE: wgpu::TextureUsages = GBUFFER.union(wgpu::TextureUsages::COPY_SRC);
 
 fn check(texture: &wgpu::Texture, size: (u32, u32), format: wgpu::TextureFormat) {
     assert_eq!((texture.width(), texture.height()), size);
@@ -27,13 +29,13 @@ fn targets_have_s12_sizes_formats_and_usages(gpu: &GpuContext) {
         (64, 48),
         wgpu::TextureFormat::Depth32Float,
     );
-    assert_eq!(targets.depth_texture().usage(), GBUFFER);
+    assert_eq!(targets.depth_texture().usage(), CAPTURE_GUIDE);
     check(
         targets.normal_texture(),
         (64, 48),
         wgpu::TextureFormat::Rgba16Float,
     );
-    assert_eq!(targets.normal_texture().usage(), GBUFFER);
+    assert_eq!(targets.normal_texture().usage(), CAPTURE_GUIDE);
     check(
         targets.material_texture(),
         (64, 48),
@@ -45,7 +47,7 @@ fn targets_have_s12_sizes_formats_and_usages(gpu: &GpuContext) {
         (64, 48),
         wgpu::TextureFormat::Rgba16Float,
     );
-    assert_eq!(targets.motion_texture().usage(), GBUFFER);
+    assert_eq!(targets.motion_texture().usage(), CAPTURE_GUIDE);
 
     assert_eq!(HDR_FORMAT, wgpu::TextureFormat::Rgba16Float);
     let hdr_usage = GBUFFER

@@ -11,8 +11,7 @@ pub(crate) const IBL_PROVIDER: &str = "ibl";
 /// Priority of the IBL ambient provider (above the raa-lit defaults at 0).
 pub(crate) const IBL_PRIORITY: i32 = 10;
 
-/// The IBL contract functions (`raa_ibl_irradiance`, `raa_ibl_specular`, `raa_ibl_dfg`,
-/// `raa_specular_occlusion`).
+/// The IBL contract functions (`raa_ibl_irradiance`, `raa_ibl_specular`, `raa_ibl_dfg`).
 pub(crate) const IBL_LIB_SOURCE: &str = include_str!("wgsl/ibl_lib.wgsl");
 
 /// `raa_slot_ambient` of provider `ibl` and its private helpers.

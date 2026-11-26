@@ -523,6 +523,7 @@ mod tests {
     #[test]
     fn area_restir_bytes_matches_the_contract() {
         assert_eq!(area_restir_bytes((1280, 720)), 88_670_421);
-        assert_eq!(area_restir_bytes((320, 180)), 5_265_621);
+        // 64 bytes per texel of one history group since 8dab9f3e, like the 1280x720 contract.
+        assert_eq!(area_restir_bytes((320, 180)), 5_726_421);
     }
 }

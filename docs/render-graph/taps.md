@@ -1,6 +1,6 @@
 # Render graph taps
 
-Each row names the Rust field or accessor that holds the view or buffer a pass publishes under its (pass entry, port) key in the pipeline's `ResourceTable`, and the file that holds that field. The row set is every catalog output port of every pass node type in `crates/raa-graph/src/nodes/passes.rs`, 81 rows in all. `crates/raa-graph/tests/view_nodes.rs` reads this table: every line after the header that starts with `| ` is a row, the separator is skipped, and cells 1 and 2 are the pass and the port.
+Each row names the Rust field or accessor that holds the view or buffer a pass publishes under its (pass entry, port) key in the pipeline's `ResourceTable`, and the file that holds that field. The row set is every catalog output port of every pass node type in `crates/raa-graph/src/nodes/passes.rs`, 85 rows in all. `crates/raa-graph/tests/view_nodes.rs` reads this table: every line after the header that starts with `| ` is a row, the separator is skipped, and cells 1 and 2 are the pass and the port.
 
 ## Rules
 
@@ -64,6 +64,8 @@ Each row names the Rust field or accessor that holds the view or buffer a pass p
 | gi.ssgi | raw | SsgiResources::raw_view | crates/raa-gi/src/parts/ssgi/resources.rs |
 | gi.ssgi | history | SsgiResources::history_write_view | crates/raa-gi/src/parts/ssgi/resources.rs |
 | gi.ssgi | output | SsgiResources::output | crates/raa-gi/src/parts/ssgi/resources.rs |
+| gi.spherical | lookup | none: a typed ordering link (PortType::Buffer, nothing published); consumers bind SphericalGpu's grid buffers | crates/raa-sdf-trace/src/mesh/spherical_gpu.rs |
+| gi.nrc | gi | NrcImages::history[staged.write] | crates/raa-sdf-trace/src/mesh/nrc.rs |
 | shadow.contact | contact | Output::view | crates/raa-contact/src/feature.rs |
 | shadow.contact | output | Output::view | crates/raa-contact/src/feature.rs |
 | particles.sim | particles | SimBuffers::particles | crates/raa-particles/src/sim.rs |
@@ -94,6 +96,8 @@ Each row names the Rust field or accessor that holds the view or buffer a pass p
 | dof | farGather | DofTargets::far_gather_view | crates/raa-dof/src/resources.rs |
 | bloom | color | Targets::hdr().src() | crates/raa-pipeline/src/targets.rs |
 | bloom | chain | Chain::views | crates/raa-bloom/src/feature.rs |
+| exposure.auto | color | publish_color: the chain pool view the pass wrote (wiring extension) | crates/raa-graph/src/exec_ext/wiring.rs |
+| sharpen | color | publish_color: the chain pool view the pass wrote (wiring extension) | crates/raa-graph/src/exec_ext/wiring.rs |
 | grading | color | Targets::hdr().src() | crates/raa-pipeline/src/targets.rs |
 | cel.resolve | color | Targets::hdr().src() | crates/raa-pipeline/src/targets.rs |
 | tonemap | color | Targets::output | crates/raa-pipeline/src/targets.rs |

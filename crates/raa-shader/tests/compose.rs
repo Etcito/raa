@@ -209,7 +209,12 @@ fn directional_boundary_is_declared_once_and_called_by_the_lit_passes() {
         if lit {
             // The raw frame radiance stays the only input, before the Flat/UNLIT select.
             assert!(
-                wgsl.find(call).unwrap() < wgsl.find("let color = select(").unwrap(),
+                // `var color` in the transparent pass (direct/indirect views, cb93ca27).
+                wgsl.find(call).unwrap()
+                    < wgsl
+                        .find("let color = select(")
+                        .or_else(|| wgsl.find("var color = select("))
+                        .unwrap(),
                 "{pass:?}"
             );
         }

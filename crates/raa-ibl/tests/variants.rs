@@ -60,12 +60,11 @@ fn ibl_wins_ambient() {
 #[test]
 fn ibl_lib_defines_the_contract_functions() {
     let fns = defined_fns(raa_ibl::IBL_LIB_WGSL);
-    for name in [
-        "raa_ibl_irradiance",
-        "raa_ibl_specular",
-        "raa_ibl_dfg",
-        "raa_specular_occlusion",
-    ] {
+    // raa_specular_occlusion moved to raa-shader's shared ibl_specular_response.wgsl
+    // (IBL_SPECULAR_RESPONSE_WGSL, in every lit prelude) with the near-mirror trace (15e6a79f).
+    assert!(!fns.contains(&"raa_specular_occlusion"));
+    assert!(raa_shader::IBL_SPECULAR_RESPONSE_WGSL.contains("fn raa_specular_occlusion("));
+    for name in ["raa_ibl_irradiance", "raa_ibl_specular", "raa_ibl_dfg"] {
         assert_eq!(
             fns.iter().filter(|f| **f == name).count(),
             1,

@@ -447,8 +447,11 @@ fn eligibility_accessors_and_the_fullscreen_vg_shade_pipeline() {
     let material = rig.lit.materials_mut().add(material).expect("material");
     assert_eq!(handle.material_fn_of(material), function);
 
-    // One prepared frame (no pass recorded) commits a previous row for the live slot.
+    // One prepared frame (no pass recorded) whose view is acknowledged as submitted commits a
+    // previous row for the live slot (since 168067a4 a mere prepare commits nothing).
     rig.prepare(&gpu);
+    rig.lit.submitted_scene_view(0);
+    rig.lit.finish_scene_frame(true);
     assert!(handle.previous_instance_row(slot).is_some());
 
     // The fullscreen VG shade pipeline composes, validates and builds against the S32

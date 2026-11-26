@@ -91,10 +91,20 @@ fn cloud_shadow_multiplies_both_result_paths() {
     let p = provider::csm_provider();
     // The common cloud helper belongs to the shared composer, never to provider text.
     assert!(!p.wgsl.contains("fn raa_cloud_shadow("), "{}", p.wgsl);
+    // Three result paths: the planar (mirror) capture branch of 67229f37 binds the cloud term
+    // once to `cloud` for both of its returns, then the cleared and the cascade paths.
     assert_eq!(
         p.wgsl.matches("raa_cloud_shadow(world_pos)").count(),
-        2,
+        3,
         "cloud transmittance must be consumed exactly once in each result path"
+    );
+    assert!(
+        p.wgsl
+            .contains("if raa_shadow.params.w < 0.5 { return cloud; }")
+            && p.wgsl
+                .contains("return raa_csm_planar(world_pos, n, frag) * cloud;"),
+        "{}",
+        p.wgsl
     );
     assert!(
         p.wgsl

@@ -244,15 +244,15 @@ Range: a range comes only from code or comments that state it, cited in the reas
 | raa-sky | crates/raa-sky/src/wgsl/milky_way.wgsl:138 | raa_milky_way_range | 4.0 | wgsl | layout | - | - | - | - | - | - | - | - | Encoding range |
 | raa-sky | crates/raa-sky/src/wgsl/sky.wgsl:8 | raa_sky_pi | 3.14159265 | wgsl | maths | - | - | - | - | - | - | - | - | Mathematical constant |
 | raa-sky | crates/raa-sky/src/wgsl/sky.wgsl:10 | raa_sky_cloud_curve | 0.4 | wgsl | maths | - | - | - | - | - | - | - | - | Physical, astronomical or encoding value fixed by S23 |
-| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:52 | RAA_GI_MAX_LEVELS | 5u | wgsl | layout | - | - | - | - | - | - | - | - | Array or bit-width cap, or duplicate of a layout constant |
-| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:53 | RAA_GI_FLAG_VALID | 1u | wgsl | layout | - | - | - | - | - | - | - | - | Code, flag or enum id |
-| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:54 | RAA_GI_FLAG_REFLECTIONS | 2u | wgsl | layout | - | - | - | - | - | - | - | - | Code, flag or enum id |
-| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:55 | RAA_GI_FLAG_LOCAL_SHADOWS | 4u | wgsl | layout | - | - | - | - | - | - | - | - | Code, flag or enum id |
-| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:62 | MAX_STEPS | 64u | wgsl | tunable | pass.ssr | maxSteps | Trace | Max steps | yes | override | pipeline | unstated | Trace length of the SSR pass; override constant |
-| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:63 | REFINE_STEPS | 8u | wgsl | tunable | pass.ssr | refineSteps | Trace | Refine steps | yes | override | pipeline | unstated | Changes the look or quality of a pass a catalog node drives; not fixed by a layout |
-| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:65 | EDGE_FADE | 0.1 | wgsl | tunable | pass.ssr | edgeFade | Trace | Edge fade | no | override | pipeline | unstated | Changes the look or quality of a pass a catalog node drives; not fixed by a layout |
-| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:67 | CELL_EPS | 0.01 | wgsl | maths | - | - | - | - | - | - | - | - | Epsilon, bound, stand-in or debug value of the maths, not a look setting |
-| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:68 | NO_T | 3.4e38 | wgsl | maths | - | - | - | - | - | - | - | - | Epsilon, bound, stand-in or debug value of the maths, not a look setting |
+| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:50 | RAA_GI_MAX_LEVELS | 5u | wgsl | layout | - | - | - | - | - | - | - | - | Array or bit-width cap, or duplicate of a layout constant |
+| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:51 | RAA_GI_FLAG_VALID | 1u | wgsl | layout | - | - | - | - | - | - | - | - | Code, flag or enum id |
+| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:52 | RAA_GI_FLAG_REFLECTIONS | 2u | wgsl | layout | - | - | - | - | - | - | - | - | Code, flag or enum id |
+| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:53 | RAA_GI_FLAG_LOCAL_SHADOWS | 4u | wgsl | layout | - | - | - | - | - | - | - | - | Code, flag or enum id |
+| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:60 | MAX_STEPS | 64u | wgsl | tunable | pass.ssr | maxSteps | Trace | Max steps | yes | override | pipeline | unstated | Trace length of the SSR pass; override constant |
+| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:61 | REFINE_STEPS | 8u | wgsl | tunable | pass.ssr | refineSteps | Trace | Refine steps | yes | override | pipeline | unstated | Changes the look or quality of a pass a catalog node drives; not fixed by a layout |
+| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:63 | EDGE_FADE | 0.1 | wgsl | tunable | pass.ssr | edgeFade | Trace | Edge fade | no | override | pipeline | unstated | Changes the look or quality of a pass a catalog node drives; not fixed by a layout |
+| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:65 | CELL_EPS | 0.01 | wgsl | maths | - | - | - | - | - | - | - | - | Epsilon, bound, stand-in or debug value of the maths, not a look setting |
+| raa-ssr | crates/raa-ssr/src/wgsl/ssr_trace.wgsl:66 | NO_T | 3.4e38 | wgsl | maths | - | - | - | - | - | - | - | - | Epsilon, bound, stand-in or debug value of the maths, not a look setting |
 | raa-tonemap | crates/raa-tonemap/src/tonemap.wgsl:35 | AGX_MIN_EV | -12.47393 | wgsl | maths | - | - | - | - | - | - | - | - | Fixed tone or grading maths constant |
 | raa-tonemap | crates/raa-tonemap/src/tonemap.wgsl:36 | AGX_MAX_EV | 4.026069 | wgsl | maths | - | - | - | - | - | - | - | - | Fixed tone or grading maths constant |
 | raa-tonemap | crates/raa-tonemap/src/tonemap.wgsl:37 | ACES_PRE_SCALE | 1.0 / 0.6 | wgsl | maths | - | - | - | - | - | - | - | - | Fixed tone or grading maths constant |

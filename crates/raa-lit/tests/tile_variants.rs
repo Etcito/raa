@@ -87,7 +87,10 @@ fn fixed_capacity_arrays_and_workgroup_fit_core_limits() {
 fn bounded_network_ranks_all_candidates_before_emitting() {
     // Structural shader checks only; numeric ranking expectations stay in the
     // tile_selection module's text fixtures, never in a CPU/GPU comparison.
-    let network = LIGHT_TILES_WGSL.split("// Sort the power-of-two prefix").nth(1).unwrap();
+    let network = LIGHT_TILES_WGSL
+        .split("// Sort the power-of-two prefix")
+        .nth(1)
+        .unwrap();
     let (sort, emit) = network.split_once("let qualified =").unwrap();
     for required in [
         "let light_count = min(raa_frame.light_info.x, MAX_LOCAL_LIGHTS)",
@@ -348,15 +351,26 @@ mod install {
         lit.local_lights_mut()
             .add(LocalLight::default())
             .expect("light");
-        assert!(frame(&gpu, &pipeline, &mut lit).is_none());
+        // Since 168067a4 an invocation index advances only through the engine's frame
+        // lifecycle (a really submitted view is acknowledged), as raa-js engine.rs drives it:
+        // a bare prepare reopens the same index.
+        let invocation = |index: u64, lit: &mut LitRenderer| {
+            pipeline.borrow_mut().begin_scene_submission();
+            lit.begin_scene_frame(index);
+            let error = frame(&gpu, &pipeline, lit);
+            lit.submitted_scene_view(0);
+            lit.finish_scene_frame(true);
+            error
+        };
+        assert!(invocation(0, &mut lit).is_none());
         assert!(
             lit.light_stats().stats_frame_index.is_none(),
             "the first invocation is still pending"
         );
         // The pipeline creates its targets after the first view prepare, so the first
         // frame's published grid is the fallback; the settled grid follows it.
-        for _ in 0..2 {
-            assert!(frame(&gpu, &pipeline, &mut lit).is_none());
+        for index in 1..3 {
+            assert!(invocation(index, &mut lit).is_none());
         }
         let stats = lit.light_stats();
         assert_eq!(stats.stats_frame_index, Some(1));

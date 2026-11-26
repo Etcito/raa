@@ -370,7 +370,8 @@ fn restir_mode_publishes_the_mask_and_allocates_its_resources() {
         Some(area_restir_bytes(SIZE)),
         "the ReSTIR bytes of {SIZE:?}: {with_restir} against {without}"
     );
-    assert_eq!(area_restir_bytes(SIZE), 5_265_621);
+    // 64 bytes per texel of one history group since 8dab9f3e (the 1280x720 contract moved with it).
+    assert_eq!(area_restir_bytes(SIZE), 5_726_421);
 
     rig.lit
         .set_area_stochastic(StochasticShadowSettings::standard())

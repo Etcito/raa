@@ -363,6 +363,39 @@ export interface SphericalGiSettings {
    * zMax is then only the initial radius; false keeps zMax as a manual radius. Defaults to false.
    */
   autoRange: boolean;
+  /**
+   * Experimental lookup: a receiver uses the probes on the side its normal faces, weighted by a
+   * compact distance kernel, instead of the trilinear cell corners. Defaults to false.
+   */
+  frontProbes: boolean;
+  /** Multiply the spherical irradiance by the screen-space AO (min(material AO, GTAO)), like DDGI. Defaults to true. */
+  screenAo: boolean;
+  /**
+   * What a sun direction change does to captured probes: "reshade" re-shades the sun group in
+   * place (one shadow ray per stored hit texel, blended by the angle); "recapture" recaptures
+   * every face. Defaults to "reshade".
+   */
+  sunRefresh: 'reshade' | 'recapture';
+  /** Integer from 6 to 24576: faces re-shaded per frame after a sun or sky change. Defaults to 1536. */
+  sunFaces: number;
+  /**
+   * Sky misses stored as 9 SH visibility coefficients plus a normalised residual per patch, so a
+   * sky colour or shape change relights the patches without rays. Defaults to true.
+   */
+  skyTransfer: boolean;
+  /**
+   * Per-face light invalidation: added or moved lights take a GPU reach test over the stored hits
+   * instead of the faces' hit bounds. Defaults to true.
+   */
+  lightReach: boolean;
+  /** Luma from 0 to 1000 under which a light's unshadowed contribution does not count as reaching a hit. Defaults to 0.001. */
+  lightThreshold: number;
+  /**
+   * A probe whose cell centre lies inside closed geometry keeps the centre and its capture rays
+   * skip surfaces met from behind; false relocates it to the free offset with the most clearance.
+   * Defaults to true.
+   */
+  insideCapture: boolean;
 }
 
 export interface SphericalGiStats {

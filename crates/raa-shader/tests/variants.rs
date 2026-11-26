@@ -526,24 +526,30 @@ fn directional_radiance_is_applied_once_at_each_lit_pass_boundary() {
             1,
             "{pass:?}"
         );
+        // Whitespace-insensitive: the transparent pass binds the term to `let direct` (cb93ca27).
+        let flat = source.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            source.contains(
-                "raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,\n            raa_directional_radiance(raa_frame.sun_color.rgb) * shadow)"
+            flat.contains(
+                "raa_slot_direct(s, c, -raa_frame.sun_dir.xyz, raa_directional_radiance(raa_frame.sun_color.rgb) * shadow)"
             ),
             "{pass:?}"
         );
         assert!(!source.contains("raa_frame.sun_color ="), "{pass:?}");
-        // Material ordering: direct, ambient, indirect, local lighting, then the
-        // Flat/UNLIT select.
+        // Material ordering: the direct sun term first, then ambient, indirect and local
+        // lighting (in any order: the transparent pass keeps `local` and `indirect` apart for
+        // the direct/indirect lighting views, cb93ca27), then the Flat/UNLIT select.
         let direct = source
             .find("raa_directional_radiance(raa_frame.sun_color.rgb)")
             .expect("boundary");
         let ambient = source.find("raa_slot_ambient(s, c)").expect("ambient");
         let indirect = source.find("raa_slot_indirect(s, c)").expect("indirect");
         let local = source.find("raa_local_lighting(s, c)").expect("local");
-        let unlit = source.find("let color = select(").expect("unlit selection");
+        let unlit = source
+            .find("let color = select(")
+            .or_else(|| source.find("var color = select("))
+            .expect("unlit selection");
         assert!(
-            direct < ambient && ambient < indirect && indirect < local && local < unlit,
+            direct < ambient.min(indirect).min(local) && ambient.max(indirect).max(local) < unlit,
             "{pass:?}"
         );
         // Local lights keep their raw radiance: only the sun term reaches the boundary.

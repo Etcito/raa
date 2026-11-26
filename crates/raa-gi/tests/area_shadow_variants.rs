@@ -323,7 +323,8 @@ fn records_match_contract_area_stochastic_gpu() {
     let params = [
         ("frame_index", 0),
         ("capture_seed_plus_one", 4),
-        ("pad1", 8),
+        // Ray-budget samples per pixel (1fa23b67; 0 from legacy writers = 1 sample).
+        ("samples_per_pixel", 8),
         ("pad2", 12),
     ];
     check_struct(&reflection.module, "AreaShadowParamsGpu", 16, &params);

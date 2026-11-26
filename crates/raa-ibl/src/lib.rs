@@ -24,6 +24,7 @@ pub use feature::{IblFeature, IblHandle, IblPublication};
 /// IBL contract functions over the S10 group-1 environment, reused by other providers:
 /// `raa_ibl_irradiance(n) -> vec3` (SH9, cosine-convolved / pi, so a constant environment
 /// c gives c), `raa_ibl_specular(r, roughness) -> vec3` (prefiltered cube at roughness x
-/// max mip), `raa_ibl_dfg(n_dot_v, roughness) -> vec2` (BRDF LUT scale, bias) and
-/// `raa_specular_occlusion(n_dot_v, ao, roughness) -> f32` (Lagarde).
+/// max mip) and `raa_ibl_dfg(n_dot_v, roughness) -> vec2` (BRDF LUT scale, bias). The Lagarde
+/// `raa_specular_occlusion(n_dot_v, ao, roughness) -> f32` lives in raa-shader's prelude
+/// (`IBL_SPECULAR_RESPONSE_WGSL`).
 pub const IBL_LIB_WGSL: &str = provider::IBL_LIB_SOURCE;
