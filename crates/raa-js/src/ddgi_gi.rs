@@ -3,7 +3,7 @@
 
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use raa_core::RaaError;
-use raa_sdf_trace::mesh::{DdgiFeature, DdgiHandle, DdgiWarmup, MeshTraceHandle};
+use raa_sdf_trace::mesh::{DDGI_GI_NAME, DdgiFeature, DdgiHandle, DdgiWarmup, MeshTraceHandle};
 use wasm_bindgen::prelude::*;
 
 use crate::engine::{Engine, InstallCtx};
@@ -44,6 +44,23 @@ impl Engine {
             });
             Ok(true)
         })
+    }
+
+    /// One warm-up frame: like `render`, but only the DDGI pass is prepared, encoded and
+    /// acknowledged (no G-buffer, lighting, TAA or post). Use it instead of `render` between
+    /// `ddgiWarmupBegin` and the end of the warm-up.
+    #[wasm_bindgen(js_name = ddgiWarmupStep)]
+    pub fn ddgi_warmup_step(&mut self, now_ms: f64) -> Result<(), JsValue> {
+        self.with_state(|_, st| {
+            st.pipeline.borrow_mut().set_only_pass(Some(DDGI_GI_NAME));
+            Ok(())
+        })?;
+        let result = self.render(now_ms);
+        self.with_state(|_, st| {
+            st.pipeline.borrow_mut().set_only_pass(None);
+            Ok(())
+        })?;
+        result
     }
 
     /// Stops a running DDGI warm-up.

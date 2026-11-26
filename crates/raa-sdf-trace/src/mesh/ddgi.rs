@@ -631,6 +631,10 @@ struct Staged {
     pack: u32,
     /// Rays per probe (picks the update kernels' workgroup arrays).
     rays: u32,
+    /// Warm-up only: further batches of this submit (each its own job list), copied into the
+    /// update buffers from `staging` between dispatches.
+    extra: Vec<(usize, u32)>,
+    staging: Option<Buffer>,
 }
 
 /// Starting cost model before the first timestamp readback (RTX 3090, Sponza, 64 rays).
@@ -1219,6 +1223,15 @@ impl FeaturePass for DdgiPass {
             Some(_) => 0,
             None => probes_for(settings.burst_ms),
         };
+        // Probes one warm-up submit traces: the chunk budget over the cost model, in dispatches of
+        // at most `job_cap` probes.
+        let chunk_total = match warmup {
+            Some(w) if traceable => {
+                let first = if self.batch_ms > 0.0 { 1.0 } else { 0.25 };
+                ((f64::from(w.chunk_ms * first) / self.ms_per_probe) as u32).clamp(floor, probes)
+            }
+            _ => 0,
+        };
         let batch = if warmup.is_some() {
             burst
         } else {
@@ -1255,10 +1268,28 @@ impl FeaturePass for DdgiPass {
         if !jobs.is_empty() {
             self.idle_frames = 0;
         }
+        // Warm-up: more batches in the same submit until the chunk budget is filled.
+        let mut extra_jobs: Vec<(Vec<u32>, [[f32; 3]; 3])> = Vec::new();
+        if warmup.is_some() && traceable {
+            let mut remaining = chunk_total.saturating_sub(jobs.len() as u32 / 2);
+            while remaining > 0 && self.schedule.unconverged > 0 {
+                let n = remaining.min(job_cap);
+                let mut more = Vec::with_capacity(2 * n as usize);
+                self.schedule
+                    .plan(Some(&camera), converge_age, n, n, &mut more);
+                if more.is_empty() || self.schedule.unconverged == 0 {
+                    break;
+                }
+                remaining = remaining.saturating_sub(more.len() as u32 / 2);
+                let rotation = self.random_rotation();
+                extra_jobs.push((more, rotation));
+            }
+        }
         if let Some(w) = warmup.filter(|_| traceable) {
             let mut state = self.state.borrow_mut();
             let status = &mut state.warmup_status;
-            let traced = (jobs.len() / 2) as u32;
+            let traced = (jobs.len() / 2) as u32
+                + extra_jobs.iter().map(|(j, _)| (j.len() / 2) as u32).sum::<u32>();
             status.chunks += u32::from(traced > 0);
             status.updates += u64::from(traced);
             status.pending = self.schedule.unconverged;
@@ -1312,6 +1343,7 @@ impl FeaturePass for DdgiPass {
             update_flags |= FLAG_SKY_TRANSFER;
         }
         let env = ctx.lighting.environment_diffuse_sh().is_some();
+        let build = |rotation: [[f32; 3]; 3], count: u32| -> (Vec<u8>, Vec<u8>) {
         let mut params = Vec::with_capacity(PARAMS_BYTES as usize);
         for column in rotation {
             push_f32(&mut params, [column[0], column[1], column[2], 0.0]);
@@ -1320,7 +1352,7 @@ impl FeaturePass for DdgiPass {
             &mut params,
             [
                 settings.rays_per_probe,
-                (jobs.len() / 2) as u32,
+                count,
                 ctx.frame as u32,
                 update_flags,
             ],
@@ -1373,7 +1405,7 @@ impl FeaturePass for DdgiPass {
         let mut options = Vec::with_capacity(OPTIONS_BYTES as usize);
         push_u32(
             &mut options,
-            [triangles, (jobs.len() / 2) as u32, u32::from(env), 0],
+            [triangles, count, u32::from(env), 0],
         );
         push_u32(&mut options, [0; 4]);
         push_u32(
@@ -1382,8 +1414,14 @@ impl FeaturePass for DdgiPass {
         );
         // The shared local-light integrator uses its one-tap area estimator for probe rays.
         push_u32(&mut options, [1, 0, 0, 0]);
+            (params, options)
+        };
+        let (params, options) = build(rotation, (jobs.len() / 2) as u32);
         let queue = ctx.gpu.queue();
-        gpu.ensure_jobs(ctx.gpu, jobs.len());
+        gpu.ensure_jobs(
+            ctx.gpu,
+            extra_jobs.iter().map(|(j, _)| j.len()).fold(jobs.len(), usize::max),
+        );
         let relight = self.lighting.relight_frames > 0;
         self.lighting.relight_frames = self.lighting.relight_frames.saturating_sub(1);
         let read_masks = self.lighting.frame % 4 == 0
@@ -1396,6 +1434,27 @@ impl FeaturePass for DdgiPass {
         queue.write_buffer(&gpu.options, 0, &options);
         let job_bytes: Vec<u8> = jobs.iter().flat_map(|slot| slot.to_le_bytes()).collect();
         queue.write_buffer(&gpu.jobs, 0, &job_bytes);
+        let mut extra = Vec::new();
+        let mut staging = None;
+        if !extra_jobs.is_empty() {
+            let mut bytes: Vec<u8> = Vec::new();
+            for (more, rotation) in &extra_jobs {
+                let count = (more.len() / 2) as u32;
+                let (p, o) = build(*rotation, count);
+                extra.push((bytes.len(), count));
+                bytes.extend_from_slice(&p);
+                bytes.extend_from_slice(&o);
+                bytes.extend(more.iter().flat_map(|w| w.to_le_bytes()));
+            }
+            let buffer = ctx.gpu.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gi.ddgi.warmup"),
+                size: bytes.len() as u64,
+                usage: Usage::COPY_SRC | Usage::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&buffer, 0, &bytes);
+            staging = Some(buffer);
+        }
         self.staged = Some(Staged {
             bounds,
             jobs,
@@ -1413,6 +1472,8 @@ impl FeaturePass for DdgiPass {
             screen: resolve,
             pack: probes_per_group(settings.rays_per_probe),
             rays: settings.rays_per_probe,
+            extra,
+            staging,
         });
         Ok(())
     }
@@ -1513,6 +1574,40 @@ impl FeaturePass for DdgiPass {
             }
             if timed && let Some(timer) = timer {
                 timer.resolve(ctx.encoder, jobs);
+            }
+            if let Some(staging) = &staged.staging {
+                for &(at, count) in &staged.extra {
+                    let at = at as u64;
+                    let job_at = at + PARAMS_BYTES + OPTIONS_BYTES;
+                    ctx.encoder
+                        .copy_buffer_to_buffer(staging, at, &gpu.params, 0, PARAMS_BYTES);
+                    ctx.encoder.copy_buffer_to_buffer(
+                        staging,
+                        at + PARAMS_BYTES,
+                        &gpu.options,
+                        0,
+                        OPTIONS_BYTES,
+                    );
+                    ctx.encoder.copy_buffer_to_buffer(
+                        staging,
+                        job_at,
+                        &gpu.jobs,
+                        0,
+                        8 * u64::from(count),
+                    );
+                    let mut pass = ctx
+                        .encoder
+                        .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("gi.ddgi.update"),
+                            ..Default::default()
+                        });
+                    let kernels = gpu.kernels(staged.rays);
+                    pass.set_bind_group(0, &group, &[]);
+                    pass.set_pipeline(&kernels.trace);
+                    pass.dispatch_workgroups(count.div_ceil(staged.pack), 1, 1);
+                    pass.set_pipeline(&kernels.blend);
+                    pass.dispatch_workgroups(count.div_ceil(staged.pack), 1, 1);
+                }
             }
         }
         if let Some((width, height)) = staged.screen {

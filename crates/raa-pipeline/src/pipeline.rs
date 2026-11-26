@@ -631,6 +631,8 @@ pub struct Pipeline {
     pass_timings: PassTimings,
     /// Graph frames (S55) in insertion order, each under its name.
     graph_frames: Vec<(String, Box<dyn GraphFrame>)>,
+    /// While set, frames prepare, record and acknowledge only this pass (a warm-up of one feature).
+    only_pass: Option<String>,
 }
 
 impl Pipeline {
@@ -661,6 +663,7 @@ impl Pipeline {
             resources: ResourceTable::new(),
             pass_timings: PassTimings::default(),
             graph_frames: Vec::new(),
+            only_pass: None,
         }
     }
 
@@ -721,6 +724,12 @@ impl Pipeline {
         Ok(())
     }
 
+    /// Restricts frames to one pass (by name) or lifts the restriction. Used by feature warm-ups
+    /// that must not encode the G-buffer, lighting or post passes.
+    pub fn set_only_pass(&mut self, name: Option<&str>) {
+        self.only_pass = name.map(str::to_owned);
+    }
+
     /// Removes the graph frame `name` and returns it; `None` when no such frame is added.
     pub fn remove_graph_frame(&mut self, name: &str) -> Option<Box<dyn GraphFrame>> {
         let at = self.graph_frames.iter().position(|(n, _)| n == name)?;
@@ -747,7 +756,8 @@ impl Pipeline {
         if banked {
             self.swap_view_passes(view);
         }
-        for entry in self.config.passes.iter_mut().filter(|e| e.enabled) {
+        let only = self.only_pass.as_deref();
+        for entry in self.config.passes.iter_mut().filter(|e| e.enabled && only.is_none_or(|o| o == e.name)) {
             entry.pass.submitted();
         }
         if self.view_rects.len() <= 1 {
@@ -1159,7 +1169,8 @@ impl Pipeline {
             entry.release_pending = false;
             entry.sized_for = 0;
         }
-        for entry in self.config.passes.iter_mut().filter(|e| e.enabled) {
+        let only = self.only_pass.as_deref();
+        for entry in self.config.passes.iter_mut().filter(|e| e.enabled && only.is_none_or(|o| o == e.name)) {
             if entry.sized_for != generation {
                 entry.pass.resize(gpu, targets);
                 entry.sized_for = generation;
@@ -1240,13 +1251,14 @@ impl Pipeline {
             backbuffer_format,
             surface_is_srgb: self.surface_is_srgb,
         };
-        let mut capture = if self.view_rects.is_empty() && self.pass_timings.is_requested() {
+        let mut capture = if self.view_rects.is_empty() && self.only_pass.is_none() && self.pass_timings.is_requested() {
             let count = self.config.passes.iter().filter(|entry| entry.enabled).count();
             self.pass_timings.begin(ctx.gpu, count)
         } else {
             None
         };
-        for entry in self.config.passes.iter_mut().filter(|e| e.enabled) {
+        let only = self.only_pass.as_deref();
+        for entry in self.config.passes.iter_mut().filter(|e| e.enabled && only.is_none_or(|o| o == e.name)) {
             // Time the actual GPU work of this boundary, including attached graph stages.
             if let Some(capture) = &capture {
                 capture.begin_pass(record.encoder);
