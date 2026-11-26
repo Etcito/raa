@@ -11,6 +11,7 @@ pub use ddgi::{
     DDGI_FRAME_FEATURE, DDGI_GI_NAME, DDGI_MAX_CASCADES, DDGI_PERIOD_BUCKETS,
     DDGI_PERIOD_CLASSES, DdgiDebug, DdgiFar, DdgiFeature,
     DdgiBlend, DdgiHandle, DdgiInvalidation, DdgiRelocation, DdgiSettings, DdgiStats, DdgiView, DdgiVisibility,
+    DdgiWarmup, DdgiWarmupStatus,
 };
 pub use geometry::MeshInput;
 pub use nrc::{
