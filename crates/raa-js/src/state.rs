@@ -1141,6 +1141,8 @@ impl EngineState {
     /// Prepares the whole-tree foliage groups of `view`. The full-canvas `update` and the
     /// split `prepare_view` call it after the view's camera is installed, beside the
     /// billboard groups and before that view's `lit.prepare`.
+    /// It forwards to `prepare_foliage_groups` at `crates/raa-js/src/foliage_state.rs:681`,
+    /// the upstream definition of 'Manage foliage generations and whole-tree LOD groups'.
     pub(crate) fn prepare_foliage_groups(&mut self, view: u8) -> Result<(), RaaError> {
         crate::foliage_state::prepare_foliage_groups(self, view)
     }
