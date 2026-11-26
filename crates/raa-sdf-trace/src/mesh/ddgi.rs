@@ -202,6 +202,10 @@ pub struct DdgiSettings {
     /// Fraction of each probe's rays drawn from its previous radiance (per octahedral cell); the
     /// rest uniform, every ray weighted by its mixture density (0 = uniform Fibonacci rays).
     pub guide: f32,
+    /// Many lights: a probe's rays evaluate only the lights of its stored light mask (the lights
+    /// noticeable at its hits since the mask's last reset), every light on its first 8 updates
+    /// after a reset and on one update in 8.
+    pub light_cull: bool,
     /// Most probes updated per frame outside a burst, as a fraction of the volume.
     pub update_fraction: f32,
     /// GPU time of the probe update per frame (ms), converted with the measured cost per probe.
@@ -268,6 +272,7 @@ impl Default for DdgiSettings {
             blend_slow_ms: 2000.0,
             change_sigma: 3.0,
             guide: 0.0,
+            light_cull: false,
             update_fraction: 0.25,
             budget_ms: 0.6,
             burst_ms: 2.0,
@@ -1209,7 +1214,7 @@ impl FeaturePass for DdgiPass {
                 probes_per_group(settings.rays_per_probe) as f32,
                 settings.guide,
                 f32::from(converge_age),
-                0.0,
+                f32::from(u8::from(settings.light_cull)),
             ],
         );
         let mut options = Vec::with_capacity(OPTIONS_BYTES as usize);

@@ -31,7 +31,8 @@ struct DdgiParams {
     // irradiance blend: fast and slow time constants (s), squared change threshold (in standard
     // deviations of one update), mode (0 per update = `tuning.x`, 1 time constant, 2 adaptive)
     blend: vec4<f32>,
-    // probes per workgroup, guided ray fraction (0 = uniform rays), converge age (updates), -
+    // probes per workgroup, guided ray fraction (0 = uniform rays), converge age (updates),
+    // light cull (1 = rays evaluate the lights of the probe's scan mask)
     sampling: vec4<f32>,
 }
 
@@ -547,6 +548,24 @@ fn ddgi_luma(c: vec3<f32>) -> f32 {
 // times that light's visibility (unbiased; the probe hysteresis averages the noise). Area panels
 // keep the shared one-tap estimator with its own shadow ray. Every light whose unshadowed
 // contribution is noticeable sets its bit of the probe's light mask.
+// Lights the rays of each workgroup probe evaluate (8 words per probe): every light, or under
+// light cull the probe's stored mask (see `ddgi_job_setup`).
+var<workgroup> ddgi_scan: array<u32, 64>;
+
+// Next light of the scan mask at or after `i` (`count` when none is left).
+fn ddgi_next_light(i: u32, count: u32) -> u32 {
+    var w = i >> 5u;
+    var bits = 0u;
+    if w < 8u { bits = ddgi_scan[ddgi_light_base + w] & (0xffffffffu << (i & 31u)); }
+    loop {
+        if bits != 0u { return min(count, (w << 5u) + firstTrailingBit(bits)); }
+        w++;
+        if w >= 8u || (w << 5u) >= count { return count; }
+        bits = ddgi_scan[ddgi_light_base + w];
+    }
+    return count;
+}
+
 fn ddgi_mark_light(i: u32, luma: f32) {
     if luma > ddgi_params.extra.w { atomicOr(&ddgi_light_bits[ddgi_light_base + (i >> 5u)], 1u << (i & 31u)); }
 }
@@ -557,7 +576,7 @@ fn ddgi_local_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, ma
     let shadow_origin = p + ng * (2.0 * EPS);
     var panels = vec3<f32>(0.0);
     var total = 0.0;
-    for (var i = 0u; i < count; i++) {
+    for (var i = ddgi_next_light(0u, count); i < count; i = ddgi_next_light(i + 1u, count)) {
         let light = lights[i];
         if light.kind == 3u {
             var light_seed = *seed;
@@ -573,7 +592,7 @@ fn ddgi_local_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, ma
     if total <= 0.0 { return panels; }
     let pick = random(seed) * total;
     var running = 0.0;
-    for (var i = 0u; i < count; i++) {
+    for (var i = ddgi_next_light(0u, count); i < count; i = ddgi_next_light(i + 1u, count)) {
         let light = lights[i];
         if light.kind == 3u { continue; }
         let c = ddgi_light_unshadowed(light, p, ng, n, v, mat);
@@ -783,6 +802,17 @@ fn ddgi_job_setup(p: u32, j: u32) {
     ddgi_job_groups[p] = vec4<u32>(job_groups & 0xffu, (job_groups >> 8u) & 0xffu,
         select((job_groups >> 16u) & 7u, 7u, fresh),
         select((job_groups >> 24u) & 1u, 1u, fresh) | ((job_groups >> 25u) << 1u));
+    // Light cull: the stored mask, except on the first 8 updates after a mask reset and on one
+    // update in 8 (lights that became noticeable where the rays have not looked yet).
+    let age_other = (job_groups >> 8u) & 0xffu;
+    let scan_all = ddgi_params.sampling.w == 0.0 || fresh || ((job_groups >> 24u) & 1u) != 0u
+        || age_other < 8u || (turn & 7u) == 0u;
+    let mask_lo = ddgi_probes[row + 2u];
+    let mask_hi = ddgi_probes[row + 3u];
+    for (var w = 0u; w < 4u; w++) {
+        ddgi_scan[8u * p + w] = select(mask_lo[w], 0xffffffffu, scan_all);
+        ddgi_scan[8u * p + 4u + w] = select(mask_hi[w], 0xffffffffu, scan_all);
+    }
     // Guided rays need the probe's guide: a fresh probe traces uniform rays.
     let m = ddgi_params.sampling.y;
     var guided = 0.0;

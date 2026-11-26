@@ -284,6 +284,7 @@ impl NodeFamily for Ddgi {
                 "",
                 Rebuild::None,
             ),
+            flag("lightCull", "Many lights: probe rays evaluate the lights of the probe's mask", d.light_cull),
             param(
                 "updateFraction",
                 "Max probes updated per frame (fraction)",
@@ -532,6 +533,7 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> DdgiSetti
             ("blendSlowMs", ParamValue::Number(x)) => s.blend_slow_ms = *x as f32,
             ("changeSigma", ParamValue::Number(x)) => s.change_sigma = *x as f32,
             ("guide", ParamValue::Number(x)) => s.guide = *x as f32,
+            ("lightCull", ParamValue::Bool(b)) => s.light_cull = *b,
             ("budgetMs", ParamValue::Number(x)) => s.budget_ms = *x as f32,
             ("burstMs", ParamValue::Number(x)) => s.burst_ms = *x as f32,
             ("intensity", ParamValue::Number(x)) => s.intensity = *x as f32,
