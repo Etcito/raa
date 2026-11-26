@@ -368,9 +368,9 @@ fn retire_sky_views(st: &mut EngineState) -> Result<(), RaaError> {
         .get::<api::ViewsState>()
         .map_or(1, |v| v.viewports().len());
     if let Some(sky) = st.features.get::<raa_sky::SkyHandle>() {
-        for view in count..4 {
+        for (view, previous) in st.view_cameras.iter_mut().enumerate().skip(count) {
             sky.remove_view(view as u32)?;
-            st.view_cameras[view] = None;
+            *previous = None;
         }
     }
     Ok(())
