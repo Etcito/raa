@@ -174,6 +174,8 @@ struct PassEntry {
     pass: Box<dyn FeaturePass>,
     /// Targets generation the pass was last resized for (0 = never resized).
     sized_for: u64,
+    /// Turned off since its last frame: `FeaturePass::release` runs at the next frame.
+    release_pending: bool,
 }
 
 impl PassEntry {
@@ -231,6 +233,20 @@ impl PipelineConfig {
     fn contains(&self, name: &str) -> bool {
         self.passes.iter().any(|p| p.name == name)
             || self.contributors.iter().any(|c| c.name == name)
+    }
+
+    /// The enabled flag of the pass or contributor `name`; `None` when no entry has that name.
+    fn is_enabled(&self, name: &str) -> Option<bool> {
+        self.passes
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.enabled)
+            .or_else(|| {
+                self.contributors
+                    .iter()
+                    .find(|c| c.name == name)
+                    .map(|c| c.enabled.get())
+            })
     }
 
     fn entry_names(&self) -> String {
@@ -292,6 +308,7 @@ impl PipelineConfig {
                 enabled: true,
                 pass,
                 sized_for: 0,
+                release_pending: false,
             },
         );
         Ok(())
@@ -384,6 +401,9 @@ impl PipelineConfig {
                 format!("`{name}` is a required pass and cannot be disabled"),
             ));
         }
+        // A pass turned off releases its frame-sized resources at the next frame (see
+        // `FeaturePass::release`) unless it is turned on again before.
+        entry.release_pending = !enabled && (entry.enabled || entry.release_pending);
         entry.enabled = enabled;
         Ok(Some(entry.pass.as_mut()))
     }
@@ -663,6 +683,24 @@ impl Pipeline {
         &self.resources
     }
 
+    /// The names of the enabled passes in execution order (the passes a timing sample lists).
+    fn enabled_order(&self) -> Vec<String> {
+        self.config
+            .passes
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
+    /// Drops the latest GPU pass timing sample and any readback in flight: the next
+    /// [`Pipeline::pass_gpu_timings`] reports `Pending` until a frame of the current configuration
+    /// is read back. A render graph switch calls it, so a sample never lists the passes of the
+    /// previous graph.
+    pub fn invalidate_pass_timings(&mut self) {
+        self.pass_timings.invalidate();
+    }
+
     /// Returns the latest GPU sample and requests a new one when no readback is pending.
     pub fn pass_gpu_timings(&mut self, gpu: &GpuContext) -> PassGpuTimings<'_> {
         if !gpu.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
@@ -861,6 +899,9 @@ impl Pipeline {
     /// disabled feature returns its group-1 resources to the dummies. Refusals:
     /// `pipeline.unknown_pass`, `pipeline.required_pass`.
     pub fn set_enabled(&mut self, name: &str, enabled: bool) -> Result<(), RaaError> {
+        if self.config.is_enabled(name) != Some(enabled) {
+            self.pass_timings.invalidate();
+        }
         if let Some(pass) = self.config.set_enabled(name, enabled)? {
             pass.set_enabled(enabled, &mut self.lighting);
         }
@@ -869,13 +910,23 @@ impl Pipeline {
 
     /// Overrides the execution order of the passes (see [`PipelineConfig::set_order`]).
     pub fn set_order(&mut self, names: &[&str]) -> Result<(), RaaError> {
-        self.config.set_order(names)
+        let before = self.enabled_order();
+        self.config.set_order(names)?;
+        if self.enabled_order() != before {
+            self.pass_timings.invalidate();
+        }
+        Ok(())
     }
 
     /// Overrides the execution order without the dependency pairs (see
     /// [`PipelineConfig::set_order_links`]).
     pub fn set_order_links(&mut self, names: &[&str]) -> Result<(), RaaError> {
-        self.config.set_order_links(names)
+        let before = self.enabled_order();
+        self.config.set_order_links(names)?;
+        if self.enabled_order() != before {
+            self.pass_timings.invalidate();
+        }
+        Ok(())
     }
 
     /// Removes a pass from the order and returns it (see [`PipelineConfig::remove`]). The pass
@@ -884,6 +935,7 @@ impl Pipeline {
     pub fn remove(&mut self, name: &str) -> Result<Box<dyn FeaturePass>, RaaError> {
         let mut pass = self.config.remove(name)?;
         pass.set_enabled(false, &mut self.lighting);
+        self.pass_timings.invalidate();
         Ok(pass)
     }
 
@@ -1128,6 +1180,12 @@ impl Pipeline {
             lighting: &mut self.lighting,
             resources: &self.resources,
         };
+        for entry in self.config.passes.iter_mut().filter(|e| e.release_pending) {
+            // invariant: `release_pending` is only set on a disabled entry
+            entry.pass.release(gpu);
+            entry.release_pending = false;
+            entry.sized_for = 0;
+        }
         for entry in self.config.passes.iter_mut().filter(|e| e.enabled) {
             if entry.sized_for != generation {
                 entry.pass.resize(gpu, targets);

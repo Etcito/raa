@@ -231,6 +231,11 @@ impl FeaturePass for DofPass {
         ORDER
     }
 
+    /// Drops the frame-sized targets; `resize` recreates them.
+    fn release(&mut self, _gpu: &GpuContext) {
+        self.targets = None;
+    }
+
     /// Rebuilds the surface-sized targets and bind groups; the next autofocus frame snaps.
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
         self.targets = Some(DofTargets::new(

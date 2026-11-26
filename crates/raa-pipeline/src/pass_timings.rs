@@ -31,22 +31,41 @@ pub(crate) struct PassTimings {
     requested: bool,
     buffers: Option<TimingBuffers>,
     pending: Option<Receiver<Option<PassGpuTimingSample>>>,
+    /// The generation `pending` was recorded under.
+    pending_generation: u64,
     latest: Option<PassGpuTimingSample>,
     readback_failed: bool,
+    /// Bumped when the pass configuration changes (a render graph switch, a pass enabled or
+    /// disabled, a new order): samples recorded before it describe another pass set.
+    generation: u64,
 }
 
 impl PassTimings {
+    /// Forgets the latest sample and ignores the readback in flight: both were recorded with the
+    /// previous pass configuration. The in-flight receiver is kept (its callback still unmaps the
+    /// readback buffer before the buffer is reused) and its sample is dropped when it arrives.
+    pub(crate) fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.latest = None;
+        self.readback_failed = false;
+    }
+
     pub(crate) fn request(&mut self) -> PassGpuTimings<'_> {
         if let Some(pending) = &self.pending {
             match pending.try_recv() {
+                Ok(_) if self.pending_generation != self.generation => {
+                    self.pending = None;
+                }
                 Ok(sample) => {
                     self.readback_failed = sample.is_none();
                     self.latest = sample;
                     self.pending = None;
                 }
                 Err(TryRecvError::Disconnected) => {
-                    self.latest = None;
-                    self.readback_failed = true;
+                    if self.pending_generation == self.generation {
+                        self.latest = None;
+                        self.readback_failed = true;
+                    }
                     self.pending = None;
                 }
                 Err(TryRecvError::Empty) => {}
@@ -84,6 +103,7 @@ impl PassTimings {
         {
             self.buffers = Some(TimingBuffers::new(gpu.device(), count.next_power_of_two()));
         }
+        self.pending_generation = self.generation;
         Some(TimingCapture {
             buffers: self.buffers.as_ref().expect("timing buffers initialized"),
             passes: Vec::with_capacity(pass_count),

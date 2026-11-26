@@ -34,6 +34,13 @@ pub trait FeaturePass {
     /// dummies (`clear_*`) so the frame stays valid without it (S12). Default: nothing.
     fn set_enabled(&mut self, _enabled: bool, _lighting: &mut LightingResources) {}
 
+    /// Drops the GPU resources `resize` created (frame-sized targets, buffers and their bind
+    /// groups). When an enabled pass is turned off (a render graph switch that leaves it out), the
+    /// pipeline calls it at the start of the next frame if the pass is still disabled, and calls
+    /// `resize` again before the pass's next prepare, so a disabled pass holds no frame-sized
+    /// memory. A pass re-enabled before that frame keeps its resources. Default: nothing.
+    fn release(&mut self, _gpu: &GpuContext) {}
+
     /// CPU work and uploads of the frame, run for every enabled pass before any records.
     /// Default: nothing.
     fn prepare(&mut self, _ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {

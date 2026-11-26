@@ -469,6 +469,12 @@ impl FeaturePass for BloomPass {
         ORDER
     }
 
+    /// Drops the level chain and the HDR groups; `resize` recreates them.
+    fn release(&mut self, _gpu: &GpuContext) {
+        self.bound = None;
+        self.chain = None;
+    }
+
     /// Recreates the level texture (`mip_sizes` of the target, RENDER_ATTACHMENT |
     /// TEXTURE_BINDING), one view per level and the bind groups of every draw, with the
     /// first downsample and the composite built for both textures of the HDR chain.

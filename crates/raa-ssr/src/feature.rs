@@ -210,6 +210,11 @@ impl FeaturePass for SsrPass {
         ORDER
     }
 
+    /// Drops the Hi-Z pyramid, the HDR mip chain and the trace target; `resize` recreates them.
+    fn release(&mut self, _gpu: &GpuContext) {
+        self.targets = None;
+    }
+
     /// Recreates the Hi-Z pyramid, the HDR mip chain, the trace target and their groups.
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
         self.targets = Some(SsrTargets::new(gpu, &self.pipelines, targets));
@@ -338,6 +343,11 @@ impl FeaturePass for ConfidencePass {
     }
     fn order(&self) -> u32 {
         ORDER - 1
+    }
+
+    /// Drops the Hi-Z pyramid and the trace target; `resize` recreates them.
+    fn release(&mut self, _gpu: &GpuContext) {
+        self.targets = None;
     }
 
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {

@@ -309,6 +309,11 @@ impl FeaturePass for GtaoPass {
         ORDER
     }
 
+    /// Drops the full-resolution textures and their groups; `resize` recreates them.
+    fn release(&mut self, _gpu: &GpuContext) {
+        self.textures = None;
+    }
+
     /// Recreates the full-resolution textures (raw and blur R32Float, out Rgba16Float since
     /// R16Float is not a core storage format) and the bind groups of the three dispatches
     /// over the new depth and normal targets; the lighting gets the new view at the next
