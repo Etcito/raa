@@ -467,6 +467,9 @@ pub(crate) struct LitShared {
     /// True when the latest `LitRenderer::prepare` saw the enabled pipeline entry `taa`
     /// (S43): the prepass then carries `VARIANT_FLAG_MOTION_DEFORM` and the frame is jittered.
     pub(crate) temporal_consumer: bool,
+    /// Forward lightingOutput "layers" / "layers-signals" (camera forward only); set by
+    /// `LitRenderer::set_forward_layers`.
+    pub(crate) forward_layers: crate::passes::ForwardLayers,
     /// The S10 NDC jitter of viewport 0 in the latest `LitRenderer::prepare` ([0, 0] without a
     /// temporal consumer).
     pub(crate) camera_jitter: [f32; 2],
@@ -653,6 +656,7 @@ impl LitShared {
             lod_bias: HashMap::new(),
             stats: InstanceFrameStats::default(),
             temporal_consumer: false,
+            forward_layers: crate::passes::ForwardLayers::Off,
             camera_jitter: [0.0; 2],
             store,
             materials: SurfaceLibrary::new(),
@@ -1792,6 +1796,11 @@ impl LitHandle {
     /// (S43); the prepass then adds `raa_shader::VARIANT_FLAG_MOTION_DEFORM` to its keys.
     pub(crate) fn temporal_consumer(&self) -> bool {
         self.shared.borrow().temporal_consumer
+    }
+
+    /// The forward layers mode of the camera forward pass.
+    pub(crate) fn forward_layers(&self) -> crate::passes::ForwardLayers {
+        self.shared.borrow().forward_layers
     }
 
     /// The S10 NDC jitter the latest [`LitRenderer::prepare`] gave the projection of the frame

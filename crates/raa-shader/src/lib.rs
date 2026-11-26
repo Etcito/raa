@@ -82,6 +82,16 @@ pub const PASS_FORWARD_WGSL: &str = concat!(
     "\n",
     include_str!("wgsl/pass_forward.wgsl")
 );
+/// The layer split of the opaque lighting (forward lightingOutput "layers" and
+/// "layers-signals"): `raa_opaque_layers` and `raa_opaque_signals`; see the file's header for
+/// the exact per-pixel identity.
+pub const OPAQUE_LAYERS_WGSL: &str = include_str!("wgsl/opaque_layers.wgsl");
+/// Forward `fs_main` of [`VARIANT_FLAG_FORWARD_LAYERS`]: four targets (d0, kd, s0, em).
+pub const PASS_FORWARD_LAYERS_FS_WGSL: &str = include_str!("wgsl/pass_forward_layers.wgsl");
+/// Forward `fs_main` of [`VARIANT_FLAG_FORWARD_LAYERS`] | [`VARIANT_FLAG_FORWARD_LAYER_SIGNALS`]:
+/// six targets (d0 + s, kd + a, s0, em, e + w, residual).
+pub const PASS_FORWARD_LAYER_SIGNALS_FS_WGSL: &str =
+    include_str!("wgsl/pass_forward_layer_signals.wgsl");
 /// Shadow caster entry point `vs_main` (no fragment stage); the light view-projection is a
 /// group-2 uniform.
 pub const PASS_SHADOW_WGSL: &str = include_str!("wgsl/pass_shadow.wgsl");
@@ -162,6 +172,35 @@ pub const VARIANT_FLAG_MOTION_DEFORM: u32 = 1 << 29;
 /// occupancy) on every pixel even when no area light exists. A key without the bit composes the
 /// full module, so a frame with an area light keeps exact shading.
 pub const VARIANT_FLAG_NO_AREA_LIGHTS: u32 = 1 << 28;
+
+/// [`VariantKey::flags`] bit of a camera forward variant for lightingOutput "layers": the
+/// composer replaces the forward `fs_main` by [`PASS_FORWARD_LAYERS_FS_WGSL`] (after
+/// [`OPAQUE_LAYERS_WGSL`]), which writes four colour targets and reads no sun shadow, screen AO
+/// or probe GI. A key without the bit composes exactly the ordinary forward module.
+pub const VARIANT_FLAG_FORWARD_LAYERS: u32 = 1 << 27;
+
+/// With [`VARIANT_FLAG_FORWARD_LAYERS`]: lightingOutput "layers-signals", the six-target
+/// `fs_main` of [`PASS_FORWARD_LAYER_SIGNALS_FS_WGSL`]. Ignored without the layers bit.
+pub const VARIANT_FLAG_FORWARD_LAYER_SIGNALS: u32 = 1 << 26;
+
+/// The forward pass body of a layers variant: [`PASS_FORWARD_WGSL`] up to its `fs_main`, then
+/// [`OPAQUE_LAYERS_WGSL`] and the layers `fs_main` (`signals` selects the six-target one).
+pub fn forward_layers_wgsl(signals: bool) -> String {
+    let cut = PASS_FORWARD_WGSL
+        .find("@fragment\nfn fs_main(")
+        .expect("pass_forward.wgsl declares fs_main");
+    let fs = if signals {
+        PASS_FORWARD_LAYER_SIGNALS_FS_WGSL
+    } else {
+        PASS_FORWARD_LAYERS_FS_WGSL
+    };
+    let mut out = String::with_capacity(cut + OPAQUE_LAYERS_WGSL.len() + fs.len() + 2);
+    out.push_str(&PASS_FORWARD_WGSL[..cut]);
+    out.push_str(OPAQUE_LAYERS_WGSL);
+    out.push('\n');
+    out.push_str(fs);
+    out
+}
 
 impl TintMode {
     /// The [`VariantKey::flags`] bit of this mode: [`VARIANT_FLAG_TINT_GRAPH`] or 0.

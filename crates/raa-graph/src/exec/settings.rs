@@ -54,11 +54,13 @@ const LOOKS: [(&str, Look); 3] = [
     ("golden", Look::Golden),
 ];
 const SHADING: [(&str, bool); 2] = [("ltc", false), ("formFactor", true)];
-const LIGHTING: [(&str, LightingOutput); 4] = [
+const LIGHTING: [(&str, LightingOutput); 6] = [
     ("combined", LightingOutput::Combined),
     ("direct", LightingOutput::Direct),
     ("indirect", LightingOutput::Indirect),
     ("shadow", LightingOutput::Shadow),
+    ("layers", LightingOutput::Layers),
+    ("layers-signals", LightingOutput::LayersSignals),
 ];
 
 /// The Setting keys of `feature` in catalog key order: the members of its setter's input
@@ -521,6 +523,19 @@ fn desc_apply(h: &mut FeatureHandles<'_>, desc: &Desc) -> Result<(), RaaError> {
         }
         Desc::Isolation(mode) => {
             if let Some(lit) = h.lit.as_deref_mut() {
+                // Layers: extra forward targets (raa-lit ForwardLayers), single sample only.
+                let layers = match mode {
+                    LightingOutput::Layers => raa_lit::ForwardLayers::Layers,
+                    LightingOutput::LayersSignals => raa_lit::ForwardLayers::Signals,
+                    _ => raa_lit::ForwardLayers::Off,
+                };
+                if layers != raa_lit::ForwardLayers::Off && lit.forward_msaa() > 1 {
+                    return Err(apply_refusal(
+                        "lightingOutput",
+                        "\"layers\" and \"layers-signals\" need the forward msaa 1",
+                    ));
+                }
+                lit.set_forward_layers(layers);
                 // Shadow (both flags): forward outputs the sun visibility.
                 let shadow = *mode == LightingOutput::Shadow;
                 lit.set_frame_feature(
@@ -655,7 +670,11 @@ impl AppliedDescs {
                 .is_some_and(|lit| lit.frame_feature(RAA_INDIRECT_DIFFUSE_AO_FEATURE)),
             spherical: h.handles.spherical.as_ref().map(|gi| gi.borrow().settings),
             isolation: h.lit.as_deref().map(|lit| {
-                if lit.frame_feature(RAA_DIRECT_ONLY_FEATURE)
+                if lit.forward_layers() == raa_lit::ForwardLayers::Layers {
+                    LightingOutput::Layers
+                } else if lit.forward_layers() == raa_lit::ForwardLayers::Signals {
+                    LightingOutput::LayersSignals
+                } else if lit.frame_feature(RAA_DIRECT_ONLY_FEATURE)
                     && lit.frame_feature(RAA_INDIRECT_ONLY_FEATURE)
                 {
                     LightingOutput::Shadow

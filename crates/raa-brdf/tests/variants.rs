@@ -166,3 +166,36 @@ fn direct_sampling_follows_the_nonuniform_loop_rules() {
         assert!(error.message.contains("uniform"), "{error}");
     }
 }
+
+/// Forward lightingOutput "layers" and "layers-signals" variants compose and validate with the
+/// layered Direct/Ambient providers (over raa-ibl and raa-lit's defaults) for every built-in.
+#[test]
+fn forward_layer_variants_validate_with_layered_providers() {
+    use raa_shader::{VARIANT_FLAG_FORWARD_LAYER_SIGNALS, VARIANT_FLAG_FORWARD_LAYERS};
+    let composer = composer();
+    let reg = registry();
+    let names = ["raa.standard"]
+        .into_iter()
+        .chain(BUILTINS.iter().map(|b| b.name));
+    for name in names {
+        let material_fn = reg.id_of(name).expect("registered");
+        for flags in [
+            VARIANT_FLAG_FORWARD_LAYERS,
+            VARIANT_FLAG_FORWARD_LAYERS | VARIANT_FLAG_FORWARD_LAYER_SIGNALS,
+            VARIANT_FLAG_FORWARD_LAYERS | FLAG_DOUBLE_SIDED,
+        ] {
+            let key = VariantKey {
+                material_fn,
+                pass: PassKind::Forward,
+                msaa: 1,
+                flags,
+            };
+            let wgsl = composer
+                .compose(&reg, &key)
+                .unwrap_or_else(|e| panic!("{key:?}: {e}"));
+            if let Err(e) = Composer::validate(&wgsl) {
+                panic!("{key:?}: {e}");
+            }
+        }
+    }
+}

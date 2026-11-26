@@ -151,7 +151,15 @@ not a graph is set.
   `indirectDiffuse`. The last setting uses the same diffuse AO shader control as `setAo`.
 - `pass.forward.lightingOutput` selects `combined`, `direct` or `indirect` in the raster
   shader. Use the mesh reference node's `lightingOutput` and `lightingDepth` for an exact
-  bounce, since the forward pass has no per-bounce signal.
+  bounce, since the forward pass has no per-bounce signal. `shadow` shows the sun
+  visibility. `layers` (msaa 1 only) writes the opaque lighting as demodulated layers in one
+  pass: `color` = unshadowed sun direct d0 and the extra Rgba16Float outputs `layerKd`,
+  `layerS0`, `layerEm`, without reading the sun shadow, screen AO or probe GI.
+  `layers-signals` adds the signals (`color.a` = sun visibility s, `layerKd.a` = AO a,
+  `layerE` = probe GI e with weight w in alpha) and `layerR`, the residual of
+  `combined = d0·s + (kd·e + s0)·a + em`. Exact formulas: raa-shader
+  `src/wgsl/opaque_layers.wgsl`. The forward contributors (sky background, opaque particles,
+  fur shells, VG shade) draw into `layerEm` in these modes.
 
 ## Document format
 

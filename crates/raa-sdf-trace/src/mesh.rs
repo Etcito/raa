@@ -87,6 +87,11 @@ pub enum LightingOutput {
     Bounce(u32),
     /// Forward only: the sun visibility (cascaded shadow x contact shadow) as grey.
     Shadow,
+    /// Forward only: the opaque lighting as demodulated layers in extra colour targets
+    /// (raa-shader opaque_layers.wgsl), without the shadow, AO and probe GI lookups.
+    Layers,
+    /// Forward only: Layers plus the signals (shadow, AO, probe GI) and the residual.
+    LayersSignals,
 }
 
 impl LightingOutput {
@@ -101,6 +106,8 @@ impl LightingOutput {
             Self::IndirectSpecular => 17,
             Self::RoughGrid => 18,
             Self::Shadow => 19,
+            Self::Layers => 20,
+            Self::LayersSignals => 21,
         }
     }
 }

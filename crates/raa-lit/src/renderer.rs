@@ -1047,6 +1047,23 @@ impl LitRenderer {
         }
     }
 
+    /// Selects forward lightingOutput "layers" / "layers-signals" for every later camera
+    /// forward recording ([`ForwardLayers`](crate::ForwardLayers)). The modes need a forward
+    /// pass of 1 sample: with MSAA the forward record refuses them.
+    pub fn set_forward_layers(&mut self, mode: crate::ForwardLayers) {
+        self.shared.borrow_mut().forward_layers = mode;
+    }
+
+    /// The forward layers mode set by [`set_forward_layers`](Self::set_forward_layers).
+    pub fn forward_layers(&self) -> crate::ForwardLayers {
+        self.shared.borrow().forward_layers
+    }
+
+    /// MSAA sample count of the forward pass (1 or 4).
+    pub fn forward_msaa(&self) -> u32 {
+        self.shared.borrow().msaa()
+    }
+
     /// The stored value of feature `id`; false for ignored ids.
     pub fn frame_feature(&self, id: u32) -> bool {
         id < 64 && self.frame_features & (1u64 << id) != 0

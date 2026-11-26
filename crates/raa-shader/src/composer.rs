@@ -10,7 +10,8 @@ use crate::registry::MaterialFnRegistry;
 use crate::{
     CLOUD_SHADOW_WGSL, DEPTH_WGSL, LIB_WGSL, LOCAL_LIGHTING_WGSL, PASS_FORWARD_WGSL,
     PASS_FURSHELL_WGSL, PASS_PREPASS_WGSL, PASS_SHADOW_WGSL, PASS_TRANSPARENT_WGSL,
-    PASS_VG_GBUFFER_WGSL, PASS_VG_SHADE_WGSL, PRELUDE_WGSL, VG_SURFACE_WGSL,
+    PASS_VG_GBUFFER_WGSL, PASS_VG_SHADE_WGSL, PRELUDE_WGSL, VARIANT_FLAG_FORWARD_LAYER_SIGNALS,
+    VARIANT_FLAG_FORWARD_LAYERS, VG_SURFACE_WGSL,
 };
 
 /// Inserted after the material function when it defines no `material_vertex`.
@@ -183,11 +184,17 @@ impl Composer {
             section(&mut out, "depth", DEPTH_WGSL);
             section(&mut out, "vg surface", VG_SURFACE_WGSL);
         }
+        let layers = key.pass == PassKind::Forward && key.flags & VARIANT_FLAG_FORWARD_LAYERS != 0;
+        let body = if layers {
+            Cow::Owned(crate::forward_layers_wgsl(
+                key.flags & VARIANT_FLAG_FORWARD_LAYER_SIGNALS != 0,
+            ))
+        } else {
+            Cow::Borrowed(pass_wgsl(key.pass))
+        };
         let pass = format!(
             "const RAA_MSAA: u32 = {}u;\nconst RAA_VARIANT_FLAGS: u32 = {}u;\n\n{}",
-            key.msaa,
-            key.flags,
-            pass_wgsl(key.pass)
+            key.msaa, key.flags, body
         );
         section(&mut out, &format!("pass {:?}", key.pass), &pass);
         Ok(out)
