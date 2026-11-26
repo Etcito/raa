@@ -61,7 +61,7 @@ pub struct FrameParams {
 /// width, 0 when the frame is not jittered or renders at or above the display size.
 /// The default extra material mip bias of a jittered frame (any render scale): the temporal
 /// resolve accumulates the jittered samples of the finer level, as a supersampled frame does.
-pub const JITTER_TEXTURE_LOD_BIAS: f32 = 0.0;
+pub const JITTER_TEXTURE_LOD_BIAS: f32 = -0.5;
 
 pub fn taau_texture_lod_bias(jitter: bool, render: (u32, u32), display: (u32, u32)) -> f32 {
     if !jitter || render.0 == 0 || display.0 <= render.0 {

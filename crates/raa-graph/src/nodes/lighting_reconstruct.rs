@@ -63,7 +63,7 @@ fn params() -> Vec<ParamSpec> {
         "Jitter correction",
         "Reconstruction",
         ParamKind::Bool,
-        ParamValue::Bool(false),
+        ParamValue::Bool(true),
         None,
         None,
         None,
@@ -81,6 +81,18 @@ fn params() -> Vec<ParamSpec> {
         None,
         "",
         "On R frames an upsampled pixel keeps its reprojected history clamped to the range of the neighbouring phase samples (full-resolution shadow edges) instead of their interpolation.",
+    ));
+    params.push(node_param(
+        "historyCubic",
+        "Cubic history",
+        "Reconstruction",
+        ParamKind::Bool,
+        ParamValue::Bool(true),
+        None,
+        None,
+        None,
+        "",
+        "Resamples the accumulated signals with a 5-tap Catmull-Rom instead of bilinear (sharper edges in motion).",
     ));
     let mut debug = node_param(
         "debug",
@@ -166,6 +178,7 @@ mod tests {
                 "decay",
                 "jitterCorrect",
                 "historyClamp",
+                "historyCubic",
                 "debug"
             ]
         );

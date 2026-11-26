@@ -13,13 +13,13 @@ const HEADER: &str = "| crate | file:line | name | value | row | class | node ty
 /// The pinned rows of contract `rg-m4-pinned-tunables`: node type, key, value, row, group, label,
 /// integer, mechanism, rebuild and range, separated by `|`.
 const PINNED: &[&str] = &[
-    "pass.taa|filterSharpness|2.3|setting|Resolve|Filter sharpness|no|override|pipeline|unstated",
+    "pass.taa|filterSharpness|8.0|setting|Resolve|Filter sharpness|no|override|pipeline|unstated",
     "pass.taa|clipTolerance|1.25|setting|Resolve|Clip tolerance|no|override|pipeline|unstated",
     "pass.taa|blendBase|0.06|setting|Resolve|Blend base|no|override|pipeline|unstated",
-    "pass.taa|blendMotionGain|0.012|setting|Resolve|Blend motion gain|no|override|pipeline|unstated",
+    "pass.taa|blendMotionGain|0.03|setting|Resolve|Blend motion gain|no|override|pipeline|unstated",
     "pass.taa|blendMin|0.04|setting|Resolve|Blend min|no|override|pipeline|unstated",
-    "pass.taa|blendMax|0.3|setting|Resolve|Blend max|no|override|pipeline|unstated",
-    "pass.taa|historySharpness|0.5|setting|Resolve|History sharpness|no|override|pipeline|unstated",
+    "pass.taa|blendMax|0.5|setting|Resolve|Blend max|no|override|pipeline|unstated",
+    "pass.taa|historySharpness|0.6|setting|Resolve|History sharpness|no|override|pipeline|unstated",
     "pass.ssr|maxSteps|64u|wgsl|Trace|Max steps|yes|override|pipeline|unstated",
     "pass.ao.gtao|slices|4|setting|Quality|Slices|yes|uniform|none|1..8",
     "pass.ao.gtao|steps|8|setting|Quality|Steps|yes|uniform|none|1..16",

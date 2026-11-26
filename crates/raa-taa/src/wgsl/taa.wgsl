@@ -27,15 +27,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-override RAA_TAA_FILTER_SHARPNESS: f32 = 2.3;
+override RAA_TAA_FILTER_SHARPNESS: f32 = 8.0;
 override RAA_TAA_CLIP_TOLERANCE: f32 = 1.25;
 override RAA_TAA_BLEND_BASE: f32 = 0.06;
-override RAA_TAA_BLEND_MOTION_GAIN: f32 = 0.012;
+override RAA_TAA_BLEND_MOTION_GAIN: f32 = 0.03;
 override RAA_TAA_BLEND_MIN: f32 = 0.04;
-override RAA_TAA_BLEND_MAX: f32 = 0.3;
-// -a of the Keys cubic the history is resampled with: 0.5 is Catmull-Rom; larger values
-// deepen the negative lobes, which offsets the softening of repeated subpixel resampling.
-override RAA_TAA_HISTORY_SHARPNESS: f32 = 0.5;
+override RAA_TAA_BLEND_MAX: f32 = 0.5;
+override RAA_TAA_HISTORY_SHARPNESS: f32 = 0.6;
 
 @group(0) @binding(0) var<uniform> raa_taa_frame: RaaTemporalFrame;
 @group(0) @binding(1) var<uniform> raa_taa_params: RaaTaaParams;
@@ -81,7 +79,9 @@ fn from_ycocg(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
 }
 
-// Keys cubic weight at distance x in [0, 2) for a = -RAA_TAA_HISTORY_SHARPNESS.
+// Keys cubic weight at distance x in [0, 2) for a = -RAA_TAA_HISTORY_SHARPNESS: 0.5 is
+// Catmull-Rom; larger values deepen the negative lobes, which offsets the softening of the
+// subpixel resampling the history goes through every frame (0.6 measured best on Sponza).
 fn keys_weight(x: vec2<f32>) -> vec2<f32> {
     let a = -RAA_TAA_HISTORY_SHARPNESS;
     let near = ((a + 2.0) * x - (a + 3.0)) * x * x + 1.0;

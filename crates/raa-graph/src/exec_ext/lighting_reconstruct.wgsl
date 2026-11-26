@@ -47,6 +47,51 @@ const REAL_FRAME: u32 = 2u;
 // clamped to the range of the phase samples it would otherwise interpolate, instead of the
 // 2-pixel interpolation (which drew every moving shadow edge as a 2 px staircase).
 const HISTORY_CLAMP: u32 = 4u;
+// historyCubic: (E, a) and s are resampled from the history with a 5-tap Catmull-Rom instead
+// of bilinear (z and confidence stay bilinear), so edges do not soften over the 8 frames a
+// pixel waits for its own phase sample.
+const HISTORY_CUBIC: u32 = 8u;
+
+// 5-tap Catmull-Rom of the history pair at uv (raa-taa sample_history): H0 and H1.x.
+struct CubicHistory {
+    ea: vec4<f32>,
+    s: f32,
+}
+
+fn sample_cubic(uv: vec2<f32>) -> CubicHistory {
+    let size = vec2<f32>(params.size);
+    let position = uv * size;
+    let center = floor(position - vec2<f32>(0.5)) + vec2<f32>(0.5);
+    let f = position - center;
+    let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    let w3 = f * f * (-0.5 + 0.5 * f);
+    let w12 = w1 + w2;
+    let t0 = (center - vec2<f32>(1.0)) / size;
+    let t3 = (center + vec2<f32>(2.0)) / size;
+    let t12 = (center + w2 / w12) / size;
+    var taps = array<vec3<f32>, 5>(
+        vec3<f32>(t12.x, t0.y, w12.x * w0.y),
+        vec3<f32>(t0.x, t12.y, w0.x * w12.y),
+        vec3<f32>(t12.x, t12.y, w12.x * w12.y),
+        vec3<f32>(t3.x, t12.y, w3.x * w12.y),
+        vec3<f32>(t12.x, t3.y, w12.x * w3.y),
+    );
+    var ea = vec4<f32>(0.0);
+    var s = 0.0;
+    var total = 0.0;
+    for (var i = 0; i < 5; i = i + 1) {
+        let t = taps[i];
+        ea = ea + textureSampleLevel(h0_prev, hist_sampler, t.xy, 0.0) * t.z;
+        s = s + textureSampleLevel(h1_prev, hist_sampler, t.xy, 0.0).x * t.z;
+        total = total + t.z;
+    }
+    let inv = 1.0 / max(total, 1e-4);
+    // Catmull-Rom overshoot stays inside the signals' ranges (E >= 0, a and s in [0, 1]).
+    let e = max(ea.rgb * inv, vec3<f32>(0.0));
+    return CubicHistory(vec4<f32>(e, clamp(ea.a * inv, 0.0, 1.0)), clamp(s * inv, 0.0, 1.0));
+}
 
 @group(0) @binding(0) var color_tex: texture_2d<f32>;
 @group(0) @binding(1) var kd_tex: texture_2d<f32>;
@@ -109,12 +154,18 @@ fn reproject(t: vec2<i32>, zt: f32) -> History {
     let mv = textureLoad(motion_tex, t, 0).xyz;
     let q = vec2<f32>(t) + vec2<f32>(0.5) - mv.xy * size + params.jitter_px;
     let uv = q / size;
-    let h0 = textureSampleLevel(h0_prev, hist_sampler, uv, 0.0);
+    var h0 = textureSampleLevel(h0_prev, hist_sampler, uv, 0.0);
     let h1 = textureSampleLevel(h1_prev, hist_sampler, uv, 0.0);
+    var hs = h1.x;
+    if ((params.flags & HISTORY_CUBIC) != 0u) {
+        let cubic = sample_cubic(uv);
+        h0 = cubic.ea;
+        hs = cubic.s;
+    }
     let inside = all(q >= vec2<f32>(0.0)) && all(q <= size);
     let valid = (params.flags & HISTORY_VALID) != 0u && inside && mv.z < 0.5 && zt > 0.0
         && abs(h1.y - zt) <= 0.05 * zt + 0.02;
-    return History(h0, h1.x, select(0.0, h1.z, valid));
+    return History(h0, hs, select(0.0, h1.z, valid));
 }
 
 // raa-shader opaque_layers.wgsl raa_layers_sky_vis.
@@ -255,9 +306,12 @@ fn reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
             // The history holds the full-resolution signal of earlier phases; the phase
             // samples around the pixel bound it (no ghosting where they agree), and its
             // confidence weighs it against the interpolation.
-            ea = mix(cur, clamp(h.ea, lo, hi), h.c);
-            s = mix(cur_s, clamp(h.s, lo_s, hi_s), h.c);
-            c_new = mix(params.q_miss, h.c, h.c);
+            // Full weight on the clamped history from the upsampled-sample quality qMiss up;
+            // the confidence carries over (it decays until the pixel's own phase sample).
+            let w = clamp(h.c / max(params.q_miss, 1e-3), 0.0, 1.0);
+            ea = mix(cur, clamp(h.ea, lo, hi), w);
+            s = mix(cur_s, clamp(h.s, lo_s, hi_s), w);
+            c_new = max(h.c, params.q_miss * (1.0 - w));
         }
         c_store = clamp(c_new, 0.0, 1.0) * params.decay;
         textureStore(h0_out, p, ea);

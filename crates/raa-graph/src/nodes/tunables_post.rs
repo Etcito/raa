@@ -145,7 +145,7 @@ mod tests {
                 "historySharpness"
             ]
         );
-        let defaults = [2.3, 1.25, 0.06, 0.012, 0.04, 0.3, 0.5];
+        let defaults = [8.0, 1.25, 0.06, 0.03, 0.04, 0.5, 0.6];
         for (p, d) in p.iter().zip(defaults) {
             assert_eq!(p.kind, ParamKind::Number);
             assert_eq!(p.default, ParamValue::Number(d));

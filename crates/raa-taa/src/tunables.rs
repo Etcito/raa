@@ -20,21 +20,21 @@ pub(crate) const N: usize = 7;
 static TUNABLES: [TunableSpec; N] = [
     spec(
         "filterSharpness",
-        2.3,
+        8.0,
         "crates/raa-taa/src/wgsl/taa.wgsl:30",
     ),
     spec("clipTolerance", 1.25, "crates/raa-taa/src/wgsl/taa.wgsl:31"),
     spec("blendBase", 0.06, "crates/raa-taa/src/wgsl/taa.wgsl:32"),
     spec(
         "blendMotionGain",
-        0.012,
+        0.03,
         "crates/raa-taa/src/wgsl/taa.wgsl:33",
     ),
     spec("blendMin", 0.04, "crates/raa-taa/src/wgsl/taa.wgsl:34"),
-    spec("blendMax", 0.3, "crates/raa-taa/src/wgsl/taa.wgsl:35"),
+    spec("blendMax", 0.5, "crates/raa-taa/src/wgsl/taa.wgsl:35"),
     spec(
         "historySharpness",
-        0.5,
+        0.6,
         "crates/raa-taa/src/wgsl/taa.wgsl:36",
     ),
 ];

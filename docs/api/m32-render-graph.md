@@ -206,8 +206,12 @@ not a graph is set.
   from 12 ring taps. Composite: `C = d0*s + (kd*E + s0*vis)*a + em` (sky: `em`), vis from the
   `layerS0` alpha and the accumulated (E, a) with w = 1. Params:
   `alphaSHit` 0.9853, `alphaSMiss` 0.9803, `alphaEHit` 0.9888, `alphaEMiss` 0.9799, `qMiss` 0.3,
-  `decay` 0.98 (learned constants), `jitterCorrect` (false; adds `(previous - current)` camera
-  jitter `x (0.5 W, -0.5 H)` pixels to the reprojection), `debug` (`off`, `shadow`, `ao`,
+  `decay` 0.98 (learned constants), `jitterCorrect` (true; adds `(previous - current)` camera
+  jitter `x (0.5 W, -0.5 H)` pixels to the reprojection), `historyClamp` (true; on an R frame an
+  upsampled pixel keeps its reprojected history clamped to the min/max of the phase samples it
+  would interpolate, weighted by `min(1, c / qMiss)`, instead of the 2-pixel interpolation that
+  drew moving shadow edges as a 2 px staircase), `historyCubic` (true; (E, a) and s are read
+  from the history with a 5-tap Catmull-Rom, z and confidence bilinear), `debug` (`off`, `shadow`, `ao`,
   `irradiance`, `confidence`, `holes`). The history is invalid (confidence 0) after a resize, a
   camera cut, at the first frame and on any frame whose forward is not interlaced (the node
   then passes its colour through); it flips only on submitted frames. One viewport only

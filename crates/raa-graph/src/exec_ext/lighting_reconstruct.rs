@@ -46,6 +46,7 @@ struct Settings {
     decay: f32,
     jitter_correct: bool,
     history_clamp: bool,
+    history_cubic: bool,
     debug: u32,
 }
 
@@ -66,8 +67,9 @@ impl Settings {
             ],
             q_miss: number("qMiss", 0.3),
             decay: number("decay", 0.98),
-            jitter_correct: matches!(value("jitterCorrect"), Some(ParamValue::Bool(true))),
+            jitter_correct: !matches!(value("jitterCorrect"), Some(ParamValue::Bool(false))),
             history_clamp: !matches!(value("historyClamp"), Some(ParamValue::Bool(false))),
+            history_cubic: !matches!(value("historyCubic"), Some(ParamValue::Bool(false))),
             debug: match value("debug") {
                 Some(ParamValue::Enum(view)) => DEBUG_VIEWS
                     .iter()
@@ -447,7 +449,8 @@ impl ReconstructPass {
     /// The params uniform (layout of `Params` in lighting_reconstruct.wgsl).
     fn param_bytes(&self, size: (u32, u32), real: bool, phase: [u32; 2], jitter_px: [f32; 2]) -> [u8; PARAM_BYTES] {
         let s = &self.settings;
-        let flags = u32::from(self.valid) | (u32::from(real) << 1) | (u32::from(s.history_clamp) << 2);
+        let flags = u32::from(self.valid) | (u32::from(real) << 1) | (u32::from(s.history_clamp) << 2)
+            | (u32::from(s.history_cubic) << 3);
         let words: [u32; 16] = [
             size.0,
             size.1,
