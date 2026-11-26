@@ -534,6 +534,10 @@ pub(crate) struct LitShared {
     /// The fullscreen VG kinds lay out group 1 with it so their fragment stage keeps 15
     /// sampled textures (S38/S44).
     opaque_lighting_layout: wgpu::BindGroupLayout,
+    /// The transparent group-1 layout: the full set without the spherical/DDGI data (21). The
+    /// Transparent kind lays out group 1 with it so that, with the three OIT storage buffers
+    /// of group 2, its fragment stage keeps the WebGPU default of 8 storage buffers.
+    transparent_lighting_layout: wgpu::BindGroupLayout,
     pipelines: RefCell<PipelineCache<wgpu::RenderPipeline>>,
     /// Composed WGSL by canonical variant; cleared with the pipeline cache.
     composed: RefCell<HashMap<VariantKey, String>>,
@@ -554,12 +558,14 @@ impl LitShared {
     /// lists, the registry with `raa.standard` and a composer with the default slot
     /// providers (S11, priority 0). `lighting_layout` is the group-1 layout of the pipeline's
     /// `LightingResources`; `opaque_lighting_layout` is its S44 opaque set (without bindings
-    /// 9 and 10), which the fullscreen VG kinds use. Refuses `render.invalid_msaa` unless
-    /// `msaa` is 1 or 4.
+    /// 9 and 10), which the fullscreen VG kinds use; `transparent_lighting_layout` is its set
+    /// without binding 21, which the Transparent kind uses. Refuses `render.invalid_msaa`
+    /// unless `msaa` is 1 or 4.
     pub(crate) fn new(
         gpu: &GpuContext,
         lighting_layout: &wgpu::BindGroupLayout,
         opaque_lighting_layout: &wgpu::BindGroupLayout,
+        transparent_lighting_layout: &wgpu::BindGroupLayout,
         max_instances: u32,
         max_materials: u32,
         msaa: u32,
@@ -682,6 +688,7 @@ impl LitShared {
             planar_view: None,
             lighting_layout: lighting_layout.clone(),
             opaque_lighting_layout: opaque_lighting_layout.clone(),
+            transparent_lighting_layout: transparent_lighting_layout.clone(),
             pipelines: RefCell::new(PipelineCache::new()),
             composed: RefCell::new(HashMap::new()),
             canonical_fns: RefCell::new(HashMap::new()),
@@ -1082,6 +1089,8 @@ impl LitShared {
         let posed = !fullscreen && key.flags & crate::skin_draw::POSED != 0;
         let lighting = if fullscreen {
             &self.opaque_lighting_layout
+        } else if key.pass == PassKind::Transparent {
+            &self.transparent_lighting_layout
         } else {
             &self.lighting_layout
         };
@@ -2058,8 +2067,16 @@ mod tests {
             return;
         };
         let lighting = raa_pipeline::LightingResources::new(&gpu);
-        let mut shared =
-            LitShared::new(&gpu, lighting.layout(), lighting.opaque_layout(), 1, 1, 4).unwrap();
+        let mut shared = LitShared::new(
+            &gpu,
+            lighting.layout(),
+            lighting.opaque_layout(),
+            lighting.transparent_layout(),
+            1,
+            1,
+            4,
+        )
+        .unwrap();
         let source = shared.fns.get(MaterialFnId::STANDARD).unwrap().wgsl.clone()
             + "\nfn probe_unused() -> f32 { return 1.0; }\n";
         let a = shared.register_user_fn("first", &source).unwrap();
@@ -2436,8 +2453,16 @@ mod tests {
             return;
         };
         let lighting = raa_pipeline::LightingResources::new(&gpu);
-        let shared = LitShared::new(&gpu, lighting.layout(), lighting.opaque_layout(), 1, 1, 4)
-            .expect("LitShared");
+        let shared = LitShared::new(
+            &gpu,
+            lighting.layout(),
+            lighting.opaque_layout(),
+            lighting.transparent_layout(),
+            1,
+            1,
+            4,
+        )
+        .expect("LitShared");
         let spec = PipelineSpec {
             cull: None,
             extra_layout: Some(vg_shade_extra_layout(&gpu)),

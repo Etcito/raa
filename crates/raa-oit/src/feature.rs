@@ -517,7 +517,8 @@ impl FeaturePass for OitPass {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &frame, &[]);
-            pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+            // The transparent group 1 (no binding 21) matches the Transparent pipeline layout.
+            pass.set_bind_group(1, ctx.lighting.transparent_bind_group(), &[]);
             pass.set_bind_group(2, buffers.transparent_bind_group(), &[]);
             self.draw_transparent(ctx.gpu, &mut pass)?;
         }

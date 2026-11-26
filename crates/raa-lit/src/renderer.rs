@@ -444,6 +444,7 @@ impl LitRenderer {
                 gpu,
                 p.lighting().layout(),
                 p.lighting().opaque_layout(),
+                p.lighting().transparent_layout(),
                 opts.max_instances,
                 opts.max_materials,
                 opts.msaa,

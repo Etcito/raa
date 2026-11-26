@@ -202,12 +202,14 @@ struct Views<V> {
 }
 
 /// Which group-1 binding set a bind group is built over: the pre-P4 base set (S38), the
-/// full set 0..=21, or the full set without the opaque copy 9 and 10 (S44).
+/// full set 0..=21, the full set without the opaque copy 9 and 10 (S44), or the full set
+/// without the spherical/DDGI data storage buffer 21 (the transparent OIT pass).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GroupSet {
     Base,
     Opaque,
     Full,
+    Transparent,
 }
 
 /// What `upload` has to do: rebuild the bind group and/or write each uniform.
@@ -621,6 +623,18 @@ fn opaque_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
         .collect()
 }
 
+/// The transparent group-1 binding set: the full set without 21, ascending: 0..=20. Only the
+/// Forward and VgShade shaders declare binding 21 (the spherical/DDGI data storage buffer), and
+/// a Transparent pipeline adds the three OIT storage buffers of group 2 to the five fragment
+/// storage buffers of group 0: with 21 its layout would need 9 fragment storage buffers, over
+/// the WebGPU default `maxStorageBuffersPerShaderStage` of 8.
+fn transparent_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    layout_entries()
+        .into_iter()
+        .filter(|entry| entry.binding != 21)
+        .collect()
+}
+
 /// The pre-P4 group-1 binding set, ascending: 0..=13, 15 and 16.
 fn base_layout_entries() -> [wgpu::BindGroupLayoutEntry; 16] {
     use wgpu::TextureSampleType as S;
@@ -892,6 +906,8 @@ pub struct LightingResources {
     base_bind_group: wgpu::BindGroup,
     opaque_layout: wgpu::BindGroupLayout,
     opaque_bind_group: wgpu::BindGroup,
+    transparent_layout: wgpu::BindGroupLayout,
+    transparent_bind_group: wgpu::BindGroup,
     shadow_cmp: wgpu::Sampler,
     linear_clamp: wgpu::Sampler,
     shadow_buffer: wgpu::Buffer,
@@ -951,6 +967,11 @@ impl LightingResources {
             label: Some("raa-pipeline.lighting.opaque"),
             entries: &opaque_layout_entries(),
         });
+        let transparent_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("raa-pipeline.lighting.transparent"),
+                entries: &transparent_layout_entries(),
+            });
         let spherical_dummy = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raa-pipeline.dummy.spherical_gi"),
             size: 48,
@@ -992,6 +1013,14 @@ impl LightingResources {
             uniforms,
             GroupSet::Opaque,
         );
+        let transparent_bind_group = build_bind_group(
+            gpu,
+            &transparent_layout,
+            &state.views,
+            samplers,
+            uniforms,
+            GroupSet::Transparent,
+        );
         LightingResources {
             layout,
             bind_group,
@@ -999,6 +1028,8 @@ impl LightingResources {
             base_bind_group,
             opaque_layout,
             opaque_bind_group,
+            transparent_layout,
+            transparent_bind_group,
             shadow_cmp,
             linear_clamp,
             shadow_buffer,
@@ -1053,6 +1084,19 @@ impl LightingResources {
     /// The current S44 opaque bind group (see `opaque_layout`); rebuilt with the full group.
     pub fn opaque_bind_group(&self) -> &wgpu::BindGroup {
         &self.opaque_bind_group
+    }
+
+    /// The transparent group-1 layout: the full set without binding 21 (the spherical/DDGI
+    /// data), so a Transparent pipeline with the three OIT storage buffers of group 2 stays
+    /// within the WebGPU default of 8 fragment storage buffers. Consumer: raa-oit.
+    pub fn transparent_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.transparent_layout
+    }
+
+    /// The current transparent bind group (see `transparent_layout`); rebuilt with the full
+    /// group, over the same views and uniforms.
+    pub fn transparent_bind_group(&self) -> &wgpu::BindGroup {
+        &self.transparent_bind_group
     }
 
     /// Sets the cascaded shadow map (a `texture_depth_2d_array` view) and its 320 B
@@ -1525,6 +1569,14 @@ impl LightingResources {
                 uniforms,
                 GroupSet::Opaque,
             );
+            self.transparent_bind_group = build_bind_group(
+                gpu,
+                &self.transparent_layout,
+                &self.state.views,
+                samplers,
+                uniforms,
+                GroupSet::Transparent,
+            );
         }
     }
 }
@@ -1571,6 +1623,9 @@ fn build_bind_group(
     }
     if set == GroupSet::Opaque {
         resources.retain(|(binding, _)| !matches!(*binding, 9 | 10));
+    }
+    if set == GroupSet::Transparent {
+        resources.retain(|(binding, _)| *binding != 21);
     }
     let entries: Vec<wgpu::BindGroupEntry> = resources
         .into_iter()
@@ -2207,6 +2262,33 @@ mod tests {
             let same = full.iter().find(|other| other.binding == entry.binding);
             assert_eq!(Some(entry), same, "binding {}", entry.binding);
         }
+    }
+
+    #[test]
+    fn transparent_layout_is_the_full_set_without_the_storage_buffer_21() {
+        let full = layout_entries();
+        let transparent = transparent_layout_entries();
+        let bindings: Vec<u32> = transparent.iter().map(|entry| entry.binding).collect();
+        assert_eq!(bindings, (0..=20).collect::<Vec<u32>>());
+        for entry in &transparent {
+            let same = full.iter().find(|other| other.binding == entry.binding);
+            assert_eq!(Some(entry), same, "binding {}", entry.binding);
+        }
+        // No fragment storage buffer is left in group 1 for the Transparent pipeline layout.
+        let storage = transparent
+            .iter()
+            .filter(|entry| entry.visibility.contains(wgpu::ShaderStages::FRAGMENT))
+            .filter(|entry| {
+                matches!(
+                    entry.ty,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(storage, 0);
     }
 
     #[test]
