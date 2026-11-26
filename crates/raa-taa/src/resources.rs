@@ -114,7 +114,7 @@ fn build_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     module: &wgpu::ShaderModule,
-    values: &[f64; 6],
+    values: &[f64; crate::tunables::N],
 ) -> wgpu::ComputePipeline {
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("raa-taa"),
@@ -134,7 +134,7 @@ fn lazy_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     module: &wgpu::ShaderModule,
-    values: &[f64; 6],
+    values: &[f64; crate::tunables::N],
 ) -> Lazy<wgpu::ComputePipeline> {
     let (device, layout, module, values) =
         (device.clone(), layout.clone(), module.clone(), *values);
@@ -143,11 +143,11 @@ fn lazy_pipeline(
 
 impl TaaPipelines {
     /// Rebuilds `pipeline` alone with the override constants of `values`.
-    pub(crate) fn rebuild(&mut self, gpu: &GpuContext, values: &[f64; 6]) {
+    pub(crate) fn rebuild(&mut self, gpu: &GpuContext, values: &[f64; crate::tunables::N]) {
         self.pipeline = lazy_pipeline(gpu.device(), &self.pipeline_layout, &self.module, values);
     }
 
-    pub(crate) fn new(gpu: &GpuContext, values: &[f64; 6]) -> TaaPipelines {
+    pub(crate) fn new(gpu: &GpuContext, values: &[f64; crate::tunables::N]) -> TaaPipelines {
         let device = gpu.device();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raa-taa"),

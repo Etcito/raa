@@ -19,6 +19,7 @@ const PINNED: &[&str] = &[
     "pass.taa|blendMotionGain|0.012|setting|Resolve|Blend motion gain|no|override|pipeline|unstated",
     "pass.taa|blendMin|0.04|setting|Resolve|Blend min|no|override|pipeline|unstated",
     "pass.taa|blendMax|0.3|setting|Resolve|Blend max|no|override|pipeline|unstated",
+    "pass.taa|historySharpness|0.5|setting|Resolve|History sharpness|no|override|pipeline|unstated",
     "pass.ssr|maxSteps|64u|wgsl|Trace|Max steps|yes|override|pipeline|unstated",
     "pass.ao.gtao|slices|4|setting|Quality|Slices|yes|uniform|none|1..8",
     "pass.ao.gtao|steps|8|setting|Quality|Steps|yes|uniform|none|1..16",

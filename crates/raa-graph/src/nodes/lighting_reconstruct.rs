@@ -70,6 +70,18 @@ fn params() -> Vec<ParamSpec> {
         "",
         "Adds (previous - current) camera jitter to the history reprojection.",
     ));
+    params.push(node_param(
+        "historyClamp",
+        "History clamp",
+        "Reconstruction",
+        ParamKind::Bool,
+        ParamValue::Bool(true),
+        None,
+        None,
+        None,
+        "",
+        "On R frames an upsampled pixel keeps its reprojected history clamped to the range of the neighbouring phase samples (full-resolution shadow edges) instead of their interpolation.",
+    ));
     let mut debug = node_param(
         "debug",
         "Debug view",
@@ -153,6 +165,7 @@ mod tests {
                 "qMiss",
                 "decay",
                 "jitterCorrect",
+                "historyClamp",
                 "debug"
             ]
         );

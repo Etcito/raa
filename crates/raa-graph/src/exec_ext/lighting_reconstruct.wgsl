@@ -43,6 +43,10 @@ struct Params {
 
 const HISTORY_VALID: u32 = 1u;
 const REAL_FRAME: u32 = 2u;
+// historyClamp: on R frames an upsampled (non-phase) pixel keeps its reprojected history,
+// clamped to the range of the phase samples it would otherwise interpolate, instead of the
+// 2-pixel interpolation (which drew every moving shadow edge as a 2 px staircase).
+const HISTORY_CLAMP: u32 = 4u;
 
 @group(0) @binding(0) var color_tex: texture_2d<f32>;
 @group(0) @binding(1) var kd_tex: texture_2d<f32>;
@@ -206,6 +210,10 @@ fn reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
         var acc = vec4<f32>(0.0);
         var acc_s = 0.0;
         var ws = 0.0;
+        var lo = vec4<f32>(3.0e38);
+        var hi = vec4<f32>(-3.0e38);
+        var lo_s = 3.0e38;
+        var hi_s = -3.0e38;
         for (var j = 0; j < ny; j = j + 1) {
             for (var i = 0; i < nx; i = i + 1) {
                 let t = vec2<i32>(xs[i], ys[j]);
@@ -222,6 +230,10 @@ fn reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
                 acc = acc + w * vec4<f32>(et, at);
                 acc_s = acc_s + w * st;
                 ws = ws + w;
+                lo = min(lo, vec4<f32>(et, at));
+                hi = max(hi, vec4<f32>(et, at));
+                lo_s = min(lo_s, st);
+                hi_s = max(hi_s, st);
             }
         }
         let has_cur = ws > 0.0;
@@ -238,7 +250,15 @@ fn reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
         let den_s = max(wc_s + wh_s, 1e-5);
         ea = (wc_e * cur + wh_e * h.ea) / den_e;
         s = (wc_s * cur_s + wh_s * h.s) / den_s;
-        let c_new = 0.5 * ((wc_e * q + wh_e * h.c) / den_e + (wc_s * q + wh_s * h.c) / den_s);
+        var c_new = 0.5 * ((wc_e * q + wh_e * h.c) / den_e + (wc_s * q + wh_s * h.c) / den_s);
+        if ((params.flags & HISTORY_CLAMP) != 0u && !own && has_cur && h.c > 0.0) {
+            // The history holds the full-resolution signal of earlier phases; the phase
+            // samples around the pixel bound it (no ghosting where they agree), and its
+            // confidence weighs it against the interpolation.
+            ea = mix(cur, clamp(h.ea, lo, hi), h.c);
+            s = mix(cur_s, clamp(h.s, lo_s, hi_s), h.c);
+            c_new = mix(params.q_miss, h.c, h.c);
+        }
         c_store = clamp(c_new, 0.0, 1.0) * params.decay;
         textureStore(h0_out, p, ea);
         textureStore(h1_out, p, vec4<f32>(s, z, c_store, 0.0));

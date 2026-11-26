@@ -33,6 +33,9 @@ override RAA_TAA_BLEND_BASE: f32 = 0.06;
 override RAA_TAA_BLEND_MOTION_GAIN: f32 = 0.012;
 override RAA_TAA_BLEND_MIN: f32 = 0.04;
 override RAA_TAA_BLEND_MAX: f32 = 0.3;
+// -a of the Keys cubic the history is resampled with: 0.5 is Catmull-Rom; larger values
+// deepen the negative lobes, which offsets the softening of repeated subpixel resampling.
+override RAA_TAA_HISTORY_SHARPNESS: f32 = 0.5;
 
 @group(0) @binding(0) var<uniform> raa_taa_frame: RaaTemporalFrame;
 @group(0) @binding(1) var<uniform> raa_taa_params: RaaTaaParams;
@@ -78,17 +81,25 @@ fn from_ycocg(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
 }
 
-// Five-tap Catmull-Rom: nearly bicubic history sampling, which is the main thing keeping
-// reprojection from blurring the image over time.
+// Keys cubic weight at distance x in [0, 2) for a = -RAA_TAA_HISTORY_SHARPNESS.
+fn keys_weight(x: vec2<f32>) -> vec2<f32> {
+    let a = -RAA_TAA_HISTORY_SHARPNESS;
+    let near = ((a + 2.0) * x - (a + 3.0)) * x * x + 1.0;
+    let far = ((a * x - 5.0 * a) * x + 8.0 * a) * x - 4.0 * a;
+    return select(far, near, x <= vec2<f32>(1.0));
+}
+
+// Five-tap Keys cubic (Catmull-Rom at sharpness 0.5): nearly bicubic history sampling, which
+// is the main thing keeping reprojection from blurring the image over time.
 fn sample_history(uv: vec2<f32>) -> vec3<f32> {
     let size = vec2<f32>(textureDimensions(raa_taa_history));
     let position = uv * size;
     let center = floor(position - vec2<f32>(0.5)) + vec2<f32>(0.5);
     let f = position - center;
-    let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
-    let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
-    let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
-    let w3 = f * f * (-0.5 + 0.5 * f);
+    let w0 = keys_weight(vec2<f32>(1.0) + f);
+    let w1 = keys_weight(f);
+    let w2 = keys_weight(vec2<f32>(1.0) - f);
+    let w3 = keys_weight(vec2<f32>(2.0) - f);
     let w12 = w1 + w2;
     let offset12 = w2 / w12;
     let t0 = (center - vec2<f32>(1.0)) / size;

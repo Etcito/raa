@@ -20,6 +20,12 @@ const TAA: &[Row] = &[
     ),
     ("blendMin", "pass.taa", "Resolve", "Blend min"),
     ("blendMax", "pass.taa", "Resolve", "Blend max"),
+    (
+        "historySharpness",
+        "pass.taa",
+        "Resolve",
+        "History sharpness",
+    ),
 ];
 const SSR: &[Row] = &[
     ("maxSteps", "pass.ssr", "Trace", "Max steps"),
@@ -135,10 +141,11 @@ mod tests {
                 "blendBase",
                 "blendMotionGain",
                 "blendMin",
-                "blendMax"
+                "blendMax",
+                "historySharpness"
             ]
         );
-        let defaults = [2.3, 1.25, 0.06, 0.012, 0.04, 0.3];
+        let defaults = [2.3, 1.25, 0.06, 0.012, 0.04, 0.3, 0.5];
         for (p, d) in p.iter().zip(defaults) {
             assert_eq!(p.kind, ParamKind::Number);
             assert_eq!(p.default, ParamValue::Number(d));

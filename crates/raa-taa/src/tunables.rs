@@ -1,4 +1,4 @@
-//! The TAA resolve's tunables (contract `tunable-promotion`): six `override`s of `taa.wgsl`.
+//! The TAA resolve's tunables (contract `tunable-promotion`): the `override`s of `taa.wgsl`.
 
 use raa_pipeline::TunableSpec;
 
@@ -14,7 +14,10 @@ const fn spec(key: &'static str, default: f64, line: &'static str) -> TunableSpe
     }
 }
 
-static TUNABLES: [TunableSpec; 6] = [
+/// The number of TAA tunables.
+pub(crate) const N: usize = 7;
+
+static TUNABLES: [TunableSpec; N] = [
     spec(
         "filterSharpness",
         2.3,
@@ -29,13 +32,18 @@ static TUNABLES: [TunableSpec; 6] = [
     ),
     spec("blendMin", 0.04, "crates/raa-taa/src/wgsl/taa.wgsl:34"),
     spec("blendMax", 0.3, "crates/raa-taa/src/wgsl/taa.wgsl:35"),
+    spec(
+        "historySharpness",
+        0.5,
+        "crates/raa-taa/src/wgsl/taa.wgsl:36",
+    ),
 ];
 
 /// The tunables of the `taa` pass.
 ///
-/// Handoff: card 'Catalog family tunables_post' calls `tunables`; today it returns the six
+/// Handoff: card 'Catalog family tunables_post' calls `tunables`; today it returns the seven
 /// pass.taa specs in pinned order (filterSharpness, clipTolerance, blendBase,
-/// blendMotionGain, blendMin, blendMax). The key registry it passes is key -> TunableSpec
+/// blendMotionGain, blendMin, blendMax, historySharpness). The key registry it passes is key -> TunableSpec
 /// (default, min, max, integer, rebuild, source); that card attaches each spec by key to a
 /// pass.taa ParamSpec with `ParamBinding::Tunable { feature: FeatureId::Taa, key }`.
 pub fn tunables() -> &'static [TunableSpec] {
@@ -43,12 +51,12 @@ pub fn tunables() -> &'static [TunableSpec] {
 }
 
 /// Defaults in table order.
-pub(crate) fn defaults() -> [f64; 6] {
+pub(crate) fn defaults() -> [f64; N] {
     std::array::from_fn(|i| TUNABLES[i].default)
 }
 
 /// Pairs each override name with its value, in table order.
-pub(crate) fn taa_constants(values: &[f64; 6]) -> [(&'static str, f64); 6] {
+pub(crate) fn taa_constants(values: &[f64; N]) -> [(&'static str, f64); N] {
     [
         ("RAA_TAA_FILTER_SHARPNESS", values[0]),
         ("RAA_TAA_CLIP_TOLERANCE", values[1]),
@@ -56,5 +64,6 @@ pub(crate) fn taa_constants(values: &[f64; 6]) -> [(&'static str, f64); 6] {
         ("RAA_TAA_BLEND_MOTION_GAIN", values[3]),
         ("RAA_TAA_BLEND_MIN", values[4]),
         ("RAA_TAA_BLEND_MAX", values[5]),
+        ("RAA_TAA_HISTORY_SHARPNESS", values[6]),
     ]
 }

@@ -428,6 +428,10 @@ pub struct LitRenderer {
     /// Per-viewport camera history and the open scene invocation (RAA-FRAME).
     scene_frame: SceneLifecycle,
     camera_jitter: Option<bool>,
+    /// Extra material texture mip bias while the camera is jittered (temporal accumulation
+    /// resolves the finer level's detail), added to the TAAU bias; see
+    /// [`Renderer::set_jitter_texture_lod_bias`].
+    jitter_lod_bias: f32,
     /// The renderer-owned S17 local-light registry (M2-LOCAL-STATE).
     ///
     /// Handoff: `LitRenderer::local_lights_mut(&mut self) -> &mut LocalLights` in
@@ -530,6 +534,7 @@ impl LitRenderer {
             frame_bytes: [0; FRAME_GPU_SIZE],
             scene_frame: SceneLifecycle::new(),
             camera_jitter: None,
+            jitter_lod_bias: crate::frame::JITTER_TEXTURE_LOD_BIAS,
             local_lights: LocalLights::new(),
             tile_inputs,
             readback,
@@ -1157,6 +1162,12 @@ impl LitRenderer {
         self.camera_jitter = enabled;
     }
 
+    /// Sets the extra material texture mip bias of jittered frames (finite, clamped to
+    /// [-2, 0]); unjittered frames never take it.
+    pub fn set_jitter_texture_lod_bias(&mut self, bias: f32) {
+        self.jitter_lod_bias = if bias.is_finite() { bias.clamp(-2.0, 0.0) } else { 0.0 };
+    }
+
     /// Drops the camera history for a viewport absent from the rendered layout.
     pub fn suspend_scene_view(&mut self, view: usize) {
         if view < MAX_VIEWS {
@@ -1491,7 +1502,8 @@ impl LitRenderer {
             msaa: self.opts.msaa,
             frame_index: camera.frame_index,
             camera_jitter_ndc: camera.current_jitter,
-            texture_lod_bias: crate::frame::taau_texture_lod_bias(jitter, viewport, display_size),
+            texture_lod_bias: crate::frame::taau_texture_lod_bias(jitter, viewport, display_size)
+                + if jitter { self.jitter_lod_bias } else { 0.0 },
             previous_jitter_ndc: camera.previous_jitter,
             previous_view_proj: camera.previous_view_proj,
             history_valid: camera.history_valid,

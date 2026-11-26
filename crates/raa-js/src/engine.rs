@@ -1573,6 +1573,16 @@ impl Engine {
         })
     }
 
+    /// Extra material texture mip bias of jittered (temporally resolved) frames, clamped to
+    /// [-2, 0]; added to the temporal-upscaling bias.
+    #[wasm_bindgen(js_name = setJitterTextureLodBias)]
+    pub fn set_jitter_texture_lod_bias(&mut self, bias: f32) -> Result<(), JsValue> {
+        self.with_state(|_, s| {
+            s.lit.set_jitter_texture_lod_bias(bias);
+            Ok(())
+        })
+    }
+
     /// Releases the GPU objects and the scene; every later call throws `api.disposed`.
     pub fn dispose(&mut self) {
         self.prediction_real = None;

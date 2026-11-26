@@ -7,20 +7,21 @@ use raa_taa::{TaaFeature, taa_module_source, tunables};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-const KEYS: [&str; 6] = [
+const KEYS: [&str; 7] = [
     "filterSharpness",
     "clipTolerance",
     "blendBase",
     "blendMotionGain",
     "blendMin",
     "blendMax",
+    "historySharpness",
 ];
-const DEFAULTS: [f64; 6] = [2.3, 1.25, 0.06, 0.012, 0.04, 0.3];
+const DEFAULTS: [f64; 7] = [2.3, 1.25, 0.06, 0.012, 0.04, 0.3, 0.5];
 
 #[test]
 fn keys_and_defaults_in_table_order() {
     let specs = tunables();
-    assert_eq!(specs.len(), 6);
+    assert_eq!(specs.len(), 7);
     for (i, spec) in specs.iter().enumerate() {
         assert_eq!(spec.key, KEYS[i]);
         assert_eq!(spec.default, DEFAULTS[i]);
@@ -74,6 +75,7 @@ fn module_with_default_overrides_validates() {
         "RAA_TAA_BLEND_MOTION_GAIN",
         "RAA_TAA_BLEND_MIN",
         "RAA_TAA_BLEND_MAX",
+        "RAA_TAA_HISTORY_SHARPNESS",
     ] {
         assert!(source.contains(&format!("override {name}: f32")));
     }
