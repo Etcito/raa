@@ -987,6 +987,20 @@ fn ddgi_inject_texel(dir: vec3<f32>) -> vec3<f32> {
     return e * 0.31830988;
 }
 
+// Origin of workgroup probe `p` in the blend dispatch, before its relocation: the slot's lattice
+// point plus the stored offset (none for a fresh lattice probe; a fresh surface probe already
+// stored its start offset in the trace dispatch), the point `ddgi_job_setup` traced from.
+fn ddgi_traced_origin(p: u32) -> vec3<f32> {
+    let slot = ddgi_job[p].x;
+    let fresh = ddgi_job[p].z != 0u;
+    let v = ddgi_slot_volume(slot);
+    let is_extra = ddgi_is_extra(slot);
+    let row = v.meta_row + RAA_DDGI_META_ROWS * slot;
+    let offset = select(bitcast<vec3<f32>>(ddgi_probes[row + 1u].xyz), vec3<f32>(0.0), fresh && !is_extra);
+    let cell_centre = select(0.0, 0.5, is_extra);
+    return (vec3<f32>(ddgi_slot_coord(v, slot)) + cell_centre) * v.spacing + offset;
+}
+
 // Relocation, classification and light mask of workgroup probe `p` (one thread).
 fn ddgi_probe_record(p: u32, rays: u32) {
     let job = ddgi_job[p];
@@ -1493,6 +1507,10 @@ fn ddgi_update_blend(@builtin(local_invocation_index) lid: u32,
         ddgi_ray_tag[i] = w.z;
     }
     workgroupBarrier();
+    // The origin each probe was traced from (the probe-only light injection of the blend needs
+    // it; the trace dispatch's `ddgi_origin` does not survive into this dispatch), rebuilt from
+    // the record before the relocation below moves it, as `ddgi_job_setup` built it.
+    if lid < probes_here && ddgi_job[lid].y != 0u { ddgi_origin[lid] = vec4<f32>(ddgi_traced_origin(lid), 0.0); }
     // 2. Relocation and classification of each probe, and its light mask (one thread each): here
     // rather than in the trace dispatch, so no probe record changes while rays of other workgroups
     // look up the volume (every bounce reads the records and groups of the previous update).
