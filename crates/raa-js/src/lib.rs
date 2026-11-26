@@ -8,6 +8,9 @@ pub mod convert;
 // Whole-object billboard level and direction selection (host and wasm32).
 pub mod billboard_selection;
 
+// Generation-owned foliage assets and whole-tree representation groups (host and wasm32).
+pub mod foliage_state;
+
 // Used by the engine and the api files (wasm32); unit-tested on the host.
 #[allow(dead_code)]
 pub(crate) mod feature_map;
