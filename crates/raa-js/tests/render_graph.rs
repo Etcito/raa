@@ -128,12 +128,14 @@ fn stats_json_null_frame_and_two_nodes() {
                 format: "rgba16float".to_string(),
                 bytes: 7_372_800,
             }],
+            history_valid: None,
         },
         NodeStats {
             node: "out".to_string(),
             type_id: "output.display".to_string(),
             ran: false,
             resources: Vec::new(),
+            history_valid: None,
         },
     ];
     let json = stats_to_json(Some(7), &nodes);

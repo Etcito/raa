@@ -15,7 +15,7 @@ interface RenderGraphLink { from: string; to: string; history?: boolean }
 interface RenderGraphDoc { format: 'raa.render-graph'; version: 1; name: string; nodes: RenderGraphNode[]; links: RenderGraphLink[]; editor?: unknown }
 interface RenderGraphIssue { code: string; severity: 'error' | 'warning'; nodeId?: string; port?: string; param?: string; link?: number; message: string; fix: string }
 interface RenderGraphResult { ok: boolean; issues: RenderGraphIssue[]; rebuilt: number }
-interface RenderGraphStats { frameIndex: number | null; nodes: { id: string; type: string; ran: boolean; resources: { port: string; width: number; height: number; layers: number; mips: number; format: string; bytes: number }[] }[] }
+interface RenderGraphStats { frameIndex: number | null; nodes: { id: string; type: string; ran: boolean; resources: { port: string; width: number; height: number; layers: number; mips: number; format: string; bytes: number }[]; historyValid?: boolean }[] }
 interface LightingInterlaceState { mode: boolean; frame: number; real: boolean; phase: [number, number]; skipped: string[] }
 interface Engine {
   renderGraphCatalog(): RenderGraphCatalog
@@ -178,6 +178,26 @@ not a graph is set.
   `lightingInterlace()` reports the state of the latest submitted frame; lit shaders read it in
   `FrameGpu.temporal.w` and `compute.wgsl` nodes in `rg_frame.interlace` (bit 0 mode, bit 1 R
   frame, bits 2 and 3 px and py, bits 4-5 `(n / 2) % 4`).
+- `pass.lighting.reconstruct` (category lighting, multi-instance stage node, pipeline entry
+  `pass.lighting.reconstruct#<id>`, HDR chain member) turns the interlaced signals into the
+  displayed HDR colour, one full-resolution compute dispatch per frame and no network (the
+  analytic ablation of the neural target: `nt_model.step` with an identity kernel and constant
+  alphas). Inputs: `color`, `layerKd`, `layerS0`, `layerEm`, `layerE` linked from one
+  `pass.forward` in `lightingOutput: "layers-interlaced"` (else `graph.reconstruct_source`),
+  `depth`, `normal`, `motion` (prepass defaults). Output `color` (Rgba16Float, scene size) feeds
+  `pass.taa` / `pass.ssr` / `pass.fog` / `pass.tonemap` like any chain colour. It keeps a
+  ping-pong history (E rgb, a) / (s, linear view depth, confidence) reprojected by the motion
+  (depth test `|z_hist - z| <= 0.05 z + 0.02`); an R frame blends the phase-pixel samples
+  (guided 2x2 upsample, quality `qMiss` off the phase pixel) with the history by
+  `alpha*q` against `(1 - alpha)*c`; a G frame reuses the history and fills disocclusions
+  from 12 ring taps. Composite: `C = d0*s + (kd*E + s0)*a + em` (sky: `em`). Params:
+  `alphaSHit` 0.9853, `alphaSMiss` 0.9803, `alphaEHit` 0.9888, `alphaEMiss` 0.9799, `qMiss` 0.3,
+  `decay` 0.98 (learned constants), `jitterCorrect` (false; adds `(previous - current)` camera
+  jitter `x (0.5 W, -0.5 H)` pixels to the reprojection), `debug` (`off`, `shadow`, `ao`,
+  `irradiance`, `confidence`, `holes`). The history is invalid (confidence 0) after a resize, a
+  camera cut, at the first frame and on any frame whose forward is not interlaced (the node
+  then passes its colour through); it flips only on submitted frames. One viewport only
+  (`graph.reconstruct_view`). `renderGraphStats()` reports `ran` and `historyValid`.
 
 ## Document format
 

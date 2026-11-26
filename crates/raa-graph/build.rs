@@ -36,6 +36,7 @@ fn main() {
         ("src/exec/denoise.wgsl", ""),
         ("src/exec/denoise_relax.wgsl", "rgba32float"),
         ("src/exec/denoise_relax.wgsl", "rgba16float"),
+        ("src/exec_ext/lighting_reconstruct.wgsl", ""),
     ] {
         println!("cargo:rerun-if-changed={path}");
         let source = fs::read_to_string(path)

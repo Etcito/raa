@@ -416,6 +416,7 @@ impl ComputeNodeState {
             type_id: "compute.wgsl".into(),
             ran: self.ran,
             resources,
+            history_valid: None,
         }
     }
 }

@@ -122,6 +122,11 @@ export interface RenderGraphStats {
       format: string;
       bytes: number;
     }[];
+    /**
+     * Nodes that keep a history and report it (`pass.lighting.reconstruct`): whether that
+     * history was valid when the node last ran. Absent for every other node.
+     */
+    historyValid?: boolean;
   }[];
 }
 
