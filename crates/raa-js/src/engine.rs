@@ -1573,6 +1573,15 @@ impl Engine {
         })
     }
 
+    /// Halton jitter cycle length (1..=64), 0 = automatic (8 at 1:1, longer when upscaling).
+    #[wasm_bindgen(js_name = setJitterPhases)]
+    pub fn set_jitter_phases(&mut self, phases: u32) -> Result<(), JsValue> {
+        self.with_state(|_, s| {
+            s.lit.set_jitter_phases(phases);
+            Ok(())
+        })
+    }
+
     /// Extra material texture mip bias of jittered (temporally resolved) frames, clamped to
     /// [-2, 0]; added to the temporal-upscaling bias.
     #[wasm_bindgen(js_name = setJitterTextureLodBias)]

@@ -34,6 +34,9 @@ override RAA_TAA_BLEND_MOTION_GAIN: f32 = 0.03;
 override RAA_TAA_BLEND_MIN: f32 = 0.04;
 override RAA_TAA_BLEND_MAX: f32 = 0.5;
 override RAA_TAA_HISTORY_SHARPNESS: f32 = 0.6;
+override RAA_TAA_BLEND_STATIC: f32 = 0.04;
+override RAA_TAA_CLIP_STATIC: f32 = 1.0;
+override RAA_TAA_UPSAMPLE_CONFIDENCE: f32 = 0.0;
 
 @group(0) @binding(0) var<uniform> raa_taa_frame: RaaTemporalFrame;
 @group(0) @binding(1) var<uniform> raa_taa_params: RaaTaaParams;
@@ -154,6 +157,10 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
     var filter_total = 0.0;
     var closest_depth = select(1.0, textureLoad(raa_taa_depth, nearest, 0), scaled);
     var closest_pixel = nearest;
+    // Squared distance, in display pixels, from this output pixel to the nearest jittered
+    // scene sample (temporal upscaling confidence).
+    var nearest_sample = 1.0e9;
+    let to_display = display_extent / scene_extent;
     for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) {
             let p = clamp(nearest + vec2<i32>(dx, dy), vec2<i32>(0), scene_size - vec2<i32>(1));
@@ -183,6 +190,8 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
             let sample_position = vec2<f32>(p) + vec2<f32>(0.5) - jitter_pixels;
             let delta = sample_position - scene_position;
             let weight = exp(-RAA_TAA_FILTER_SHARPNESS * dot(delta, delta));
+            let delta_display = delta * to_display;
+            nearest_sample = min(nearest_sample, dot(delta_display, delta_display));
             filtered += color * weight;
             filter_total += weight;
 
@@ -223,7 +232,11 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
 
         // Clip history against the current neighbourhood's colour distribution: anything far
         // outside it is a disocclusion or lighting change, not a useful earlier sample.
-        let tolerance = RAA_TAA_CLIP_TOLERANCE;
+        // At rest (no reprojection offset) the history is the same surface point, so a
+        // longer history and a looser box average the jitter positions instead of flickering.
+        let moved = length((previous_uv - uv) * display_extent);
+        let rest = 1.0 - smoothstep(0.0, 0.5, moved);
+        let tolerance = RAA_TAA_CLIP_TOLERANCE * mix(1.0, RAA_TAA_CLIP_STATIC, rest);
         let low = mean - deviation * tolerance;
         let high = mean + deviation * tolerance;
         let y = to_ycocg(previous);
@@ -235,8 +248,17 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
 
         // More weight on the current frame when the scene is moving, since resampled
         // history gets softer with distance on the accumulation grid.
-        let moved = length((previous_uv - uv) * display_extent);
-        let blend = clamp(RAA_TAA_BLEND_BASE + moved * RAA_TAA_BLEND_MOTION_GAIN, RAA_TAA_BLEND_MIN, RAA_TAA_BLEND_MAX);
+        var blend = clamp(
+            mix(RAA_TAA_BLEND_BASE, RAA_TAA_BLEND_STATIC, rest) + moved * RAA_TAA_BLEND_MOTION_GAIN,
+            min(RAA_TAA_BLEND_MIN, RAA_TAA_BLEND_STATIC),
+            RAA_TAA_BLEND_MAX,
+        );
+        // Temporal upscaling: a display pixel only learns from this frame as much as a jittered
+        // sample landed near it; elsewhere the current value is an interpolation that would blur
+        // the accumulated history (0 disables the weighting).
+        if scaled && RAA_TAA_UPSAMPLE_CONFIDENCE > 0.0 {
+            blend *= exp(-RAA_TAA_UPSAMPLE_CONFIDENCE * nearest_sample);
+        }
         result = mix(from_ycocg(clipped), current, blend);
     }
     let color = decompress(max(result, vec3<f32>(0.0)));

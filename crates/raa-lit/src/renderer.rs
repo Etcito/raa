@@ -345,7 +345,7 @@ impl SceneLifecycle {
         }
         let (view, discontinuity) = self.selected.take().unwrap_or((0, false));
         self.current_view = view;
-        let jitter = frame_jitter(self.frame_index, size, consumer);
+        let jitter = frame_jitter(self.frame_index, size, consumer, self.history.jitter_phases);
         let (proj, view_matrix) = (scene.camera.projection(), scene.camera.view());
         let unjittered_view_proj = proj * view_matrix;
         let view_proj = if jitter == [0.0; 2] {
@@ -432,6 +432,7 @@ pub struct LitRenderer {
     /// resolves the finer level's detail), added to the TAAU bias; see
     /// [`Renderer::set_jitter_texture_lod_bias`].
     jitter_lod_bias: f32,
+    jitter_phases: Option<u32>,
     /// The renderer-owned S17 local-light registry (M2-LOCAL-STATE).
     ///
     /// Handoff: `LitRenderer::local_lights_mut(&mut self) -> &mut LocalLights` in
@@ -535,6 +536,7 @@ impl LitRenderer {
             scene_frame: SceneLifecycle::new(),
             camera_jitter: None,
             jitter_lod_bias: crate::frame::JITTER_TEXTURE_LOD_BIAS,
+            jitter_phases: None,
             local_lights: LocalLights::new(),
             tile_inputs,
             readback,
@@ -1168,6 +1170,12 @@ impl LitRenderer {
         self.jitter_lod_bias = if bias.is_finite() { bias.clamp(-2.0, 0.0) } else { 0.0 };
     }
 
+    /// Fixes the Halton jitter cycle length (1..=64); 0 restores the automatic length
+    /// (8 at 1:1, 8 x the display/render area ratio when upscaling).
+    pub fn set_jitter_phases(&mut self, phases: u32) {
+        self.jitter_phases = (phases > 0).then(|| phases.min(64));
+    }
+
     /// Drops the camera history for a viewport absent from the rendered layout.
     pub fn suspend_scene_view(&mut self, view: usize) {
         if view < MAX_VIEWS {
@@ -1261,6 +1269,9 @@ impl LitRenderer {
         }
         let jitter = self.camera_jitter.unwrap_or(taa_enabled);
         let discontinuity = self.scene_frame.selected.is_some_and(|(_, cut)| cut);
+        self.scene_frame.history.jitter_phases = self
+            .jitter_phases
+            .unwrap_or_else(|| crate::frame_history::jitter_phases(viewport, display_size));
         let camera = self.scene_frame.prepare(scene, viewport, jitter);
         if discontinuity || camera.jitter_mode_changed {
             self.pipeline

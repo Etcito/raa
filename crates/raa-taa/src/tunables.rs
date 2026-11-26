@@ -15,7 +15,7 @@ const fn spec(key: &'static str, default: f64, line: &'static str) -> TunableSpe
 }
 
 /// The number of TAA tunables.
-pub(crate) const N: usize = 7;
+pub(crate) const N: usize = 10;
 
 static TUNABLES: [TunableSpec; N] = [
     spec(
@@ -37,13 +37,21 @@ static TUNABLES: [TunableSpec; N] = [
         0.6,
         "crates/raa-taa/src/wgsl/taa.wgsl:36",
     ),
+    spec("blendStatic", 0.04, "crates/raa-taa/src/wgsl/taa.wgsl:37"),
+    spec("clipStatic", 1.0, "crates/raa-taa/src/wgsl/taa.wgsl:38"),
+    spec(
+        "upsampleConfidence",
+        0.0,
+        "crates/raa-taa/src/wgsl/taa.wgsl:39",
+    ),
 ];
 
 /// The tunables of the `taa` pass.
 ///
-/// Handoff: card 'Catalog family tunables_post' calls `tunables`; today it returns the seven
+/// Handoff: card 'Catalog family tunables_post' calls `tunables`; today it returns the ten
 /// pass.taa specs in pinned order (filterSharpness, clipTolerance, blendBase,
-/// blendMotionGain, blendMin, blendMax, historySharpness). The key registry it passes is key -> TunableSpec
+/// blendMotionGain, blendMin, blendMax, historySharpness, blendStatic, clipStatic,
+/// upsampleConfidence). The key registry it passes is key -> TunableSpec
 /// (default, min, max, integer, rebuild, source); that card attaches each spec by key to a
 /// pass.taa ParamSpec with `ParamBinding::Tunable { feature: FeatureId::Taa, key }`.
 pub fn tunables() -> &'static [TunableSpec] {
@@ -65,5 +73,8 @@ pub(crate) fn taa_constants(values: &[f64; N]) -> [(&'static str, f64); N] {
         ("RAA_TAA_BLEND_MIN", values[4]),
         ("RAA_TAA_BLEND_MAX", values[5]),
         ("RAA_TAA_HISTORY_SHARPNESS", values[6]),
+        ("RAA_TAA_BLEND_STATIC", values[7]),
+        ("RAA_TAA_CLIP_STATIC", values[8]),
+        ("RAA_TAA_UPSAMPLE_CONFIDENCE", values[9]),
     ]
 }

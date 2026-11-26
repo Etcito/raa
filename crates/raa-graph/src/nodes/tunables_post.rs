@@ -26,6 +26,14 @@ const TAA: &[Row] = &[
         "Resolve",
         "History sharpness",
     ),
+    ("blendStatic", "pass.taa", "Resolve", "Blend at rest"),
+    ("clipStatic", "pass.taa", "Resolve", "Clip scale at rest"),
+    (
+        "upsampleConfidence",
+        "pass.taa",
+        "Resolve",
+        "Upsample confidence",
+    ),
 ];
 const SSR: &[Row] = &[
     ("maxSteps", "pass.ssr", "Trace", "Max steps"),
