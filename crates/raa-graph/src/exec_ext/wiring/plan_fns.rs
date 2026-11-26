@@ -113,7 +113,9 @@ pub fn mesh_trace_type(ty: &str) -> bool {
         "mesh.reflection"
             | "mesh.reference"
             | "mesh.fitted-specular"
-            | crate::mesh_indirect::GRID_DIFFUSE_TYPE
+            // = crate::mesh_indirect::GRID_DIFFUSE_TYPE; spelled out because the tests include
+            // this file by #[path] outside the crate.
+            | "mesh.grid-diffuse"
     )
 }
 

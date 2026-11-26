@@ -49,6 +49,8 @@ fn distinct() -> SurfaceMaterial {
         params,
         fur: [0.71, 0.72, 0.73, 32.0],
         data: 4097,
+        // Ray-only metadata, not part of the raster GPU record.
+        trace_base_color: None,
     }
 }
 

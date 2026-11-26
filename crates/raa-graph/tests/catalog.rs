@@ -447,6 +447,8 @@ fn pass_names_and_default_sources_resolve() {
         let expected_pass = match node.id {
             // The neural resolve drives the installed TAA path, including its analytic fallback.
             "neural.super-resolution" => Some("taa"),
+            // The radiance cache is installed as its own GI pass (nodes/nrc.rs, NRC_GI_NAME).
+            "neural.radiance-cache" => Some(raa_sdf_trace::mesh::NRC_GI_NAME),
             id => id.strip_prefix("pass."),
         };
         assert_eq!(node.pass, expected_pass, "{} pipeline entry", node.id);

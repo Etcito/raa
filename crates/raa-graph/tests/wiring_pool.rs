@@ -27,7 +27,6 @@ fn resource(id: u32, first_use: u32, last_use: u32) -> PlanResource {
         size: SizeSpec::Scale(1.0),
         mips: 1,
         layers: 1,
-        contract: None,
         first_use,
         last_use,
         history: false,
