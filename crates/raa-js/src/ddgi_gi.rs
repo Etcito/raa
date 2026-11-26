@@ -3,7 +3,7 @@
 
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use raa_core::RaaError;
-use raa_sdf_trace::mesh::{DdgiFeature, DdgiHandle, MeshTraceHandle};
+use raa_sdf_trace::mesh::{DdgiFeature, DdgiHandle, DdgiWarmup, MeshTraceHandle};
 use wasm_bindgen::prelude::*;
 
 use crate::engine::{Engine, InstallCtx};
@@ -24,6 +24,60 @@ fn put(object: &Object, key: &str, value: JsValue) {
 
 #[wasm_bindgen]
 impl Engine {
+    /// Starts a DDGI warm-up: the next frames trace every probe (all cascades) in chunks of about
+    /// `chunkMs` of GPU each until all are converged, or `maxFrames` chunks ran. Render frames
+    /// without showing them and await `submittedWorkDone()` between them; poll
+    /// `ddgiWarmupStatus()`. Returns false when there is no DDGI volume.
+    #[wasm_bindgen(js_name = ddgiWarmupBegin)]
+    pub fn ddgi_warmup_begin(&self, chunk_ms: f64, max_frames: u32) -> Result<bool, JsValue> {
+        self.with_state(|_, st| {
+            let Some(handle) = st.features.get::<DdgiHandle>() else {
+                return Ok(false);
+            };
+            let mut state = handle.borrow_mut();
+            if !state.active() {
+                return Ok(false);
+            }
+            state.begin_warmup(DdgiWarmup {
+                chunk_ms: (chunk_ms as f32).clamp(1.0, 1000.0),
+                max_frames: max_frames.max(1),
+            });
+            Ok(true)
+        })
+    }
+
+    /// Stops a running DDGI warm-up.
+    #[wasm_bindgen(js_name = ddgiWarmupCancel)]
+    pub fn ddgi_warmup_cancel(&self) -> Result<(), JsValue> {
+        self.with_state(|_, st| {
+            if let Some(handle) = st.features.get::<DdgiHandle>() {
+                handle.borrow_mut().cancel_warmup();
+            }
+            Ok(())
+        })
+    }
+
+    /// Progress of the last DDGI warm-up, or null without a volume.
+    #[wasm_bindgen(js_name = ddgiWarmupStatus)]
+    pub fn ddgi_warmup_status(&self) -> Result<JsValue, JsValue> {
+        self.with_state(|_, st| {
+            let Some(handle) = st.features.get::<DdgiHandle>() else {
+                return Ok(JsValue::NULL);
+            };
+            let s = handle.borrow().warmup_status();
+            let result = Object::new();
+            put(&result, "active", s.active.into());
+            put(&result, "done", s.done.into());
+            put(&result, "timedOut", s.timed_out.into());
+            put(&result, "chunks", s.chunks.into());
+            put(&result, "updates", (s.updates as f64).into());
+            put(&result, "pending", s.pending.into());
+            put(&result, "maxChunk", s.max_chunk.into());
+            put(&result, "maxChunkMs", s.max_chunk_ms.into());
+            Ok(result.into())
+        })
+    }
+
     /// Snapshot of the active DDGI volume and its update schedule, or null.
     #[wasm_bindgen(js_name = ddgiGiStats)]
     pub fn ddgi_gi_stats(&self) -> Result<JsValue, JsValue> {

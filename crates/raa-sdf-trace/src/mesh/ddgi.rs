@@ -430,8 +430,37 @@ pub struct DdgiStats {
 
 pub type DdgiHandle = Rc<RefCell<DdgiState>>;
 
+/// A warm-up request: update every probe, in chunks of about `chunk_ms` of GPU each, until all
+/// are converged or `max_frames` chunks were run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DdgiWarmup {
+    pub chunk_ms: f32,
+    pub max_frames: u32,
+}
+
+/// Progress of the warm-up (the last request).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DdgiWarmupStatus {
+    /// A warm-up is running (requested, not yet finished).
+    pub active: bool,
+    /// Finished with every probe converged.
+    pub done: bool,
+    /// Stopped by `max_frames` before every probe converged.
+    pub timed_out: bool,
+    /// Chunks (frames that traced probes) run, probe updates traced, and probes still to
+    /// converge at the last plan.
+    pub chunks: u32,
+    pub updates: u64,
+    pub pending: u32,
+    /// The largest chunk (probe jobs) and its estimated GPU time (ms).
+    pub max_chunk: u32,
+    pub max_chunk_ms: f64,
+}
+
 #[derive(Default)]
 pub struct DdgiState {
+    warmup: Option<DdgiWarmup>,
+    warmup_status: DdgiWarmupStatus,
     pub settings: DdgiSettings,
     view: Option<(usize, DdgiView)>,
     pass_enabled: bool,
@@ -455,6 +484,26 @@ impl DdgiState {
 
     pub fn active(&self) -> bool {
         self.pass_enabled && self.settings.enabled
+    }
+
+    /// Starts a warm-up: the next frames trace every probe (all cascades) in `chunk_ms` chunks
+    /// until all are converged. The caller renders frames without presenting them and waits for
+    /// the queue between chunks.
+    pub fn begin_warmup(&mut self, warmup: DdgiWarmup) {
+        self.warmup = Some(warmup);
+        self.warmup_status = DdgiWarmupStatus {
+            active: true,
+            ..DdgiWarmupStatus::default()
+        };
+    }
+
+    pub fn cancel_warmup(&mut self) {
+        self.warmup = None;
+        self.warmup_status.active = false;
+    }
+
+    pub fn warmup_status(&self) -> DdgiWarmupStatus {
+        self.warmup_status
     }
 
     pub fn stats(&self) -> Option<DdgiStats> {
@@ -1159,8 +1208,22 @@ impl FeaturePass for DdgiPass {
                 .min(job_cap)
         };
         let cap = ((probes as f32 * settings.update_fraction).ceil() as u32).clamp(1, probes);
-        let burst = probes_for(settings.burst_ms);
-        let batch = burst.min(cap.max(floor));
+        // A warm-up traces every probe in chunks of its own GPU budget (the first chunk, before
+        // any timing was measured, is kept small), and nothing while the scene cannot be traced.
+        let warmup = self.state.borrow().warmup;
+        let burst = match warmup {
+            Some(w) if traceable => {
+                let first = if self.batch_ms > 0.0 { 1.0 } else { 0.25 };
+                probes_for(w.chunk_ms * first)
+            }
+            Some(_) => 0,
+            None => probes_for(settings.burst_ms),
+        };
+        let batch = if warmup.is_some() {
+            burst
+        } else {
+            burst.min(cap.max(floor))
+        };
         // Steady state: one batch every `interval` frames keeps the average within budgetMs.
         let interval = if self.batch_ms > 0.0 {
             (self.batch_ms / f64::from(settings.budget_ms))
@@ -1170,13 +1233,16 @@ impl FeaturePass for DdgiPass {
             1
         };
         self.idle_frames += 1;
-        let budget = if self.idle_frames >= interval {
+        let budget = if self.idle_frames >= interval || warmup.is_some() {
             batch
         } else {
             0
         };
         let converge_age = converge_age_of(&settings);
-        self.clock += if ctx.dt_s > 0.0 {
+        self.clock += if warmup.is_some() {
+            // Chunks are far apart in real time and the probes should blend as in steady state.
+            0.05
+        } else if ctx.dt_s > 0.0 {
             f64::from(ctx.dt_s).min(0.05)
         } else {
             1.0 / 60.0
@@ -1188,6 +1254,26 @@ impl FeaturePass for DdgiPass {
                 .plan(Some(&camera), converge_age, budget, burst, &mut jobs);
         if !jobs.is_empty() {
             self.idle_frames = 0;
+        }
+        if let Some(w) = warmup.filter(|_| traceable) {
+            let mut state = self.state.borrow_mut();
+            let status = &mut state.warmup_status;
+            let traced = (jobs.len() / 2) as u32;
+            status.chunks += u32::from(traced > 0);
+            status.updates += u64::from(traced);
+            status.pending = self.schedule.unconverged;
+            if traced > status.max_chunk {
+                status.max_chunk = traced;
+                status.max_chunk_ms = f64::from(traced) * self.ms_per_probe;
+            }
+            let done = self.schedule.unconverged == 0;
+            let timed_out = !done && status.chunks >= w.max_frames;
+            if done || timed_out {
+                status.active = false;
+                status.done = done;
+                status.timed_out = timed_out;
+                state.warmup = None;
+            }
         }
 
         let rotation = self.random_rotation();

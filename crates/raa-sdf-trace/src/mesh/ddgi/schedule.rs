@@ -106,6 +106,9 @@ pub(super) struct Schedule {
     extra_spacing: f32,
     /// Frames between two updates of the same probe, per class (see `PERIOD_CLASSES`).
     pub(super) periods: [[u64; PERIOD_BUCKETS]; PERIOD_CLASSES],
+    /// Needed probes still before the converged class at the last plan (all cascades, in and out
+    /// of the frustum, surface probes included): zero once every probe is converged.
+    pub(super) unconverged: u32,
 }
 
 const CLASS_SHIFT: u32 = 40;
@@ -425,6 +428,10 @@ impl Schedule {
             }
         }
         self.bases = Some(bases);
+        self.unconverged = keys
+            .iter()
+            .filter(|&&(key, _)| (key >> CLASS_SHIFT) < CLASS_REFRESH)
+            .count() as u32;
         self.keys = keys;
         let urgent = self.keys.iter().any(|&(key, _)| {
             let class = key >> CLASS_SHIFT;
@@ -560,6 +567,28 @@ mod tests {
             assert!((back / t - 1.0).abs() < 0.05, "{t} -> {back}");
         }
         assert_eq!(elapsed_code(1e6), 127);
+    }
+
+    #[test]
+    fn a_chunked_sweep_converges_every_probe_and_reports_it() {
+        // Warm-up: chunks smaller than the volume, every probe converged after
+        // `converge_age` full sweeps, and `unconverged` reaches zero exactly then.
+        let mut s = Schedule::default();
+        s.reset(&one([4, 2, 4]), 0, 1.0);
+        s.scroll(&[[0, 0, 0]], &[0]);
+        let mut jobs = Vec::new();
+        let mut chunks = 0;
+        loop {
+            s.plan(None, 4, 8, 8, &mut jobs);
+            if s.unconverged == 0 {
+                break;
+            }
+            chunks += 1;
+            assert!(chunks <= 32 * 4 / 8 + 1, "never converges");
+            assert_eq!(jobs.len() / 2, 8);
+        }
+        assert_eq!(chunks, 32 * 4 / 8);
+        assert!((0..32).all(|slot| s.age(slot) >= 4));
     }
 
     #[test]
