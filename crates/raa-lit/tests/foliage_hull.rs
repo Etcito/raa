@@ -242,6 +242,24 @@ fn coplanar_source_is_refused() {
 }
 
 #[test]
+fn collinear_source_is_refused() {
+    let line = source(vec![
+        triangle([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]),
+        triangle([3.0, 3.0, 3.0], [4.0, 4.0, 4.0], [5.0, 5.0, 5.0]),
+    ]);
+    assert_invalid(&line);
+}
+
+#[test]
+fn infinite_source_is_refused() {
+    let broken = source(vec![
+        triangle([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        triangle([0.0, 0.0, 0.0], [0.0, 0.0, f32::INFINITY], [0.0, 1.0, 0.0]),
+    ]);
+    assert_invalid(&broken);
+}
+
+#[test]
 fn nonfinite_source_is_refused() {
     let broken = source(vec![triangle(
         [0.0, 0.0, 0.0],
