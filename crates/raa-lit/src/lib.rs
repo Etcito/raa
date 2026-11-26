@@ -76,7 +76,7 @@ pub use library::SurfaceLibrary;
 pub use light_stats::LocalLightStats;
 pub use local_light::{LightHandle, LocalLight, LocalLightKind, MAX_LIGHT_HANDLE};
 pub use light_cutoff::{DEFAULT_DISPLAY_THRESHOLD, DEFAULT_FORWARD_THRESHOLD, LightCutoff};
-pub use local_lights::{LocalLights, MAX_LOCAL_LIGHTS};
+pub use local_lights::{DEFAULT_FORWARD_BUDGET, LocalLights, MAX_LOCAL_LIGHTS};
 pub use lod::{
     LodLevel, LodParams, LodRegistry, MAX_LOD_LEVELS, camera_level, lod_error, shadow_level,
 };

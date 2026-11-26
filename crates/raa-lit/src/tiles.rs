@@ -79,9 +79,16 @@ pub(crate) fn tile_grid(size: (u32, u32)) -> (u32, u32) {
 
 /// S10 `light_info` of one viewport: active count (zero while the tiling feature is
 /// disabled), tile columns, tile rows and the tile stride in words.
-pub(crate) fn light_info(active: u32, viewport: (u32, u32), enabled: bool) -> [u32; 4] {
+pub(crate) fn light_info(
+    active: u32,
+    viewport: (u32, u32),
+    enabled: bool,
+    forward_budget: u32,
+) -> [u32; 4] {
     let (columns, rows) = tile_grid(viewport);
-    [if enabled { active } else { 0 }, columns, rows, TILE_WORDS]
+    // The high half of the stride word carries the per-tile forward budget (0 = unlimited).
+    let stride = TILE_WORDS | (forward_budget.min(255) << 16);
+    [if enabled { active } else { 0 }, columns, rows, stride]
 }
 
 /// Copies the renderer-owned registry into the shared tile inputs only when it changed;
@@ -463,9 +470,9 @@ mod tests {
 
     #[test]
     fn light_info_zeroes_counts_while_disabled() {
-        assert_eq!(light_info(7, (1920, 1080), true), [7, 120, 68, TILE_WORDS]);
-        assert_eq!(light_info(7, (1920, 1080), false), [0, 120, 68, TILE_WORDS]);
-        assert_eq!(light_info(0, (16, 16), true), [0, 1, 1, TILE_WORDS]);
+        assert_eq!(light_info(7, (1920, 1080), true, 0), [7, 120, 68, TILE_WORDS]);
+        assert_eq!(light_info(7, (1920, 1080), false, 0), [0, 120, 68, TILE_WORDS]);
+        assert_eq!(light_info(0, (16, 16), true, 8), [0, 1, 1, TILE_WORDS | (8 << 16)]);
     }
 
     #[test]

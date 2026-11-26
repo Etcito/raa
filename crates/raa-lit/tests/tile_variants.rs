@@ -67,14 +67,14 @@ fn fixed_capacity_arrays_and_workgroup_fit_core_limits() {
     {
         let ty = declaration.split_once(": ").unwrap().1;
         bytes += match ty {
-            "atomic<u32>;" => 4,
+            "atomic<u32>;" | "f32;" => 4,
             "array<u32, MAX_LOCAL_LIGHTS>;" | "array<f32, MAX_LOCAL_LIGHTS>;" => {
                 4 * MAX_LOCAL_LIGHTS as u32
             }
             _ => panic!("unaccounted workgroup type: {ty}"),
         };
     }
-    assert_eq!(bytes, 3 * 4 * MAX_LOCAL_LIGHTS as u32 + 3 * 4);
+    assert_eq!(bytes, 3 * 4 * MAX_LOCAL_LIGHTS as u32 + 3 * 4 + 4);
     let limits = wgpu::Limits::default();
     assert!(bytes <= limits.max_compute_workgroup_storage_size);
     assert!(MAX_LOCAL_LIGHTS as u32 <= limits.max_compute_invocations_per_workgroup);
@@ -143,7 +143,7 @@ fn s12_storage_texture_and_compute_counter_contract() {
         "@group(2) @binding(2) var tile_words: texture_storage_2d_array<r32uint, write>;",
         "@group(2) @binding(3) var<storage, read_write> droppedLightReferences: atomic<u32>;",
         "textureStore(tile_words, vec2<i32>(group.xy), 0, vec4<u32>(retained, 0u, 0u, 0u))",
-        "textureStore(tile_words, vec2<i32>(group.xy), i32(lane + 1u), vec4<u32>(index, 0u, 0u, 0u))",
+        "textureStore(tile_words, vec2<i32>(group.xy), i32(lane + 1u), vec4<u32>(index | (dropped << 16u), 0u, 0u, 0u))",
         "atomicAdd(&qualifying_count, 1u)",
     ] {
         assert!(LIGHT_TILES_WGSL.contains(required), "{required}");

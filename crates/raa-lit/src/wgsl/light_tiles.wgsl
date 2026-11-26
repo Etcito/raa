@@ -13,6 +13,8 @@
 var<workgroup> nearest_bits: atomic<u32>;
 var<workgroup> farthest_bits: atomic<u32>;
 var<workgroup> qualifying_count: atomic<u32>;
+// Forward budget: score of the (budget + 1)-th strongest point or spot light of the tile, 0 = none.
+var<workgroup> budget_threshold: f32;
 // Handoff to fixed-network selection: one lane per dense handle-ordered GPU index.
 // Eligibility is independent of score; zero-score conservative candidates survive.
 // A light with zero radiance (authored off: colour x intensity is black) is never listed:
@@ -168,12 +170,38 @@ fn light_tiles(@builtin(workgroup_id) group: vec3<u32>,
     }
     let qualified = atomicLoad(&qualifying_count);
     let retained = min(qualified, TILE_MAX_LIGHTS);
+    // Forward budget (light_info.w >> 16 = N, 0 = unlimited): the N strongest point/spot lights of
+    // the tile keep their forward weight; weaker ones fade out between the (N+1)-th score and
+    // 1.5 times it (continuous in the score, so a light never pops when the camera moves) and
+    // are carried by the probes instead (the DDGI injection uses the complementary weight).
+    let budget = raa_frame.light_info.w >> 16u;
     if lane == 0u {
         textureStore(tile_words, vec2<i32>(group.xy), 0, vec4<u32>(retained, 0u, 0u, 0u));
         atomicAdd(&droppedLightReferences, qualified - retained);
+        var threshold = 0.0;
+        if budget > 0u {
+            var seen = 0u;
+            for (var r = 0u; r < retained; r += 1u) {
+                if tile_lights[candidate_indices[r]].kind < 2u {
+                    seen += 1u;
+                    if seen > budget {
+                        threshold = candidate_scores[r];
+                        break;
+                    }
+                }
+            }
+        }
+        budget_threshold = threshold;
     }
+    workgroupBarrier();
     if lane < TILE_MAX_LIGHTS {
         let index = select(0u, candidate_indices[lane], lane < retained);
-        textureStore(tile_words, vec2<i32>(group.xy), i32(lane + 1u), vec4<u32>(index, 0u, 0u, 0u));
+        // Bits 16..23: 255 x (1 - forward weight) of a budgeted light (0 = full weight).
+        var dropped = 0u;
+        if lane < retained && budget_threshold > 0.0 && tile_lights[index].kind < 2u {
+            let weight = smoothstep(budget_threshold, 1.5 * budget_threshold, candidate_scores[lane]);
+            dropped = u32((1.0 - weight) * 255.0 + 0.5);
+        }
+        textureStore(tile_words, vec2<i32>(group.xy), i32(lane + 1u), vec4<u32>(index | (dropped << 16u), 0u, 0u, 0u));
     }
 }

@@ -13,6 +13,10 @@ use raa_math::{Mat4, Vec3};
 use crate::light_cutoff::{LightCutoff, budgeted};
 use std::cell::RefCell;
 
+/// Default per-tile forward budget: the N strongest point/spot lights of a tile are shaded in
+/// forward, the others fade to the probes (light_tiles.wgsl). 0 = unlimited.
+pub const DEFAULT_FORWARD_BUDGET: u32 = 8;
+
 /// Cached effective lights: registry generation, descriptors, forward radii.
 type Effective = (u64, Vec<LocalLight>, Vec<f32>);
 use crate::local_light::{LightHandle, LocalLight, MAX_LIGHT_HANDLE};
@@ -49,6 +53,7 @@ pub struct LocalLights {
     dirty: bool,
     cutoff: LightCutoff,
     generation: u64,
+    forward_budget: u32,
     effective: RefCell<Effective>,
 }
 
@@ -68,6 +73,7 @@ impl LocalLights {
             dirty: false,
             cutoff: LightCutoff::default(),
             generation: 1,
+            forward_budget: DEFAULT_FORWARD_BUDGET,
             effective: RefCell::new((0, Vec::new(), Vec::new())),
         }
     }
@@ -298,6 +304,16 @@ impl LocalLights {
     /// The influence cutoff applied to every record and world descriptor this registry yields.
     pub fn cutoff(&self) -> LightCutoff {
         self.cutoff
+    }
+
+    /// Per-tile forward budget (0 = unlimited, at most 255).
+    pub fn forward_budget(&self) -> u32 {
+        self.forward_budget
+    }
+
+    /// Sets the per-tile forward budget; the next frame's light info carries it.
+    pub fn set_forward_budget(&mut self, budget: u32) {
+        self.forward_budget = budget.min(255);
     }
 
     /// Replaces the influence cutoff (scene exposure or threshold changed); the next frame

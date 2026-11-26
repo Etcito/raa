@@ -812,12 +812,15 @@ pub(crate) mod web {
         /// scene's fixed exposure and tone mapping is shortened to its influence radius or
         /// switched off for every consumer. Throws `light.invalid_cutoff` when `threshold` is
         /// not a finite number in [0, 1]. The optional second argument is the forward-tier threshold
-        /// (default 16/255, 0 disables): fainter or farther lights are probe-only.
+        /// (default 16/255, 0 disables): fainter or farther lights are probe-only. The optional third
+        /// argument is the per-tile forward budget (default 8, 0 = unlimited): beyond the N strongest
+        /// point/spot lights of a tile the others fade to the probes.
         #[wasm_bindgen(js_name = setLightCutoff)]
         pub fn set_light_cutoff(
             &mut self,
             threshold: f64,
             forward_threshold: Option<f64>,
+            forward_budget: Option<u32>,
         ) -> Result<(), JsValue> {
             self.with_state(|_, st| {
                 if !(threshold.is_finite() && (0.0..=1.0).contains(&threshold)) {
@@ -835,6 +838,9 @@ pub(crate) mod web {
                 }
                 let cutoff = light_cutoff_for(&st.tonemap.get(), threshold as f32, forward as f32);
                 st.lit.local_lights_mut().set_cutoff(cutoff);
+                st.lit
+                    .local_lights_mut()
+                    .set_forward_budget(forward_budget.unwrap_or(raa_lit::DEFAULT_FORWARD_BUDGET));
                 Ok(())
             })
         }
