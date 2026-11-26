@@ -856,7 +856,7 @@ impl LitRenderer {
     /// `crates/raa-lit/src/foliage_reference.rs:627 pack_foliage_layers`,
     /// `crates/raa-lit/src/foliage_hull.rs:248 build_foliage_hull`,
     /// `crates/raa-lit/src/foliage_stochastic.rs:74 build_stochastic_foliage`,
-    /// `crates/raa-lit/src/foliage_optimize.rs:1026 optimize_foliage` and
+    /// `crates/raa-lit/src/foliage_optimize.rs:1045 optimize_foliage` and
     /// `crates/raa-lit/src/handle.rs:2151 LitHandle::set_foliage`.
     ///
     /// Handoff: 'Expose asynchronous foliage preparation to JavaScript' calls
