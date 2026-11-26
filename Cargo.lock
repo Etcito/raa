@@ -996,7 +996,6 @@ dependencies = [
  "raa-particles",
  "raa-pipeline",
  "raa-prims",
- "raa-render",
  "raa-scene",
  "raa-sdf-trace",
  "raa-shader",
