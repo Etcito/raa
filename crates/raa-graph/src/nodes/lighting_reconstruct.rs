@@ -98,7 +98,7 @@ impl NodeFamily for LightingReconstruct {
         let mut inputs = vec![
             color,
             required_in("layerKd", "Diffuse reflectance (a = AO)", GraphFormat::Rgba16Float),
-            required_in("layerS0", "AO-free ambient", GraphFormat::Rgba16Float),
+            required_in("layerS0", "AO ambient at AO 1 (a = sky code)", GraphFormat::Rgba16Float),
             required_in("layerEm", "Emission and contributors", GraphFormat::Rgba16Float),
             required_in("layerE", "Probe irradiance x w (a = w)", GraphFormat::Rgba16Float),
         ];

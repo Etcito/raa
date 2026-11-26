@@ -23,7 +23,10 @@
 // wc = alpha q (0 without any tap sample), wh = (1 - alpha) hc, out = (wc cur + wh hist) /
 // max(wc + wh, 1e-5); c_new = mean over the groups of (wc q + wh hc) / max(wc + wh, 1e-5),
 // clamped to [0, 1] x decay.
-// Composite: C = d0 s + (kd E + s0) a + em; sky (z = 0): C = em, history zero.
+// Composite: C = d0 s + (kd E + s0 vis) a + em; sky (z = 0): C = em, history zero. vis is the
+// DDGI sky-specular visibility of raa-shader opaque_layers.wgsl (raa_layers_sky_vis) from the
+// layerS0 alpha t of the current pixel and the accumulated (E, a) with w = 1 (the history keeps
+// no probe weight; the layers assume w = 1 whenever a probe GI is enabled).
 
 struct Params {
     size: vec2<u32>,
@@ -110,6 +113,16 @@ fn reproject(t: vec2<i32>, zt: f32) -> History {
     return History(h0, h1.x, select(0.0, h1.z, valid));
 }
 
+// raa-shader opaque_layers.wgsl raa_layers_sky_vis.
+fn sky_vis(t: f32, e: vec3<f32>, w: f32, a: f32) -> f32 {
+    if (t == 0.0 || w <= 0.0) {
+        return 1.0;
+    }
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let l = dot(e, luma) / w * select(1.0, a, t > 0.0);
+    return mix(1.0, clamp(l / abs(t), 0.0, 1.0), w);
+}
+
 fn debug_color(view: u32, e: vec4<f32>, s: f32, c: f32, hc: f32) -> vec3<f32> {
     switch view {
         case 1u: { return vec3<f32>(s); }
@@ -129,7 +142,7 @@ fn reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
     let max_p = vec2<i32>(params.size) - vec2<i32>(1);
     let base = textureLoad(color_tex, p, 0);
     let kd = textureLoad(kd_tex, p, 0);
-    let s0 = textureLoad(s0_tex, p, 0).rgb;
+    let s0 = textureLoad(s0_tex, p, 0);
     let em = textureLoad(em_tex, p, 0).rgb;
     let z = linear_z(p);
     if (z <= 0.0) {
@@ -230,7 +243,8 @@ fn reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(h0_out, p, ea);
         textureStore(h1_out, p, vec4<f32>(s, z, c_store, 0.0));
     }
-    var color = base.rgb * s + (kd.rgb * ea.rgb + s0) * ea.a + em;
+    let vis = sky_vis(s0.a, ea.rgb, 1.0, ea.a);
+    var color = base.rgb * s + (kd.rgb * ea.rgb + s0.rgb * vis) * ea.a + em;
     if (params.debug != 0u) {
         color = debug_color(params.debug, ea, s, c_store, h.c);
     }

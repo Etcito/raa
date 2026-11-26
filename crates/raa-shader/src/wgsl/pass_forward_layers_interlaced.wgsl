@@ -41,7 +41,7 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> RaaForw
     var out: RaaForwardLayersInterlaced;
     out.d0 = vec4<f32>(l.d0, g.shadow);
     out.kd = vec4<f32>(l.kd, g.ao);
-    out.s0 = vec4<f32>(l.s0, 1.0);
+    out.s0 = vec4<f32>(l.s0, l.sky);
     out.em = vec4<f32>(l.em, 1.0);
     out.e = vec4<f32>(g.e, g.w);
     return out;

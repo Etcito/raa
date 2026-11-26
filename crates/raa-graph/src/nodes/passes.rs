@@ -551,7 +551,7 @@ fn forward_outputs() -> Vec<PortSpec> {
     let mut outputs = vec![color_output()];
     for (key, label) in [
         ("layerKd", "Layer Kd (DDGI diffuse factor)"),
-        ("layerS0", "Layer S0 (AO-scaled ambient at AO 1)"),
+        ("layerS0", "Layer S0 (AO-scaled ambient at AO 1, alpha sky visibility code)"),
         ("layerEm", "Layer Em (emissive, local, contributors)"),
         ("layerE", "Signal E (probe GI x w, alpha w)"),
         ("layerR", "Residual of the recomposition"),

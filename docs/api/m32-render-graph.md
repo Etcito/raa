@@ -157,10 +157,13 @@ not a graph is set.
   bounce, since the forward pass has no per-bounce signal. `shadow` shows the sun
   visibility. `layers` (msaa 1 only) writes the opaque lighting as demodulated layers in one
   pass: `color` = unshadowed sun direct d0 and the extra Rgba16Float outputs `layerKd`,
-  `layerS0`, `layerEm`, without reading the sun shadow, screen AO or probe GI.
+  `layerS0`, `layerEm`, without reading the sun shadow, screen AO or probe GI. `layerS0` rgb
+  is the AO-scaled ambient at AO 1 with the sky fully visible; its alpha codes the DDGI
+  sky-specular visibility `vis` (the sky irradiance luma of the pixel, 0 = vis 1).
   `layers-signals` adds the signals (`color.a` = sun visibility s, `layerKd.a` = AO a,
   `layerE` = probe GI e with weight w in alpha) and `layerR`, the residual of
-  `combined = d0·s + (kd·e + s0)·a + em`. Exact formulas: raa-shader
+  `combined = d0·s + (kd·e + s0·vis)·a + em`, `vis = mix(1, clamp(luma(e/w)·f / L, 0, 1), w)`
+  (L the sky irradiance luma, f the DDGI screen-AO ratio). Exact formulas: raa-shader
   `src/wgsl/opaque_layers.wgsl`. The forward contributors (sky background, opaque particles,
   fur shells, VG shade) draw into `layerEm` in these modes.
   `layers-interlaced` (msaa 1) is the 30 Hz half-resolution lighting cadence: the layers of
@@ -200,7 +203,8 @@ not a graph is set.
   (depth test `|z_hist - z| <= 0.05 z + 0.02`); an R frame blends the phase-pixel samples
   (guided 2x2 upsample, quality `qMiss` off the phase pixel) with the history by
   `alpha*q` against `(1 - alpha)*c`; a G frame reuses the history and fills disocclusions
-  from 12 ring taps. Composite: `C = d0*s + (kd*E + s0)*a + em` (sky: `em`). Params:
+  from 12 ring taps. Composite: `C = d0*s + (kd*E + s0*vis)*a + em` (sky: `em`), vis from the
+  `layerS0` alpha and the accumulated (E, a) with w = 1. Params:
   `alphaSHit` 0.9853, `alphaSMiss` 0.9803, `alphaEHit` 0.9888, `alphaEMiss` 0.9799, `qMiss` 0.3,
   `decay` 0.98 (learned constants), `jitterCorrect` (false; adds `(previous - current)` camera
   jitter `x (0.5 W, -0.5 H)` pixels to the reprojection), `debug` (`off`, `shadow`, `ao`,

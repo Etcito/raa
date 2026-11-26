@@ -15,7 +15,7 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> RaaForw
     var out: RaaForwardLayers;
     out.d0 = vec4<f32>(l.d0, 1.0);
     out.kd = vec4<f32>(l.kd, 1.0);
-    out.s0 = vec4<f32>(l.s0, 1.0);
+    out.s0 = vec4<f32>(l.s0, l.sky);
     out.em = vec4<f32>(l.em, 1.0);
     return out;
 }

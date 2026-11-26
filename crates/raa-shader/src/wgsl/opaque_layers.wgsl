@@ -3,7 +3,7 @@
 // lighting of raa_opaque_lighting split into demodulated layers and per-pixel signals so that,
 // for an opaque lit fragment,
 //
-//     combined = d0 * s + (kd * e + s0) * a + em + r
+//     combined = d0 * s + (kd * e + s0 * vis) * a + em + r
 //
 // - d0: the sun direct term with shadow = 1 (same raa_slot_direct call, linear in radiance).
 // - s:  the sun visibility combined used (raa_slot_shadow, mixed with the spherical probes' sun
@@ -16,14 +16,29 @@
 //       the screen AO (DDGI/spherical screenAo), else k = 1. A(ao, sph) is raa_slot_ambient
 //       with c.ao = ao and c.spherical_diffuse = sph.
 // - s0: A(1, sph0) - A(0, sph0): the AO-dependent ambient (environment specular with specular
-//       occlusion, SH diffuse with multi-bounce AO, fallback ambient) at ao = 1.
+//       occlusion, SH diffuse with multi-bounce AO, fallback ambient) at ao = 1, with the sky
+//       fully visible: every A of the split runs with raa_probe_sky_unoccluded set (prelude),
+//       so raa_probe_sky_specular returns the unscaled environment and records its denominator
+//       L = max(luma(sky_diffuse), 1e-6) (one per fragment: base and coat use the same
+//       irradiance). No extra raa_slot_ambient call. A(0, .) holds no environment specular
+//       (raa_specular_occlusion(n.v, 0, r) = 0), so vis concerns s0 only.
+// - vis: the DDGI sky-specular visibility of raa_probe_sky_specular,
+//       vis = mix(1, clamp(luma(e / w) x f / L, 0, 1), w), f = a / max(material ao, 1e-4) with
+//       the DDGI screen AO, else 1 (combined feeds probe rgb x f to the ambient). 1 for w = 0.
+//       layerS0.a = t carries L and f (raa_layers_sky_vis): t = 0: vis = 1 (no DDGI, unlit,
+//       no environment); t > 0: screen AO, t = max(L x max(material ao, 1e-4), 1e-4),
+//       visible = luma(e / w) x a / t; t < 0: no screen AO, t = -max(L, 1e-4),
+//       visible = luma(e / w) / -t. The 1e-4 floor (f16 target) only changes vis where the
+//       sky irradiance luma is below 1e-4.
 // - em: emissive + local lights + A(0, sph0) (AO-free ambient, e.g. sheen) + the screen
 //       indirect (raa_slot_indirect) when no probe GI is enabled.
 // - r:  the residual, only in "layers-signals": combined - the recomposition. Zero up to
 //       rounding except (1) where A is not linear in c.ao (multi-bounce AO, specular
 //       occlusion), (2) probe weight w < 1 (the layers assume w = 1 whenever a probe GI feature
 //       bit is set: the legacy diffuse x (1 - w) and the screen indirect x (1 - w) land in r),
-//       (3) a probe GI without screen AO (NRC, screenAo off: combined does not multiply e by a).
+//       (3) a probe GI without screen AO (NRC, screenAo off: combined does not multiply e by a),
+//       (4) DDGI with the GI specular weight EnvSh.gi.x > 0: the GI-screen specular share of s0
+//       is scaled by vis in the recomposition but not in combined.
 // sph0 = (0, 0, 0, 1) when a probe GI feature bit is set (w = 1), else (0, 0, 0, 0).
 // Unlit (flat model or UNLIT): em = base + emissive, every other layer 0, s = a = 1, e = 0.
 //
@@ -37,6 +52,8 @@ struct RaaOpaqueLayers {
     kd: vec3<f32>,
     s0: vec3<f32>,
     em: vec3<f32>,
+    // layerS0.a: the sky visibility code t (header, raa_layers_sky_vis).
+    sky: f32,
 }
 
 struct RaaOpaqueSignals {
@@ -77,6 +94,9 @@ fn raa_opaque_layers(in: MaterialInput, s: MaterialOutput) -> RaaOpaqueLayers {
     let d0 = raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
         raa_directional_radiance(raa_frame.sun_color.rgb));
     let w = select(0.0, 1.0, kind != 0u);
+    // Sky fully visible in every measurement below; L recorded when the DDGI term applies.
+    raa_probe_sky_unoccluded = true;
+    raa_probe_sky_luma = 0.0;
     c.ao = 0.0;
     c.spherical_diffuse = vec4<f32>(vec3<f32>(0.0), w);
     let ambient_free = raa_slot_ambient(s, c);
@@ -90,6 +110,15 @@ fn raa_opaque_layers(in: MaterialInput, s: MaterialOutput) -> RaaOpaqueLayers {
         kd = raa_slot_ambient(s, c) - ambient_free;
         c.ao = 1.0;
         c.spherical_diffuse = vec4<f32>(vec3<f32>(0.0), w);
+    }
+    raa_probe_sky_unoccluded = false;
+    var sky = 0.0;
+    if kind == 1u && raa_probe_sky_luma > 0.0 {
+        if raa_layers_probe_screen_ao(kind) {
+            sky = max(raa_probe_sky_luma * max(s.ao, 1e-4), 1e-4);
+        } else {
+            sky = -max(raa_probe_sky_luma, 1e-4);
+        }
     }
     var indirect = vec3<f32>(0.0);
     if !capture && kind == 0u {
@@ -106,7 +135,17 @@ fn raa_opaque_layers(in: MaterialInput, s: MaterialOutput) -> RaaOpaqueLayers {
     out.kd = select(kd, zero, unlit);
     out.s0 = select(ambient_lit - ambient_free, zero, unlit);
     out.em = select(s.emissive + local + ambient_free + indirect, s.base_color + s.emissive, unlit);
+    out.sky = select(sky, 0.0, unlit);
     return out;
+}
+
+// vis of the header from the layerS0.a code t, the probe GI e (x w), its weight w and the AO a.
+// Copied in raa-graph exec_ext/lighting_reconstruct.wgsl (sky_vis).
+fn raa_layers_sky_vis(t: f32, e: vec3<f32>, w: f32, a: f32) -> f32 {
+    if t == 0.0 || w <= 0.0 { return 1.0; }
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let l = dot(e, luma) / w * select(1.0, a, t > 0.0);
+    return mix(1.0, clamp(l / abs(t), 0.0, 1.0), w);
 }
 
 // The signals s, a, e and w exactly as raa_opaque_lighting computes them (same calls).

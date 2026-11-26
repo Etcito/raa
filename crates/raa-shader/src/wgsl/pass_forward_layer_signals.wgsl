@@ -17,11 +17,12 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> RaaForw
     let combined = raa_opaque_lighting(in, s).rgb;
     let l = raa_opaque_layers(in, s);
     let g = raa_opaque_signals(in, s);
-    let recomposed = l.d0 * g.shadow + (l.kd * g.e + l.s0) * g.ao + l.em;
+    let vis = raa_layers_sky_vis(l.sky, g.e, g.w, g.ao);
+    let recomposed = l.d0 * g.shadow + (l.kd * g.e + l.s0 * vis) * g.ao + l.em;
     var out: RaaForwardLayerSignals;
     out.d0 = vec4<f32>(l.d0, g.shadow);
     out.kd = vec4<f32>(l.kd, g.ao);
-    out.s0 = vec4<f32>(l.s0, 1.0);
+    out.s0 = vec4<f32>(l.s0, l.sky);
     out.em = vec4<f32>(l.em, 1.0);
     out.e = vec4<f32>(g.e, g.w);
     out.residual = vec4<f32>(combined - recomposed, 1.0);
