@@ -412,13 +412,15 @@ pub(crate) struct ScreenPipelines {
     pub(crate) filter_layout: wgpu::BindGroupLayout,
     pub(crate) integrate_layout: wgpu::BindGroupLayout,
     pub(crate) atrous_layout: wgpu::BindGroupLayout,
-    copy: wgpu::ComputePipeline,
-    reduce: wgpu::ComputePipeline,
+    /// The pyramid and a-trous pipelines build on their first record too: a graph without a screen GI pass never
+    /// records them.
+    copy: Lazy<wgpu::ComputePipeline>,
+    reduce: Lazy<wgpu::ComputePipeline>,
     trace: [Lazy<wgpu::ComputePipeline>; 2],
     project: [Lazy<wgpu::ComputePipeline>; 2],
     filter: Lazy<wgpu::ComputePipeline>,
     integrate: Lazy<wgpu::ComputePipeline>,
-    atrous: wgpu::ComputePipeline,
+    atrous: Lazy<wgpu::ComputePipeline>,
     /// What the trace, integrate and a-trous pipelines are rebuilt from when a tunable changes.
     tuned: TunedSources,
     /// The tunables generation the trace, integrate and a-trous pipelines were built with.
@@ -449,7 +451,7 @@ fn tuned_pipelines(
 ) -> (
     [Lazy<ComputePipeline>; 2],
     Lazy<ComputePipeline>,
-    ComputePipeline,
+    Lazy<ComputePipeline>,
 ) {
     let (empty, group1) = (&sources.empty, &sources.group1);
     let mut trace_constants = tunables.constants(TRACE_OVERRIDES);
@@ -476,14 +478,14 @@ fn tuned_pipelines(
         None,
         tunables.constants(INTEGRATE_OVERRIDES),
     );
-    let atrous = tuned_compute_pipeline(
+    let atrous = lazy_compute_pipeline(
         device,
         "raa-gi.screen.atrous",
         &sources.atrous_module,
         ATROUS_ENTRY,
-        &[Some(empty), Some(group1), Some(atrous_layout)],
+        [empty, group1, atrous_layout],
         None,
-        &tunables.constants(ATROUS_OVERRIDES),
+        tunables.constants(ATROUS_OVERRIDES),
     );
     (trace, integrate, atrous)
 }
@@ -655,21 +657,23 @@ impl ScreenPipelines {
         );
         let atrous_module = module(device, "raa-gi.screen.atrous", &atrous_module_wgsl());
 
-        let copy = compute_pipeline(
+        let copy = lazy_compute_pipeline(
             device,
             "raa-gi.screen.copy",
             &pyramid_module,
             PYRAMID_COPY_ENTRY,
-            &[Some(&empty), Some(group1), Some(&copy_layout)],
+            [&empty, group1, &copy_layout],
             None,
+            Vec::new(),
         );
-        let reduce = compute_pipeline(
+        let reduce = lazy_compute_pipeline(
             device,
             "raa-gi.screen.reduce",
             &pyramid_module,
             PYRAMID_REDUCE_ENTRY,
-            &[Some(&empty), Some(group1), Some(&reduce_layout)],
+            [&empty, group1, &reduce_layout],
             None,
+            Vec::new(),
         );
         let project = PROBE_RAY_OPTIONS.map(|rays| {
             lazy_compute_pipeline(
@@ -822,7 +826,7 @@ impl ScreenPipelines {
             let Some(group) = work.atrous.get((index * 2 + u32::from(last)) as usize) else {
                 return;
             };
-            pass.set_pipeline(&self.atrous);
+            pass.set_pipeline(self.atrous.get());
             pass.set_bind_group(2, group, &[]);
             dispatch(pass, work.viewport.0, work.viewport.1);
         }
@@ -840,14 +844,14 @@ impl ScreenPipelines {
             return false;
         };
         let (width, height) = work.pyramid_sizes.first().copied().unwrap_or(work.viewport);
-        pass.set_pipeline(&self.copy);
+        pass.set_pipeline(self.copy.get());
         pass.set_bind_group(2, first, &[]);
         dispatch(pass, width, height);
         for (index, bind) in rest.iter().enumerate() {
             let Some(&(width, height)) = work.pyramid_sizes.get(index + 1) else {
                 break;
             };
-            pass.set_pipeline(&self.reduce);
+            pass.set_pipeline(self.reduce.get());
             pass.set_bind_group(2, bind, &[]);
             dispatch(pass, width, height);
         }
@@ -866,11 +870,11 @@ impl ScreenPipelines {
         let (Some(first), Some(&(width, height))) = (groups.first(), sizes.first()) else {
             return false;
         };
-        pass.set_pipeline(&self.copy);
+        pass.set_pipeline(self.copy.get());
         pass.set_bind_group(2, first, &[]);
         dispatch(pass, width, height);
         for (bind, &(width, height)) in groups.iter().zip(sizes).skip(1) {
-            pass.set_pipeline(&self.reduce);
+            pass.set_pipeline(self.reduce.get());
             pass.set_bind_group(2, bind, &[]);
             dispatch(pass, width, height);
         }

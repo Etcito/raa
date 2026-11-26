@@ -48,7 +48,8 @@ type CacheKey = (u64, u64, u32, u64);
 pub struct ForwardDriver {
     device: wgpu::Device,
     lit: LitHandle,
-    pipeline: wgpu::ComputePipeline,
+    /// Built on the first voxelize dispatch (raa_core::Lazy says why).
+    pipeline: raa_core::Lazy<wgpu::ComputePipeline>,
     group2: wgpu::BindGroupLayout,
     work: RefCell<Vec<WorkItem>>,
     uniform: RefCell<Option<(wgpu::Buffer, usize)>>,
@@ -68,23 +69,28 @@ impl ForwardDriver {
             label: Some("gi.forward.group2"),
             entries: &shaders::forward_group2_entries(),
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("gi.forward"),
-            bind_group_layouts: &[None, None, Some(&group2)],
-            immediate_size: 0,
-        });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gi.forward"),
             source: wgpu::ShaderSource::Wgsl(shaders::voxelize_forward_module_wgsl().into()),
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("gi.forward"),
-            layout: Some(&layout),
-            module: &module,
-            entry_point: Some("raa_gi_voxelize_forward"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = {
+            let (device, group2) = (device.clone(), group2.clone());
+            raa_core::Lazy::new(move || {
+                let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("gi.forward"),
+                    bind_group_layouts: &[None, None, Some(&group2)],
+                    immediate_size: 0,
+                });
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("gi.forward"),
+                    layout: Some(&layout),
+                    module: &module,
+                    entry_point: Some("raa_gi_voxelize_forward"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+            })
+        };
         let white = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gi.forward.white"),
             size: 4,
@@ -211,7 +217,7 @@ impl VoxelDriver for ForwardDriver {
             label: Some("gi.forward"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(self.pipeline.get());
         for (k, item) in work.iter().enumerate() {
             if item.level != level.level {
                 continue;

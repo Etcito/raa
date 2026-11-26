@@ -11,8 +11,8 @@
 
 use std::num::NonZeroU64;
 
-use raa_core::GpuContext;
 use raa_core::wgpu;
+use raa_core::{GpuContext, Lazy};
 use raa_pipeline::{HDR_FORMAT, Targets};
 
 use crate::hiz;
@@ -135,6 +135,41 @@ fn compute(
     })
 }
 
+/// [`compute`] built on its first use.
+fn compute_lazy(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    entry: &'static str,
+) -> Lazy<wgpu::ComputePipeline> {
+    let (device, module, layout) = (device.clone(), module.clone(), layout.clone());
+    Lazy::new(move || compute(&device, &module, &layout, entry))
+}
+
+/// [`render`] built on its first use (owned copies of what it reads).
+fn render_lazy(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layouts: &[Option<&wgpu::BindGroupLayout>],
+    entry: &'static str,
+    formats: &[wgpu::TextureFormat],
+    constants: &[(&str, f64)],
+) -> Lazy<wgpu::RenderPipeline> {
+    let (device, module) = (device.clone(), module.clone());
+    let layouts: Vec<Option<wgpu::BindGroupLayout>> = layouts.iter().map(|l| l.cloned()).collect();
+    let formats = formats.to_vec();
+    let constants: Vec<(String, f64)> = constants
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), *v))
+        .collect();
+    Lazy::new(move || {
+        let layouts: Vec<Option<&wgpu::BindGroupLayout>> =
+            layouts.iter().map(Option::as_ref).collect();
+        let constants: Vec<(&str, f64)> = constants.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        render(&device, &module, &layouts, entry, &formats, &constants)
+    })
+}
+
 /// Fullscreen-triangle render pipeline of `entry` into one `format` target.
 fn render(
     device: &wgpu::Device,
@@ -227,17 +262,21 @@ fn mip_views(texture: &wgpu::Texture, label: &str) -> Vec<wgpu::TextureView> {
 
 /// Pipelines, layouts, sampler and `SsrParams` uniform, created once at install.
 pub(crate) struct SsrPipelines {
-    pub hiz_copy: wgpu::ComputePipeline,
-    pub hiz_reduce: wgpu::ComputePipeline,
-    pub downsample: wgpu::RenderPipeline,
+    /// Every pipeline is built on its first record (raa_core::Lazy says why): the confidence producer, the classic
+    /// pass and each `ssr.*` stage hold a set each and bind only some of them.
+    pub hiz_copy: Lazy<wgpu::ComputePipeline>,
+    pub hiz_reduce: Lazy<wgpu::ComputePipeline>,
+    pub downsample: Lazy<wgpu::RenderPipeline>,
     /// Layout [group 0 = `trace_layout`, group 1 = the lighting layout] (fs_trace).
-    pub trace: wgpu::RenderPipeline,
-    pub hit: wgpu::RenderPipeline,
-    pub incident: wgpu::RenderPipeline,
-    pub replace: wgpu::RenderPipeline,
+    pub trace: Lazy<wgpu::RenderPipeline>,
+    /// fs_hit, fs_incident and fs_replace serve only the `ssr.trace`/`ssr.incident`/`ssr.replace` stages: built on
+    /// their first record (raa_core::Lazy says why).
+    pub hit: Lazy<wgpu::RenderPipeline>,
+    pub incident: Lazy<wgpu::RenderPipeline>,
+    pub replace: Lazy<wgpu::RenderPipeline>,
     replace_layout: wgpu::BindGroupLayout,
     /// Layout [group 0 = `composite_layout`, group 1 = the lighting layout] (fs_composite).
-    pub composite: wgpu::RenderPipeline,
+    pub composite: Lazy<wgpu::RenderPipeline>,
     copy_layout: wgpu::BindGroupLayout,
     reduce_layout: wgpu::BindGroupLayout,
     down_layout: wgpu::BindGroupLayout,
@@ -348,9 +387,9 @@ impl SsrPipelines {
             constants,
         );
         SsrPipelines {
-            hiz_copy: compute(device, &hiz_module, &copy_layout, CS_HIZ_COPY),
-            hiz_reduce: compute(device, &hiz_module, &reduce_layout, CS_HIZ_REDUCE),
-            downsample: render(
+            hiz_copy: compute_lazy(device, &hiz_module, &copy_layout, CS_HIZ_COPY),
+            hiz_reduce: compute_lazy(device, &hiz_module, &reduce_layout, CS_HIZ_REDUCE),
+            downsample: render_lazy(
                 device,
                 &hiz_module,
                 &[Some(&down_layout)],
@@ -359,7 +398,7 @@ impl SsrPipelines {
                 &[],
             ),
             hit,
-            incident: render(
+            incident: render_lazy(
                 device,
                 &trace_module,
                 &[Some(&composite_layout)],
@@ -367,7 +406,7 @@ impl SsrPipelines {
                 &[wgpu::TextureFormat::Rgba32Float],
                 &[],
             ),
-            replace: render(
+            replace: render_lazy(
                 device,
                 &trace_module,
                 &[Some(&replace_layout), Some(lighting)],
@@ -476,13 +515,13 @@ fn trace_pipelines(
     layouts: [&wgpu::BindGroupLayout; 3],
     constants: &[(&str, f64)],
 ) -> (
-    wgpu::RenderPipeline,
-    wgpu::RenderPipeline,
-    wgpu::RenderPipeline,
+    Lazy<wgpu::RenderPipeline>,
+    Lazy<wgpu::RenderPipeline>,
+    Lazy<wgpu::RenderPipeline>,
 ) {
     let [trace, composite, lighting] = layouts;
     (
-        render(
+        render_lazy(
             device,
             module,
             &[Some(trace), Some(lighting)],
@@ -490,7 +529,7 @@ fn trace_pipelines(
             &[TRACE_FORMAT],
             constants,
         ),
-        render(
+        render_lazy(
             device,
             module,
             &[Some(trace), Some(lighting)],
@@ -498,7 +537,7 @@ fn trace_pipelines(
             &[TRACE_FORMAT, wgpu::TextureFormat::Rgba32Float],
             constants,
         ),
-        render(
+        render_lazy(
             device,
             module,
             &[Some(composite), Some(lighting)],

@@ -425,9 +425,9 @@ impl FeaturePass for StagePass {
                     });
                 for (i, (level, group)) in t.levels.iter().zip(&t.groups).enumerate() {
                     pass.set_pipeline(if i == 0 {
-                        &self.pipelines.hiz_copy
+                        self.pipelines.hiz_copy.get()
                     } else {
-                        &self.pipelines.hiz_reduce
+                        self.pipelines.hiz_reduce.get()
                     });
                     pass.set_bind_group(0, group, &[]);
                     pass.dispatch_workgroups(level.groups.0, level.groups.1, 1);
@@ -439,7 +439,7 @@ impl FeaturePass for StagePass {
                     draw_targets(
                         ctx.encoder,
                         [&t.view, metadata],
-                        &self.pipelines.hit,
+                        self.pipelines.hit.get(),
                         &t.group,
                         Some(ctx.lighting.opaque_bind_group()),
                     );
@@ -473,7 +473,7 @@ impl FeaturePass for StagePass {
                         let group = multiray.group(ctx.gpu.device(), &self.pipelines, t, &hiz.view);
                         draw(ctx.encoder, incident, &multiray.pipeline, &group, None);
                     } else {
-                        draw(ctx.encoder, incident, &self.pipelines.incident, &t.composite_group, None);
+                        draw(ctx.encoder, incident, self.pipelines.incident.get(), &t.composite_group, None);
                     }
                     self.state.borrow_mut().ran = true;
                 } else {
@@ -497,7 +497,7 @@ impl FeaturePass for StagePass {
                     draw_targets(
                         ctx.encoder,
                         [hdr.dst(), fallback, metadata],
-                        &self.pipelines.replace,
+                        self.pipelines.replace.get(),
                         &group,
                         Some(ctx.lighting.opaque_bind_group()),
                     );
@@ -525,7 +525,7 @@ impl FeaturePass for StagePass {
                     draw(
                         ctx.encoder,
                         hdr.dst(),
-                        &self.pipelines.composite,
+                        self.pipelines.composite.get(),
                         &t.composite_group,
                         Some(ctx.lighting.opaque_bind_group()),
                     );
@@ -572,7 +572,7 @@ fn build_hdr_mips(
         targets.hdr_mips.size(),
     );
     for (target, group) in targets.hdr_views.iter().skip(1).zip(&targets.down_groups) {
-        draw(encoder, target, &pipelines.downsample, group, None);
+        draw(encoder, target, pipelines.downsample.get(), group, None);
     }
 }
 

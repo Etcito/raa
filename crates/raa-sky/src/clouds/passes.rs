@@ -59,16 +59,17 @@ pub(super) struct CloudPasses {
     /// Group 2 bindings 0-10 of contract `P2-CLOUD-GPU`.
     march_layout: wgpu::BindGroupLayout,
     mean_layout: wgpu::BindGroupLayout,
-    shadow: wgpu::ComputePipeline,
-    mean: wgpu::ComputePipeline,
-    panorama: wgpu::ComputePipeline,
+    /// Every march pipeline builds on its first record (raa_core::Lazy says why): a sky without clouds records none.
+    shadow: Lazy<wgpu::ComputePipeline>,
+    mean: Lazy<wgpu::ComputePipeline>,
+    panorama: Lazy<wgpu::ComputePipeline>,
     /// The screen march for a one-sample depth target.
     screen: ScreenPipeline,
     /// The screen march for a multisampled depth target.
     screen_multisampled: ScreenPipeline,
     /// The world-space dome march (group 2 bindings 0-11).
     dome_layout: wgpu::BindGroupLayout,
-    dome: wgpu::ComputePipeline,
+    dome: Lazy<wgpu::ComputePipeline>,
     /// The empty layout of groups 0 and 1.
     empty: wgpu::BindGroupLayout,
     dome_group: Option<DomeGroup>,
@@ -188,51 +189,9 @@ fn screen_layout(gpu: &GpuContext, multisampled: bool) -> wgpu::BindGroupLayout 
         })
 }
 
-/// Validates `source` on the CPU, then builds its pipeline over groups (empty, empty, `layout`)
-/// with the `constants` whose override `source` declares (wgpu refuses an undeclared one).
-fn pipeline(
-    gpu: &GpuContext,
-    label: &str,
-    source: &str,
-    entry_point: &str,
-    empty: &wgpu::BindGroupLayout,
-    layout: &wgpu::BindGroupLayout,
-    constants: &[(&str, f64)],
-) -> Result<wgpu::ComputePipeline, RaaError> {
-    raa_shader::Composer::validate(source)
-        .map_err(|error| RaaError::Gpu(format!("{label} shader: {error}")))?;
-    let constants: Vec<(&str, f64)> = constants
-        .iter()
-        .filter(|(name, _)| source.contains(&format!("override {name}:")))
-        .copied()
-        .collect();
-    let device = gpu.device();
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(label),
-        bind_group_layouts: &[Some(empty), Some(empty), Some(layout)],
-        immediate_size: 0,
-    });
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(label),
-        source: wgpu::ShaderSource::Wgsl(source.into()),
-    });
-    Ok(
-        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some(entry_point),
-            compilation_options: wgpu::PipelineCompilationOptions {
-                constants: &constants,
-                ..Default::default()
-            },
-            cache: None,
-        }),
-    )
-}
-
-/// [`pipeline`] built on its first use: `source` is validated now, the module and the pipeline
-/// are created by the first [`Lazy::get`].
+/// Validates `source` on the CPU now (an invalid shader fails at install), then builds its pipeline over groups
+/// (empty, empty, `layout`) on its first use, with the `constants` whose override `source` declares (wgpu refuses an
+/// undeclared one): the module and the pipeline are created by the first [`Lazy::get`].
 fn lazy_pipeline(
     gpu: &GpuContext,
     label: &'static str,
@@ -276,11 +235,11 @@ fn lazy_pipeline(
 
 /// The march pipelines of [`march_pipelines`]: the screen ones are built on first use.
 struct MarchPipelines {
-    shadow: wgpu::ComputePipeline,
-    panorama: wgpu::ComputePipeline,
+    shadow: Lazy<wgpu::ComputePipeline>,
+    panorama: Lazy<wgpu::ComputePipeline>,
     screen: Lazy<wgpu::ComputePipeline>,
     screen_multisampled: Lazy<wgpu::ComputePipeline>,
-    dome: wgpu::ComputePipeline,
+    dome: Lazy<wgpu::ComputePipeline>,
 }
 
 /// The shadow, panorama, screen (one and several samples) and dome pipelines: every module
@@ -294,20 +253,19 @@ fn march_pipelines(
     let constants = tunables.constants();
     let [shadow, panorama, screen, screen_ms, dome] = layouts;
     Ok(MarchPipelines {
-        shadow:
-        pipeline(
+        shadow: lazy_pipeline(
             gpu,
             "raa-sky.cloud_shadow",
-            &shadow_module_wgsl(),
+            shadow_module_wgsl(),
             "raa_cloud_shadow_main",
             empty,
             shadow,
             &constants,
         )?,
-        panorama: pipeline(
+        panorama: lazy_pipeline(
             gpu,
             "raa-sky.cloud_panorama",
-            &panorama_module_wgsl(),
+            panorama_module_wgsl(),
             "raa_cloud_panorama_main",
             empty,
             panorama,
@@ -331,10 +289,10 @@ fn march_pipelines(
             screen_ms,
             &constants,
         )?,
-        dome: pipeline(
+        dome: lazy_pipeline(
             gpu,
             "raa-sky.cloud_dome",
-            &dome_module_wgsl(),
+            dome_module_wgsl(),
             "raa_cloud_dome_main",
             empty,
             dome,
@@ -392,10 +350,10 @@ impl CloudPasses {
             label: Some("raa-sky.cloud_empty"),
             entries: &[],
         });
-        let mean = pipeline(
+        let mean = lazy_pipeline(
             gpu,
             "raa-sky.cloud_shadow_mean",
-            &shadow_mean_module_wgsl(),
+            shadow_mean_module_wgsl(),
             "raa_cloud_shadow_mean_main",
             &empty,
             &mean_layout,
@@ -602,10 +560,10 @@ impl CloudPasses {
             label: Some("raa-sky.cloud_shadow"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&self.shadow);
+        pass.set_pipeline(self.shadow.get());
         pass.set_bind_group(2, &groups.shadow, &[]);
         pass.dispatch_workgroups(workgroups, workgroups, 1);
-        pass.set_pipeline(&self.mean);
+        pass.set_pipeline(self.mean.get());
         pass.set_bind_group(2, &groups.mean, &[]);
         pass.dispatch_workgroups(1, 1, 1);
     }
@@ -620,7 +578,7 @@ impl CloudPasses {
             label: Some("raa-sky.cloud_panorama"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&self.panorama);
+        pass.set_pipeline(self.panorama.get());
         pass.set_bind_group(2, &groups.panorama, &[]);
         pass.dispatch_workgroups(PANORAMA_SIZE.0.div_ceil(8), PANORAMA_SIZE.1.div_ceil(8), 1);
     }
@@ -786,7 +744,7 @@ impl CloudPasses {
                     label: Some("raa-sky.cloud_dome"),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(&self.dome);
+                pass.set_pipeline(self.dome.get());
                 pass.set_bind_group(2, &group.group, &[i * BURST_STRIDE as u32]);
                 pass.dispatch_workgroups(
                     texture.width().div_ceil(8),

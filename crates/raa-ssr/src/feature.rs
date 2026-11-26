@@ -296,20 +296,20 @@ impl FeaturePass for SsrPass {
             },
         );
         for (target, group) in t.hdr_views.iter().skip(1).zip(&t.down_groups) {
-            draw(encoder, target, &p.downsample, group, None);
+            draw(encoder, target, p.downsample.get(), group, None);
         }
         let lighting = ctx.lighting.opaque_bind_group();
         draw(
             encoder,
             &t.trace.view,
-            &p.trace,
+            p.trace.get(),
             &t.trace.group,
             Some(lighting),
         );
         draw(
             encoder,
             hdr.dst(),
-            &p.composite,
+            p.composite.get(),
             &t.composite_group,
             Some(lighting),
         );
@@ -423,9 +423,9 @@ fn record_hiz(encoder: &mut wgpu::CommandEncoder, pipelines: &SsrPipelines, hiz:
     });
     for (k, (level, group)) in hiz.levels.iter().zip(&hiz.groups).enumerate() {
         pass.set_pipeline(if k == 0 {
-            &pipelines.hiz_copy
+            pipelines.hiz_copy.get()
         } else {
-            &pipelines.hiz_reduce
+            pipelines.hiz_reduce.get()
         });
         pass.set_bind_group(0, group, &[]);
         pass.dispatch_workgroups(level.groups.0, level.groups.1, 1);
