@@ -17,11 +17,13 @@ pub const TYPE: &str = "pass.lighting.reconstruct";
 pub const DEBUG_VIEWS: [&str; 6] = ["off", "shadow", "ao", "irradiance", "confidence", "holes"];
 
 /// `(key, label, default, source)` of the number parameters; the defaults are the learned
-/// constants of the analytic ablation (`analytic-constants.json`).
+/// constants of the analytic ablation (`analytic-constants.json`), except the sampled-pixel alphas
+/// (0.5, measured on the 3090 against the 4K label, raa-taa-quality 2026-11-26): the static
+/// per-pixel PCF rotation sampled once per 2x2 block left 2 px stairs on moving shadow edges at 0.985.
 const NUMBERS: [(&str, &str, f64, &str); 6] = [
-    ("alphaSHit", "Shadow alpha (sampled pixel)", 0.985_325_634_479_522_7, "alpha_s_hit"),
+    ("alphaSHit", "Shadow alpha (sampled pixel)", 0.5, "alpha_s_hit"),
     ("alphaSMiss", "Shadow alpha (upsampled pixel)", 0.980_347_156_524_658_2, "alpha_s_miss"),
-    ("alphaEHit", "Irradiance/AO alpha (sampled pixel)", 0.988_787_829_875_946, "alpha_ea_hit"),
+    ("alphaEHit", "Irradiance/AO alpha (sampled pixel)", 0.5, "alpha_ea_hit"),
     ("alphaEMiss", "Irradiance/AO alpha (upsampled pixel)", 0.979_948_699_474_334_7, "alpha_ea_miss"),
     ("qMiss", "Upsampled sample quality", 0.3, "q_miss"),
     ("decay", "Confidence decay per frame", 0.98, "decay"),

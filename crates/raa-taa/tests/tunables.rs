@@ -16,7 +16,7 @@ const KEYS: [&str; 7] = [
     "blendMax",
     "historySharpness",
 ];
-const DEFAULTS: [f64; 7] = [8.0, 1.25, 0.06, 0.03, 0.04, 0.5, 0.6];
+const DEFAULTS: [f64; 7] = [8.0, 1.25, 0.04, 0.03, 0.04, 0.5, 0.6];
 
 #[test]
 fn keys_and_defaults_in_table_order() {

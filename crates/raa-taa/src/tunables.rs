@@ -24,7 +24,7 @@ static TUNABLES: [TunableSpec; N] = [
         "crates/raa-taa/src/wgsl/taa.wgsl:30",
     ),
     spec("clipTolerance", 1.25, "crates/raa-taa/src/wgsl/taa.wgsl:31"),
-    spec("blendBase", 0.06, "crates/raa-taa/src/wgsl/taa.wgsl:32"),
+    spec("blendBase", 0.04, "crates/raa-taa/src/wgsl/taa.wgsl:32"),
     spec(
         "blendMotionGain",
         0.03,

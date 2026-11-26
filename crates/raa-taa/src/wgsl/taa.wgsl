@@ -29,7 +29,7 @@
 
 override RAA_TAA_FILTER_SHARPNESS: f32 = 8.0;
 override RAA_TAA_CLIP_TOLERANCE: f32 = 1.25;
-override RAA_TAA_BLEND_BASE: f32 = 0.06;
+override RAA_TAA_BLEND_BASE: f32 = 0.04;
 override RAA_TAA_BLEND_MOTION_GAIN: f32 = 0.03;
 override RAA_TAA_BLEND_MIN: f32 = 0.04;
 override RAA_TAA_BLEND_MAX: f32 = 0.5;

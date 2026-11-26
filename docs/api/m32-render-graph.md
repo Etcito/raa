@@ -205,7 +205,7 @@ not a graph is set.
   `alpha*q` against `(1 - alpha)*c`; a G frame reuses the history and fills disocclusions
   from 12 ring taps. Composite: `C = d0*s + (kd*E + s0*vis)*a + em` (sky: `em`), vis from the
   `layerS0` alpha and the accumulated (E, a) with w = 1. Params:
-  `alphaSHit` 0.9853, `alphaSMiss` 0.9803, `alphaEHit` 0.9888, `alphaEMiss` 0.9799, `qMiss` 0.3,
+  `alphaSHit` 0.5, `alphaSMiss` 0.9803, `alphaEHit` 0.5, `alphaEMiss` 0.9799, `qMiss` 0.3,
   `decay` 0.98 (learned constants), `jitterCorrect` (true; adds `(previous - current)` camera
   jitter `x (0.5 W, -0.5 H)` pixels to the reprojection), `historyClamp` (true; on an R frame an
   upsampled pixel keeps its reprojected history clamped to the min/max of the phase samples it

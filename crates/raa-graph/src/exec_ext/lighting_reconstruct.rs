@@ -60,9 +60,9 @@ impl Settings {
         };
         Settings {
             alpha: [
-                number("alphaSHit", 0.985_325_634_479_522_7),
+                number("alphaSHit", 0.5),
                 number("alphaSMiss", 0.980_347_156_524_658_2),
-                number("alphaEHit", 0.988_787_829_875_946),
+                number("alphaEHit", 0.5),
                 number("alphaEMiss", 0.979_948_699_474_334_7),
             ],
             q_miss: number("qMiss", 0.3),

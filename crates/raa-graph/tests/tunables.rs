@@ -15,7 +15,7 @@ const HEADER: &str = "| crate | file:line | name | value | row | class | node ty
 const PINNED: &[&str] = &[
     "pass.taa|filterSharpness|8.0|setting|Resolve|Filter sharpness|no|override|pipeline|unstated",
     "pass.taa|clipTolerance|1.25|setting|Resolve|Clip tolerance|no|override|pipeline|unstated",
-    "pass.taa|blendBase|0.06|setting|Resolve|Blend base|no|override|pipeline|unstated",
+    "pass.taa|blendBase|0.04|setting|Resolve|Blend base|no|override|pipeline|unstated",
     "pass.taa|blendMotionGain|0.03|setting|Resolve|Blend motion gain|no|override|pipeline|unstated",
     "pass.taa|blendMin|0.04|setting|Resolve|Blend min|no|override|pipeline|unstated",
     "pass.taa|blendMax|0.5|setting|Resolve|Blend max|no|override|pipeline|unstated",
