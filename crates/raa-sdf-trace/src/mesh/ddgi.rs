@@ -1208,7 +1208,7 @@ impl FeaturePass for DdgiPass {
             [
                 probes_per_group(settings.rays_per_probe) as f32,
                 settings.guide,
-                0.0,
+                f32::from(converge_age),
                 0.0,
             ],
         );

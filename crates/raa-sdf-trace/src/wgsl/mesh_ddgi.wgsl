@@ -31,7 +31,7 @@ struct DdgiParams {
     // irradiance blend: fast and slow time constants (s), squared change threshold (in standard
     // deviations of one update), mode (0 per update = `tuning.x`, 1 time constant, 2 adaptive)
     blend: vec4<f32>,
-    // probes per workgroup, guided ray fraction (0 = uniform rays), light grid (1 = on), -
+    // probes per workgroup, guided ray fraction (0 = uniform rays), converge age (updates), -
     sampling: vec4<f32>,
 }
 
@@ -637,10 +637,16 @@ fn ddgi_hysteresis(age: u32, fresh: bool, change: f32) -> f32 {
     return h;
 }
 
-// Progressive start of a group (running mean of its first updates) under the blend weight `h`.
+// Start of a group under the time-based blends: a running mean of its first updates, capped at
+// a short exponential window (weight 0.8) until the group counts as converged (`sampling.z`
+// updates). The early updates of a probe are stale by construction (each bounce generation
+// arrives one update later and the old value of an invalidated group is a 2-update prior): a
+// plain running mean keeps 1/n of them, the window lets them decay geometrically.
 fn ddgi_progressive(h: f32, age: u32, fresh: bool) -> f32 {
     let a = f32(age);
-    return select(min(h, a / (a + 1.0)), 0.0, fresh);
+    var w = min(h, a / (a + 1.0));
+    if a < ddgi_params.sampling.z { w = min(w, 0.8); }
+    return select(w, 0.0, fresh);
 }
 
 // Seconds since the probe's previous update: the job's 7-bit log code (4 ms x 2^(q/8)).
