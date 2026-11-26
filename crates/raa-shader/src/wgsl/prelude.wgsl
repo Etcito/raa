@@ -320,6 +320,9 @@ struct ShadeCtx {
     shadow: f32,
     f0: vec3<f32>,
     spherical_diffuse: vec4<f32>,
+    // Screen reflection of a transmissive fragment (transparent pass, opaque colour copy hit):
+    // rgb incoming radiance along the reflected ray, a its weight. Zero elsewhere.
+    screen_reflection: vec4<f32>,
 }
 
 fn raa_spherical_blend_diffuse(legacy: vec3<f32>, s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
@@ -334,11 +337,21 @@ fn raa_spherical_blend_diffuse(legacy: vec3<f32>, s: MaterialOutput, c: ShadeCtx
 // their irradiance to the unoccluded sky irradiance (`sky_diffuse`, the ambient diffuse factor
 // that the probe term replaces, same units as `spherical_diffuse.rgb`), at most 1, scales the
 // environment term. Outdoors the probes (sky plus bounced sun) exceed the sky and nothing changes.
-fn raa_probe_sky_specular(env: vec3<f32>, sky_diffuse: vec3<f32>, c: ShadeCtx) -> vec3<f32> {
+fn raa_probe_sky_environment(env: vec3<f32>, sky_diffuse: vec3<f32>, c: ShadeCtx) -> vec3<f32> {
     if !raa_feature_enabled(RAA_DDGI_GI_FEATURE) || c.spherical_diffuse.w <= 0.0 { return env; }
     let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
     let visible = clamp(dot(c.spherical_diffuse.rgb, luma) / max(dot(sky_diffuse, luma), 1e-6), 0.0, 1.0);
     return env * mix(1.0, visible, c.spherical_diffuse.w);
+}
+
+// The incoming specular radiance of the ambient providers: the environment occluded as above,
+// replaced by the screen reflection (ShadeCtx.screen_reflection) by its weight. Opaque passes
+// leave that weight 0, so the result is the occluded environment unchanged.
+fn raa_probe_sky_specular(env: vec3<f32>, sky_diffuse: vec3<f32>, c: ShadeCtx) -> vec3<f32> {
+    let occluded = raa_probe_sky_environment(env, sky_diffuse, c);
+    let w = clamp(c.screen_reflection.a, 0.0, 1.0);
+    if w <= 0.0 { return occluded; }
+    return mix(occluded, c.screen_reflection.rgb, w);
 }
 
 fn raa_default_output(in: MaterialInput) -> MaterialOutput {

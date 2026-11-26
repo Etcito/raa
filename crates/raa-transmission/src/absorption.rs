@@ -76,3 +76,29 @@ pub fn schlick_fresnel(f0: f32, cos_theta: f32) -> f32 {
     let m = (1.0 - cos_theta.clamp(0.0, 1.0)).powi(5);
     f0 + (1.0 - f0) * m
 }
+
+/// Submerged opaque surface (WGSL `raa_screen_submerged`): `behind` is the distance from the
+/// fragment to the opaque surface seen behind it, `n_dot_v` the view cosine, `dir` the refracted
+/// view ray, `sun_dir` the direction the sunlight travels (frame `sun_dir`). When the medium
+/// depth along the normal, h = behind x n_dot_v, is below `thickness`, returns
+/// `(h / cos_t, h / cos_l, true)`: the view path down to the surface and the path of the light
+/// refracted into the medium (cos_t, cos_l clamped to [`MIN_COS`]). Otherwise
+/// `(path_length(thickness, dir, n), 0, false)`, the unchanged slab path.
+pub fn submerged_paths(
+    thickness: f32,
+    behind: f32,
+    n_dot_v: f32,
+    dir: [f32; 3],
+    n: [f32; 3],
+    sun_dir: [f32; 3],
+    ior: f32,
+) -> (f32, f32, bool) {
+    let h = behind * n_dot_v;
+    if behind >= NO_ABSORPTION_DISTANCE || h >= thickness {
+        return (path_length(thickness, dir, n), 0.0, false);
+    }
+    let cos_t = (-dot(dir, n)).max(MIN_COS);
+    let l = refract(sun_dir, n, 1.0 / ior.max(1.0));
+    let cos_l = (-dot(l, n)).max(MIN_COS);
+    (h / cos_t, h / cos_l, true)
+}

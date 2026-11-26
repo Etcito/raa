@@ -164,7 +164,8 @@ impl Composer {
             section(&mut out, &title, &p.wgsl);
         }
         section(&mut out, "local lighting", LOCAL_LIGHTING_WGSL);
-        if matches!(key.pass, PassKind::Forward | PassKind::VgShade) {
+        // Transparent: the DDGI lookup of transmissive and blended fragments (pass_transparent.wgsl).
+        if matches!(key.pass, PassKind::Forward | PassKind::VgShade | PassKind::Transparent) {
             section(&mut out, "spherical cube", crate::SPHERICAL_CUBE_WGSL);
             section(
                 &mut out,
