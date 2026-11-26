@@ -61,6 +61,10 @@ const GROUP_ROWS: u64 = 320;
 /// Ray scratch of an update: 4 rows per ray and job (the bounced sky transfer of the hit).
 const SCRATCH_ROWS: u64 = 262_144;
 const SCRATCH_ROWS_PER_RAY: u64 = 4;
+/// Hand-over from the trace dispatch of an update to its blend dispatch (`ddgi_rays`): two rows
+/// per job for the most jobs a dispatch carries (8 rays per probe), then three rows per ray.
+const RAY_JOB_ROWS: u64 = 16_384;
+const RAY_ROWS_PER_RAY: u64 = 3;
 /// Frames the sky projection and the relight run after a change (the environment's own filter
 /// lands a frame or more after its source changed).
 const RELIGHT_FRAMES: u32 = 4;
@@ -576,6 +580,8 @@ struct Staged {
     screen: Option<(u32, u32)>,
     /// Probes per update workgroup.
     pack: u32,
+    /// Rays per probe (picks the update kernels' workgroup arrays).
+    rays: u32,
 }
 
 /// Starting cost model before the first timestamp readback (RTX 3090, Sponza, 64 rays).
@@ -1320,6 +1326,7 @@ impl FeaturePass for DdgiPass {
             interval: if bursting { 1 } else { interval },
             screen: resolve,
             pack: probes_per_group(settings.rays_per_probe),
+            rays: settings.rays_per_probe,
         });
         Ok(())
     }
@@ -1336,9 +1343,10 @@ impl FeaturePass for DdgiPass {
         let geometry = mesh.geometry_buffers(ctx.gpu);
         drop(mesh);
         let device = ctx.gpu.device();
+        gpu.ensure_kernels(device, staged.rays);
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("gi.ddgi.update"),
-            layout: &gpu.update.get_bind_group_layout(0),
+            layout: &gpu.update_layout,
             entries: &[
                 buffer_entry(0, &frame),
                 buffer_entry(1, &gpu.options),
@@ -1355,6 +1363,7 @@ impl FeaturePass for DdgiPass {
                 buffer_entry(27, &gpu.probes),
                 buffer_entry(28, &gpu.params),
                 buffer_entry(29, &gpu.jobs),
+                buffer_entry(30, &gpu.rays),
             ],
         });
         if staged.relight {
@@ -1408,8 +1417,12 @@ impl FeaturePass for DdgiPass {
                         label: Some("gi.ddgi.update"),
                         timestamp_writes: writes,
                     });
-                pass.set_pipeline(&gpu.update);
+                // Trace, then blend, over the same workgroups (one timed pass).
+                let kernels = gpu.kernels(staged.rays);
                 pass.set_bind_group(0, &group, &[]);
+                pass.set_pipeline(&kernels.trace);
+                pass.dispatch_workgroups(jobs.div_ceil(staged.pack), 1, 1);
+                pass.set_pipeline(&kernels.blend);
                 pass.dispatch_workgroups(jobs.div_ceil(staged.pack), 1, 1);
             }
             if timed && let Some(timer) = timer {
@@ -1579,7 +1592,12 @@ struct DdgiGpu {
     screen: Option<(u32, u32)>,
     /// Surface-probe pool size (slots after the cascades).
     extras: u32,
-    update: wgpu::ComputePipeline,
+    /// The update's explicit layout (shared by its trace and blend kernels and their bind group).
+    update_layout: wgpu::BindGroupLayout,
+    update_pipeline_layout: wgpu::PipelineLayout,
+    /// Update kernels built on first use: [0] up to 64 rays per probe, [1] up to 256.
+    kernels: [Option<UpdateKernels>; 2],
+    rays: Buffer,
     resolve: wgpu::ComputePipeline,
     relight: wgpu::ComputePipeline,
     sky: wgpu::ComputePipeline,
@@ -1613,7 +1631,7 @@ impl DdgiGpu {
                 cache: None,
             })
         };
-        let update = pipeline("gi.ddgi.update", "ddgi_update");
+        let (update_layout, update_pipeline_layout) = update_layouts(device);
         let resolve = pipeline("gi.ddgi.resolve", "ddgi_resolve");
         let relight = pipeline("gi.ddgi.relight", "ddgi_relight");
         let sky = pipeline("gi.ddgi.sky", "ddgi_sky_project");
@@ -1626,7 +1644,15 @@ impl DdgiGpu {
             revision,
             screen,
             extras,
-            update,
+            update_layout,
+            update_pipeline_layout,
+            kernels: [None, None],
+            rays: buffer(
+                device,
+                "gi.ddgi.rays",
+                16 * (RAY_JOB_ROWS + RAY_ROWS_PER_RAY * (SCRATCH_ROWS / SCRATCH_ROWS_PER_RAY)),
+                Usage::STORAGE,
+            ),
             resolve,
             relight,
             sky,
@@ -1656,6 +1682,38 @@ impl DdgiGpu {
             ),
             header: Vec::new(),
         }
+    }
+
+    /// Builds the update kernels for `rays` rays per probe on first use.
+    fn ensure_kernels(&mut self, device: &wgpu::Device, rays: u32) {
+        let index = kernel_index(rays);
+        if self.kernels[index].is_some() {
+            return;
+        }
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("gi.ddgi.update"),
+            source: wgpu::ShaderSource::Wgsl(ddgi_update_module(KERNEL_MAX_RAYS[index]).into()),
+        });
+        let pipeline = |label, entry| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: Some(&self.update_pipeline_layout),
+                module: &shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        self.kernels[index] = Some(UpdateKernels {
+            trace: pipeline("gi.ddgi.update.trace", "ddgi_update_trace"),
+            blend: pipeline("gi.ddgi.update.blend", "ddgi_update_blend"),
+        });
+    }
+
+    fn kernels(&self, rays: u32) -> &UpdateKernels {
+        self.kernels[kernel_index(rays)]
+            .as_ref()
+            .expect("update kernels built by ensure_kernels")
     }
 
     fn ensure_jobs(&mut self, gpu: &GpuContext, count: usize) {
@@ -1689,7 +1747,11 @@ impl DdgiGpu {
     }
 
     fn bytes(&self) -> u64 {
-        self.probes.size() + self.params.size() + self.options.size() + self.jobs.size()
+        self.probes.size()
+            + self.params.size()
+            + self.options.size()
+            + self.jobs.size()
+            + self.rays.size()
     }
 
     fn write_header(
@@ -1808,6 +1870,77 @@ impl DdgiGpu {
     }
 }
 
+struct UpdateKernels {
+    trace: wgpu::ComputePipeline,
+    blend: wgpu::ComputePipeline,
+}
+
+/// Rays per probe the workgroup arrays of each update kernel set hold.
+const KERNEL_MAX_RAYS: [u32; 2] = [64, 256];
+
+fn kernel_index(rays: u32) -> usize {
+    usize::from(rays > KERNEL_MAX_RAYS[0])
+}
+
+/// The update module with workgroup ray arrays of `max_rays` (64 or 256).
+pub(crate) fn ddgi_update_module(max_rays: u32) -> String {
+    let full = ddgi_module();
+    let from = "const DDGI_MAX_RAYS: u32 = 256u;";
+    assert!(full.contains(from), "DDGI_MAX_RAYS declaration");
+    full.replacen(from, &format!("const DDGI_MAX_RAYS: u32 = {max_rays}u;"), 1)
+}
+
+/// The explicit group-0 layout of the update kernels: the bindings of the mesh trace they use,
+/// the probe buffer, params, jobs and the trace-to-blend hand-over.
+fn update_layouts(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::PipelineLayout) {
+    use wgpu::{BufferBindingType as B, TextureSampleType as T, TextureViewDimension as D};
+    let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
+        binding,
+        ty,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        count: None,
+    };
+    let buf = |ty| wgpu::BindingType::Buffer {
+        ty,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let tex = |view_dimension| wgpu::BindingType::Texture {
+        sample_type: T::Float { filterable: true },
+        view_dimension,
+        multisampled: false,
+    };
+    let read = buf(B::Storage { read_only: true });
+    let write = buf(B::Storage { read_only: false });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("gi.ddgi.update"),
+        entries: &[
+            entry(0, buf(B::Uniform)),
+            entry(1, buf(B::Uniform)),
+            entry(2, read),
+            entry(3, read),
+            entry(4, read),
+            entry(13, buf(B::Uniform)),
+            entry(14, tex(D::Cube)),
+            entry(
+                15,
+                wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            ),
+            entry(crate::wgsl::MESH_TRACE_ATLAS_BINDING, tex(D::D2)),
+            entry(27, write),
+            entry(28, buf(B::Uniform)),
+            entry(29, read),
+            entry(30, write),
+        ],
+    });
+    let pipeline = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("gi.ddgi.update"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    (layout, pipeline)
+}
+
 pub(crate) fn ddgi_module() -> String {
     format!(
         "{}\n{}\n{}",
@@ -1824,6 +1957,21 @@ mod tests {
     #[test]
     fn ddgi_update_module_validates() {
         raa_shader::Composer::validate(&ddgi_module()).expect("DDGI update WGSL");
+        for max_rays in KERNEL_MAX_RAYS {
+            raa_shader::Composer::validate(&ddgi_update_module(max_rays))
+                .expect("DDGI update WGSL (ray arrays)");
+        }
+    }
+
+    #[test]
+    fn update_kernels_cover_every_ray_count() {
+        assert_eq!(kernel_index(8), 0);
+        assert_eq!(kernel_index(64), 0);
+        assert_eq!(kernel_index(65), 1);
+        assert_eq!(kernel_index(256), 1);
+        // The hand-over holds every job of a dispatch: two rows each at the smallest ray count.
+        assert!(RAY_JOB_ROWS >= 2 * SCRATCH_ROWS / (SCRATCH_ROWS_PER_RAY * 8));
+        assert!(ddgi_update_module(64).contains("const DDGI_MAX_RAYS: u32 = 64u;"));
     }
 
     #[test]
