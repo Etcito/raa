@@ -172,9 +172,12 @@ not a graph is set.
   `layerE = (0, 0, 0, -1)` ("no sample"), as do the clears under sky and contributor-only
   pixels. There is no `layerR`. On a G frame `pass.shadow.csm` renders only its hero layers
   (local lights), and the primary `pass.ao.gtao`, `pass.shadow.contact` and the `pass.gi.ddgi`
-  screen resolve record nothing, each only while no other enabled reader needs its output
-  (transparent OIT or fur shells with draws, opaque particles, VG shade, sun shafts and the
-  planar reflection keep the passes they read running). The DDGI probe update always runs.
+  screen resolve record nothing. Transparent OIT, fur shells and opaque particles then read the
+  previous R frame's outputs: the cascade maps with that frame's `ShadowGpu` (the cascade
+  matrices and splits stay those of the last frame that rendered the cascades, so map and
+  matrices agree) and the contact / AO textures it left bound (one frame old in screen space).
+  VG shade keeps all four passes running, sun shafts keep the cascades, the planar reflection
+  keeps the cascades and contact. The DDGI probe update always runs.
   `lightingInterlace()` reports the state of the latest submitted frame; lit shaders read it in
   `FrameGpu.temporal.w` and `compute.wgsl` nodes in `rg_frame.interlace` (bit 0 mode, bit 1 R
   frame, bits 2 and 3 px and py, bits 4-5 `(n / 2) % 4`).

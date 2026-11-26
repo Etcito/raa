@@ -120,20 +120,22 @@ fn jitter_consumer(taa_enabled: Option<bool>) -> bool {
     taa_enabled == Some(true)
 }
 
-/// The enabled pipeline entries that read the sun shadow, contact, screen AO or DDGI screen
-/// resolve outside the camera forward's opaque draws (names of raa-oit, raa-lit's fur shells
-/// and opaque particles contributors, raa-shafts and raa-vg).
+/// The enabled pipeline entries whose reads keep a signal pass running on a G frame of forward
+/// "layers-interlaced" (names of raa-shafts and raa-vg).
+///
+/// `transparent.oit`, `fur.shells` and `particles.opaque` (raa_slot_shadow, raa_slot_ao) do
+/// not: on a G frame they read the previous R frame's cascade maps with that frame's
+/// `ShadowGpu` (raa-shadow freezes the cascade matrices and splits while the cascades are not
+/// rendered, so map and matrices agree) and the contact / AO textures that R frame left bound
+/// (screen-space, one frame old).
 #[derive(Clone, Copy, Debug, Default)]
 struct SignalReaders {
-    /// `transparent.oit`: raa_slot_shadow (cascades x contact) and raa_slot_ao.
-    oit: bool,
-    /// `fur.shells`: raa_slot_shadow and raa_slot_ao.
-    fur: bool,
-    /// `particles.opaque`: raa_slot_shadow and raa_slot_ao.
-    particles: bool,
-    /// `sunshafts`: the cascade layers of raa_shadow_map.
+    /// `sunshafts`: marches the cascade layers along view rays; left running (not reviewed for
+    /// stale cascades).
     shafts: bool,
-    /// `vg.shade`: raa_opaque_lighting (cascades, contact, AO and DDGI resolve).
+    /// `vg.shade`: raa_opaque_lighting of opaque virtualized geometry (cascades, contact, AO and
+    /// DDGI resolve): an opaque surface must not take one-frame-old screen-space AO / contact,
+    /// so every signal pass keeps running.
     vg_shade: bool,
 }
 
@@ -141,9 +143,6 @@ impl SignalReaders {
     fn of(p: &Pipeline) -> SignalReaders {
         let on = |name: &str| p.entry_enabled(name).unwrap_or(false);
         SignalReaders {
-            oit: on("transparent.oit"),
-            fur: on("fur.shells"),
-            particles: on("particles.opaque"),
             shafts: on("sunshafts"),
             vg_shade: on("vg.shade"),
         }
@@ -151,26 +150,24 @@ impl SignalReaders {
 }
 
 /// The forward "layers-interlaced" state of real frame `frame` (the scene frame index). On a
-/// G frame of the mode a signal pass is skipped only while no other reader of its output runs:
-/// OIT and fur shells count only with draws of their class (`any_draws`), the planar
-/// reflection capture reads the cascades and contact (raa_slot_shadow). The cascade hero layers
-/// (local lights) are always rendered, and the DDGI probe update always runs.
+/// G frame of the mode the signal passes are skipped unless a reader that needs the current
+/// frame's output is on: VG shade keeps all four, sun shafts and the planar reflection capture
+/// (raa_slot_shadow of the mirrored view) keep the cascades, the planar reflection keeps the
+/// contact. The cascade hero layers (local lights) are always rendered, and the DDGI probe
+/// update always runs.
 fn interlace_state(
     enabled: bool,
     frame: u64,
     readers: SignalReaders,
-    any_draws: impl Fn(DrawClass) -> bool,
     planar_reflection: bool,
 ) -> LightingInterlace {
     let mut state = LightingInterlace::new(enabled, frame);
     if state.generated() {
-        let transparent = readers.oit && any_draws(DrawClass::Transparent);
-        let fur = readers.fur && any_draws(DrawClass::Fur);
-        let slots = transparent || fur || readers.particles || readers.vg_shade;
-        state.skip_cascades = !(slots || readers.shafts || planar_reflection);
-        state.skip_contact = !(slots || planar_reflection);
-        state.skip_ao = !slots;
-        state.skip_gi_resolve = !readers.vg_shade;
+        let vg = readers.vg_shade;
+        state.skip_cascades = !(vg || readers.shafts || planar_reflection);
+        state.skip_contact = !(vg || planar_reflection);
+        state.skip_ao = !vg;
+        state.skip_gi_resolve = !vg;
     }
     state
 }
@@ -1472,7 +1469,6 @@ impl LitRenderer {
             s.forward_layers == crate::ForwardLayers::Interlaced && s.msaa() == 1,
             camera.frame_index,
             readers,
-            |class| s.select.draws(class).iter().any(|d| d.instance_count > 0),
             s.planar_reflection.is_some(),
         );
         self.interlace_prepared = interlace;
