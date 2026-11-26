@@ -18,7 +18,7 @@ mod feature;
 mod provider;
 
 pub use cascade_access::{
-    CascadeTargets, CoveredFrame, cascade_frame, cascade_frame_covered, cover_distance,
+    CascadeTargets, CoveredFrame, cascade_frame, cascade_frame_covered, cascade_frame_covered_n, cover_distance,
 };
 pub use cascades::{CascadeFit, FittedCascade, cascade_fit, cascade_matrix, cascade_splits};
 pub use desc::ShadowDesc;

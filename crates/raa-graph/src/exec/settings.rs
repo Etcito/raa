@@ -69,7 +69,7 @@ const LIGHTING: [(&str, LightingOutput); 7] = [
 pub fn setting_keys(feature: &FeatureId) -> &'static [&'static str] {
     match feature {
         FeatureId::Tonemap => &["mapper", "exposureEv", "look", "dither"],
-        FeatureId::Shadow => &["softness", "distance", "cover", "resolution"],
+        FeatureId::Shadow => &["softness", "distance", "cover", "resolution", "cascades"],
         FeatureId::Vg => &[
             "errorPixels",
             "softwareRaster",
@@ -794,6 +794,7 @@ fn get_shadow(d: &ShadowDesc, key: &str) -> Option<ParamValue> {
         "distance" => Some(f32_value(d.distance_m)),
         "cover" => Some(ParamValue::Bool(d.cover)),
         "resolution" => Some(u32_value(d.resolution)),
+        "cascades" => Some(u32_value(d.cascades)),
         _ => None,
     }
 }
@@ -804,6 +805,7 @@ fn set_shadow(d: &mut ShadowDesc, key: &str, value: &ParamValue) -> Result<(), S
         "distance" => d.distance_m = float(key, value)?,
         "cover" => d.cover = flag(key, value)?,
         "resolution" => d.resolution = count(key, value)?,
+        "cascades" => d.cascades = count(key, value)?,
         _ => return Err(unknown(key)),
     }
     Ok(())

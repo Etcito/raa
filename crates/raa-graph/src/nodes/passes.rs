@@ -1188,6 +1188,16 @@ fn shadow_gi_types() -> Vec<NodeTypeSpec> {
                     ),
                     Rebuild::Resources,
                 ),
+                value(
+                    Fid::Shadow,
+                    "cascades",
+                    "Cascades",
+                    "Shadows",
+                    int(shadow.cascades),
+                    OPEN,
+                    &["1", "2", "3", "4"],
+                    "raa-shadow/src/desc.rs:22",
+                ),
             ],
             // raa-shadow/src/caster.rs:177 (group 2 uniform) over the lit group 0 vertex
             // bindings (raa-lit/src/handle.rs:207: atlas, sampler, 6 storage + palette, frame).

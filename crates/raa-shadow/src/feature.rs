@@ -158,7 +158,7 @@ fn write_vec4(out: &mut [u8], v: [f32; 4]) {
 
 /// Packs `ShadowGpu` (S10): `cascade_view_proj` @0, `splits` @256, `params` @272
 /// (softness, normal-offset texels, 1/resolution, enabled 1) and `params2` @288
-/// (0, blend band, 0, 0). `FrameGpu.sun_dir.w` supplies the sun angular radius.
+/// (0, blend band, cascade count, 0). `FrameGpu.sun_dir.w` supplies the sun angular radius.
 fn pack_shadow(
     out: &mut [u8; SHADOW_GPU_SIZE],
     matrices: &[Mat4; CASCADES],
@@ -180,7 +180,7 @@ fn pack_shadow(
     );
     write_vec4(
         &mut out[OFF_PARAMS2..OFF_PARAMS2 + 16],
-        [0.0, BLEND_BAND, 0.0, 0.0],
+        [0.0, BLEND_BAND, desc.cascades as f32, 0.0],
     );
 }
 
@@ -248,7 +248,7 @@ impl FeaturePass for ShadowPass {
         } else {
             None
         };
-        let frame = crate::cascade_frame_covered(
+        let frame = crate::cascade_frame_covered_n(
             &view.view,
             view.fov_y_rad,
             view.aspect,
@@ -258,6 +258,7 @@ impl FeaturePass for ShadowPass {
             view.sun_dir,
             desc.resolution,
             scene.as_ref(),
+            desc.cascades as usize,
         );
         // A G frame of forward "layers-interlaced" that skips the cascades keeps the matrices
         // and splits the cascade layers were last rendered with (OIT, fur shells and opaque
@@ -341,7 +342,11 @@ impl FeaturePass for ShadowPass {
         let Some(casters) = st.casters.as_ref() else {
             return Ok(());
         };
-        let cascades = !ctx.lighting.interlace().skip_cascades || st.force_cascades;
+        let cascades = if !ctx.lighting.interlace().skip_cascades || st.force_cascades {
+            st.desc.cascades.clamp(1, CASCADES as u32) as usize
+        } else {
+            0
+        };
         casters.record(ctx.gpu, ctx.encoder, &self.lit, &st.heroes, cascades)
     }
 }
@@ -427,7 +432,7 @@ impl ShadowHandle {
         }
         let casters = st.casters.as_ref()?;
         Some(CascadeTargets {
-            count: CASCADES as u32,
+            count: st.desc.cascades,
             resolution: st.resolution,
             view_proj: st.matrices,
             splits: st.splits,
@@ -501,6 +506,7 @@ mod tests {
             distance_m: 60.0,
             resolution: 1024,
             cover: true,
+            cascades: 4,
         };
         let mut out = [0u8; SHADOW_GPU_SIZE];
         pack_shadow(&mut out, &matrices, &splits, &desc);
@@ -519,7 +525,7 @@ mod tests {
         // params2 @288 = (0, blend band, 0, 0).
         assert_eq!(f32_at(&out, OFF_PARAMS2), 0.0);
         assert_eq!(f32_at(&out, OFF_PARAMS2 + 4), BLEND_BAND);
-        assert_eq!(f32_at(&out, OFF_PARAMS2 + 8), 0.0);
+        assert_eq!(f32_at(&out, OFF_PARAMS2 + 8), 4.0);
         assert_eq!(f32_at(&out, OFF_PARAMS2 + 12), 0.0);
     }
 }

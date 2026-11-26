@@ -126,12 +126,39 @@ pub fn cascade_frame_covered(
     resolution: u32,
     scene: Option<&Aabb>,
 ) -> CoveredFrame {
-    let mut splits = crate::cascade_splits(near, far.min(distance_m), SPLIT_LAMBDA, CASCADES);
+    cascade_frame_covered_n(
+        view, fov_y_rad, aspect, near, far, distance_m, sun_dir, resolution, scene, CASCADES,
+    )
+}
+
+/// [`cascade_frame_covered`] with `n` (1..=4) cascades: the practical splits for `n`, the
+/// cover reach applied to cascade `n - 1`; entries past `n` repeat the last used split and
+/// matrix (they are never rendered nor selected: the shader clamps to cascade `n - 1`).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the contract signature mirrors the pass's inputs"
+)]
+pub fn cascade_frame_covered_n(
+    view: &Mat4,
+    fov_y_rad: f32,
+    aspect: f32,
+    near: f32,
+    far: f32,
+    distance_m: f32,
+    sun_dir: Vec3,
+    resolution: u32,
+    scene: Option<&Aabb>,
+    n: usize,
+) -> CoveredFrame {
+    let n = n.clamp(1, CASCADES);
+    let mut splits = crate::cascade_splits(near, far.min(distance_m), SPLIT_LAMBDA, n);
     let cover_m = scene.and_then(|b| cover_distance(view, b));
     if let Some(cover) = cover_m {
         let reach = cover.min(far);
-        if reach > splits[CASCADES - 1] {
-            splits[CASCADES - 1] = reach;
+        if reach > splits[n - 1] {
+            for s in splits.iter_mut().skip(n - 1) {
+                *s = reach;
+            }
         }
     }
     let mut out = CoveredFrame {
@@ -143,6 +170,12 @@ pub fn cascade_frame_covered(
     };
     let mut previous = near;
     for (i, &split) in splits.iter().enumerate() {
+        if i >= n {
+            out.matrices[i] = out.matrices[n - 1];
+            out.fits[i] = out.fits[n - 1];
+            out.texels_m[i] = out.texels_m[n - 1];
+            continue;
+        }
         let fitted = cascade_fit(
             view,
             fov_y_rad,
