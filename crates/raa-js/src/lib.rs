@@ -40,3 +40,24 @@ pub(crate) mod api {
     include!(concat!(env!("OUT_DIR"), "/api_registry.rs"));
     pub(crate) use m21_views::ViewsState;
 }
+
+/// Module init: routes every wasm panic message to `console.error` so a panic names its
+/// cause instead of surfacing as a bare `RuntimeError: unreachable` (same behaviour as
+/// `console_error_panic_hook`, without the extra dependency). Runs once at instantiation.
+#[cfg(target_arch = "wasm32")]
+mod panic_hook {
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = console, js_name = error)]
+        fn console_error(message: &str);
+    }
+
+    #[wasm_bindgen(start)]
+    fn install_panic_hook() {
+        std::panic::set_hook(Box::new(|info| {
+            console_error(&format!("raa-js wasm panic: {info}"));
+        }));
+    }
+}
