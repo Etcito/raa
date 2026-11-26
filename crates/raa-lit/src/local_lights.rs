@@ -10,7 +10,8 @@
 use raa_core::RaaError;
 use raa_math::{Mat4, Vec3};
 
-use crate::light_cutoff::LightCutoff;
+use crate::light_cutoff::{LightCutoff, budgeted};
+use std::cell::RefCell;
 use crate::local_light::{LightHandle, LocalLight, MAX_LIGHT_HANDLE};
 
 use raa_shader::LIGHT_GPU_SIZE;
@@ -44,6 +45,8 @@ pub struct LocalLights {
     next_handle: Option<LightHandle>,
     dirty: bool,
     cutoff: LightCutoff,
+    generation: u64,
+    effective: RefCell<(u64, Vec<LocalLight>)>,
 }
 
 impl Default for LocalLights {
@@ -61,6 +64,8 @@ impl LocalLights {
             next_handle: Some(1),
             dirty: false,
             cutoff: LightCutoff::default(),
+            generation: 1,
+            effective: RefCell::new((0, Vec::new())),
         }
     }
 
@@ -82,7 +87,7 @@ impl LocalLights {
             attach: None,
         });
         self.len += 1;
-        self.dirty = true;
+        self.touch();
         Ok(handle)
     }
 
@@ -126,7 +131,7 @@ impl LocalLights {
         }
         entry.desc = next;
         if world_desc(entry) != old {
-            self.dirty = true;
+            self.touch();
         }
         Ok(())
     }
@@ -139,7 +144,7 @@ impl LocalLights {
         }
         self.len -= 1;
         self.entries[self.len] = None;
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -164,7 +169,10 @@ impl LocalLights {
             world: *world,
             world_direction,
         });
-        self.dirty |= world_desc(entry) != old;
+        if world_desc(entry) != old {
+                    self.dirty = true;
+                    self.generation += 1;
+                }
         Ok(())
     }
 
@@ -208,7 +216,10 @@ impl LocalLights {
                     world_direction,
                     ..attachment
                 });
-                self.dirty |= world_desc(entry) != old;
+                if world_desc(entry) != old {
+                    self.dirty = true;
+                    self.generation += 1;
+                }
             }
         }
         Ok(())
@@ -235,23 +246,16 @@ impl LocalLights {
     /// cutoff. Trailing off lights cost nothing; off lights between live ones stay (dense
     /// record indices are stable) and are skipped by their zero radiance.
     pub fn gpu_count(&self) -> u32 {
-        self.entries[..self.len]
+        let eff = self.effective();
+        eff.1
             .iter()
-            .flatten()
-            .enumerate()
-            .filter(|(_, entry)| !world_desc(entry).with_cutoff(self.cutoff).is_off())
-            .map(|(index, _)| index as u32 + 1)
-            .last()
-            .unwrap_or(0)
+            .rposition(|l| !l.is_off())
+            .map_or(0, |last| last as u32 + 1)
     }
 
     /// Lights switched off by authoring (intensity 0) or by the display cutoff.
     pub fn off_count(&self) -> u32 {
-        self.entries[..self.len]
-            .iter()
-            .flatten()
-            .filter(|entry| world_desc(entry).with_cutoff(self.cutoff).is_off())
-            .count() as u32
+        self.effective().1.iter().filter(|l| l.is_off()).count() as u32
     }
 
     /// Number of lights currently attached to an instance-group parent.
@@ -269,25 +273,22 @@ impl LocalLights {
     /// exports from `gpu_constants.rs` define the allocation and stride; no keys are sent.
     pub fn write_gpu(&self, out: &mut [u8; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE]) {
         out.fill(0);
-        for (entry, record) in self.entries[..self.len]
-            .iter()
-            .flatten()
-            .zip(out.chunks_exact_mut(LIGHT_GPU_SIZE))
-        {
-            world_desc(entry)
-                .with_cutoff(self.cutoff)
-                .write_gpu(record.try_into().expect("one light record"));
+        let eff = self.effective();
+        for (light, record) in eff.1.iter().zip(out.chunks_exact_mut(LIGHT_GPU_SIZE)) {
+            light.write_gpu(record.try_into().expect("one light record"));
         }
     }
 
     /// Yields `(dense GPU record index, stable handle, world descriptor)` in the ascending-handle
     /// order that [`LocalLights::write_gpu`] packs, so index `i` names record `i` of its output.
     pub fn world_lights(&self) -> impl Iterator<Item = (usize, LightHandle, LocalLight)> + '_ {
+        let lights = self.effective().1.clone();
         self.entries[..self.len]
             .iter()
             .flatten()
+            .zip(lights)
             .enumerate()
-            .map(|(index, entry)| (index, entry.handle, world_desc(entry).with_cutoff(self.cutoff)))
+            .map(|(index, (entry, light))| (index, entry.handle, light))
     }
 
     /// The influence cutoff applied to every record and world descriptor this registry yields.
@@ -300,13 +301,34 @@ impl LocalLights {
     pub fn set_cutoff(&mut self, cutoff: LightCutoff) {
         if cutoff != self.cutoff {
             self.cutoff = cutoff;
-            self.dirty = true;
+            self.touch();
         }
     }
 
     /// Whether a registry mutation requires its backing GPU data to be refreshed.
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    fn touch(&mut self) {
+        self.dirty = true;
+        self.generation += 1;
+    }
+
+    /// World descriptors under the overlap-budgeted cutoff, cached per registry change.
+    fn effective(&self) -> std::cell::Ref<'_, (u64, Vec<LocalLight>)> {
+        {
+            let mut cache = self.effective.borrow_mut();
+            if cache.0 != self.generation {
+                let worlds: Vec<LocalLight> = self.entries[..self.len]
+                    .iter()
+                    .flatten()
+                    .map(world_desc)
+                    .collect();
+                *cache = (self.generation, budgeted(&worlds, self.cutoff));
+            }
+        }
+        self.effective.borrow()
     }
 
     /// Marks the current registry contents as uploaded.

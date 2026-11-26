@@ -16,8 +16,16 @@
 //! even the nearest clamp (`windowed_falloff` peaks at 25) stays below `T / 2` (`25 L <= T/2`),
 //! the light is off (intensity 0) and every consumer skips it. A directional light has no range:
 //! it is off when `L < T`.
+//!
+//! Budget. The bar is the *total* error below the threshold, not each light's. Each light
+//! therefore uses `T / k` where `k` is one plus the number of other authored-on lights whose
+//! first-pass influence sphere (centre, `min(range, sqrt(2 L / T))`) overlaps its own (a
+//! directional light overlaps every light), capped at [`MAX_OVERLAP`]. Where more than
+//! `MAX_OVERLAP` spheres overlap the split is no longer strictly conservative (documented
+//! residual). Computed by [`budgeted`] on the CPU only when the registry changes.
 
 use crate::local_light::{LocalLight, LocalLightKind};
+use raa_math::Vec3;
 
 /// Default display threshold: two codes of an 8 bit display.
 pub const DEFAULT_DISPLAY_THRESHOLD: f32 = 2.0 / 255.0;
@@ -55,6 +63,54 @@ impl LightCutoff {
     pub fn enabled(self) -> bool {
         self.threshold > 0.0 && self.min_radiance > 0.0 && self.min_radiance.is_finite()
     }
+}
+
+/// Largest overlap count `k` that divides the threshold.
+pub const MAX_OVERLAP: usize = 32;
+
+impl LightCutoff {
+    fn shared(self, k: usize) -> LightCutoff {
+        LightCutoff {
+            min_radiance: self.min_radiance / k.clamp(1, MAX_OVERLAP) as f32,
+            ..self
+        }
+    }
+}
+
+/// Every light as the consumers must see it: [`LocalLight::with_cutoff`] with the threshold
+/// divided by each light's overlap count (module docs, "Budget"). Order is preserved.
+pub(crate) fn budgeted(lights: &[LocalLight], cutoff: LightCutoff) -> Vec<LocalLight> {
+    if !cutoff.enabled() {
+        return lights.iter().map(|l| l.with_cutoff(cutoff)).collect();
+    }
+    let reach = |l: &LocalLight| match l.kind {
+        LocalLightKind::Directional => f32::INFINITY,
+        _ => l
+            .range
+            .min((2.0 * l.peak_radiance() / cutoff.min_radiance).sqrt()),
+    };
+    let on: Vec<(usize, f32)> = lights
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.is_off())
+        .map(|(i, l)| (i, reach(l)))
+        .collect();
+    let mut out: Vec<LocalLight> = lights.iter().map(|l| l.with_cutoff(LightCutoff::OFF)).collect();
+    for &(i, ri) in &on {
+        let a = Vec3::from_array(lights[i].position);
+        let mut k = 1;
+        for &(j, rj) in &on {
+            if j != i
+                && (ri.is_infinite()
+                    || rj.is_infinite()
+                    || (a - Vec3::from_array(lights[j].position)).length() < ri + rj)
+            {
+                k += 1;
+            }
+        }
+        out[i] = lights[i].with_cutoff(cutoff.shared(k));
+    }
+    out
 }
 
 impl LocalLight {
@@ -192,5 +248,31 @@ mod tests {
             ..sun
         };
         assert_eq!(day.with_cutoff(cutoff()), day);
+    }
+
+    #[test]
+    fn overlapping_lights_share_the_threshold() {
+        let at = |x: f32| LocalLight {
+            position: [x, 0.0, 0.0],
+            ..lit(0.02, 25.0)
+        };
+        let alone = budgeted(&[at(0.0)], cutoff())[0];
+        let far = budgeted(&[at(0.0), at(1000.0)], cutoff());
+        assert_eq!(far[0].range, alone.range, "disjoint spheres do not share");
+        let near = budgeted(&[at(0.0), at(1.0), at(2.0), at(3.0)], cutoff());
+        assert!((near[0].range - (alone.range * 2.0).min(25.0)).abs() < 1e-3, "k = 4 doubles the radius");
+        // the summed cut error of the four stays under the threshold
+        let t = cutoff().min_radiance;
+        for step in 1..2000 {
+            let d = step as f32 * 0.02;
+            let err: f32 = near
+                .iter()
+                .map(|c| {
+                    (0.02 * windowed_falloff(d, 25.0) - c.intensity * windowed_falloff(d, c.range)).abs()
+                })
+                .sum();
+            assert!(err <= t * 1.001, "d={d}: {err}");
+        }
+        assert!(budgeted(&[lit(0.0, 6.0), at(0.0)], cutoff())[0].is_off());
     }
 }
