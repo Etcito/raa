@@ -325,7 +325,7 @@ impl StochasticSelector {
         self.candidates.clear();
         self.weights.clear();
         for (index, handle, light) in lights.world_lights() {
-            if !matches!(light.kind, LocalLightKind::Area) {
+            if !matches!(light.kind, LocalLightKind::Area) || light.is_off() {
                 continue;
             }
             let position = Vec3::from_array(light.position);

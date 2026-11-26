@@ -143,7 +143,7 @@ fn raa_area_stochastic_visibility(index: u32, frag: vec4<f32>) -> vec2<f32> {
 }
 
 // The caller passes the packed uniform index (not a stable CPU handle) to visibility.
-fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
+fn raa_local_contribution(index: u32, budget: f32, s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let light = raa_local_lights[index];
     // Keep authored lights addressable even while off, but skip their shadow and BRDF work.
     if all(light.color_inv_range_sq.rgb == vec3<f32>(0.0)) { return vec3<f32>(0.0); }
@@ -158,6 +158,15 @@ fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f3
         if distance == 0.0 || distance >= light.position_range.w { return vec3<f32>(0.0); }
         direction = to_light / distance;
         falloff = raa_local_falloff(distance, light.position_range.w);
+        // Forward tier (light_cutoff.rs): width > 0 is the forward radius of a point or spot light;
+        // beyond it the light is probe-only, faded over [0.75, 1] of the radius.
+        if light.width > 0.0 {
+            falloff *= 1.0 - smoothstep(0.75 * light.width, light.width, distance);
+            if falloff <= 0.0 { return vec3<f32>(0.0); }
+        }
+        // Forward budget of the tile (light_tiles.wgsl): a weaker light fades to the probes.
+        falloff *= budget;
+        if falloff <= 0.0 { return vec3<f32>(0.0); }
         if light.kind == 1u {
             falloff *= raa_local_spot(dot(light.direction_cos_outer.xyz, -direction),
                 light.direction_cos_outer.w, light.cos_inner);
@@ -242,16 +251,18 @@ fn raa_local_lighting(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     if raa_frame.light_info.x == 0u { return result; }
     if raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE) {
         for (var index = 0u; index < min(raa_frame.light_info.x, MAX_LOCAL_LIGHTS); index += 1u) {
-            result += raa_local_contribution(index, s, c);
+            result += raa_local_contribution(index, 1.0, s, c);
         }
         return result;
     }
     let tile = vec2<i32>(floor(c.frag.xy / f32(TILE_SIZE)));
     let count = min(textureLoad(raa_light_tiles, tile, 0, 0).x, TILE_MAX_LIGHTS);
     for (var word = 1u; word <= count; word += 1u) {
-        let index = textureLoad(raa_light_tiles, tile, i32(word), 0).x;
+        let entry = textureLoad(raa_light_tiles, tile, i32(word), 0).x;
+        let index = entry & 0xffffu;
+        let budget = 1.0 - f32((entry >> 16u) & 0xffu) / 255.0;
         if index < min(raa_frame.light_info.x, MAX_LOCAL_LIGHTS) {
-            result += raa_local_contribution(index, s, c);
+            result += raa_local_contribution(index, budget, s, c);
         }
     }
     return result;

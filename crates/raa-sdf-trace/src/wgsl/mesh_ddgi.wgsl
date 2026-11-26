@@ -98,6 +98,16 @@ var<private> ddgi_light_base: u32;
 var<workgroup> ddgi_job_groups: array<vec4<u32>, 8>;
 var<workgroup> ddgi_origin: array<vec4<f32>, 8>;
 var<workgroup> ddgi_light_bits: array<atomic<u32>, 64>;
+// Probe-only lights of the probe being blended (light_cutoff.rs 'Tier'): up to DDGI_INJECT_MAX
+// entries of (radiance * weight, direction to the light), in light-index order (deterministic),
+// filled by the `ddgi_inject_*` phases. `ddgi_inj_c` is each light's importance at the probe, the
+// same estimate as the tile score; `ddgi_inj_thr` the importance of the (budget + 1)-th strongest.
+const DDGI_INJECT_MAX: u32 = 16u;
+var<workgroup> ddgi_inj: array<vec4<f32>, 32>;
+var<workgroup> ddgi_inj_n: u32;
+var<workgroup> ddgi_inj_c: array<f32, 256>;
+var<workgroup> ddgi_inj_thr: f32;
+var<workgroup> ddgi_inj_bits: array<atomic<u32>, 8>;
 // Guided rays: per probe, the cumulative distribution of the 64 octahedral cells (row-major).
 var<workgroup> ddgi_cdf: array<array<f32, 64>, 8>;
 var<workgroup> ddgi_sky_partial: array<array<vec3<f32>, 9>, 64>;
@@ -850,6 +860,133 @@ fn ddgi_job_setup(p: u32, j: u32) {
     ddgi_origin[p] = vec4<f32>((vec3<f32>(g) + cell_centre) * v.spacing + offset, guided);
 }
 
+// Probe-only lights of workgroup probe `p`. Every point or spot light carries a probe share
+// `1 - fw * wb`: `fw` the forward fade by distance of a tiered light (width lane = forward radius),
+// `wb` the per-tile forward budget weight evaluated at the probe (smoothstep between the importance
+// of the (N+1)-th strongest light and 1.5 times it, N = frame.light_info.w >> 16, 0 = unlimited).
+// The phases run in order with workgroup barriers between them, outside any branch (Tint rejects a
+// barrier under a condition read from workgroup memory): importance, threshold (lane 0), shadow
+// rays (a bit per visible light), deterministic compaction in light-index order.
+fn ddgi_inject_factor(light: Light, origin: vec3<f32>) -> f32 {
+    let delta = light.position_range.xyz - origin;
+    let distance = length(delta);
+    if distance >= light.position_range.w || distance < EPS { return 0.0; }
+    let l = delta / distance;
+    let window = saturate(1.0 - pow(distance / light.position_range.w, 4.0));
+    var weight = window * window / max(distance * distance, 0.04);
+    if light.kind == 1u { weight *= smoothstep(light.direction_outer.w, light.inner, dot(light.direction_outer.xyz, -l)); }
+    return weight;
+}
+
+fn ddgi_inject_importance(p: u32, lid: u32) {
+    let origin = ddgi_origin[p].xyz;
+    let count = min(256u, frame.light_info.x);
+    for (var i = lid; i < 256u; i += DDGI_THREADS) {
+        var c = 0.0;
+        if i < count {
+            let light = lights[i];
+            if light.kind <= 1u && any(light.radiance.rgb > vec3<f32>(0.0)) {
+                c = ddgi_luma(light.radiance.rgb) * ddgi_inject_factor(light, origin);
+            }
+        }
+        ddgi_inj_c[i] = c;
+    }
+}
+
+// Lane 0 only: the (budget + 1)-th largest importance (ties by index), 0 when the budget is off or
+// not exceeded.
+fn ddgi_inject_threshold() {
+    let budget = frame.light_info.w >> 16u;
+    let count = min(256u, frame.light_info.x);
+    var threshold = 0.0;
+    if budget > 0u {
+        var prev_c = 3.4e38;
+        var prev_i = 0xffffffffu;
+        for (var round = 0u; round <= budget; round++) {
+            var best = -1.0;
+            var best_i = 0u;
+            for (var i = 0u; i < count; i++) {
+                let c = ddgi_inj_c[i];
+                let after = c < prev_c || (c == prev_c && (prev_i == 0xffffffffu || i > prev_i));
+                if c > 0.0 && after && c > best { best = c; best_i = i; }
+            }
+            if best <= 0.0 { break; }
+            prev_c = best;
+            prev_i = best_i;
+            if round == budget { threshold = best; }
+        }
+    }
+    ddgi_inj_thr = threshold;
+}
+
+// Probe share of light `i` in [0, 1] (0: forward carries it entirely).
+fn ddgi_inject_share(i: u32, light: Light, origin: vec3<f32>) -> f32 {
+    let c = ddgi_inj_c[i];
+    if c <= 0.0 { return 0.0; }
+    var wb = 1.0;
+    if ddgi_inj_thr > 0.0 { wb = smoothstep(ddgi_inj_thr, 1.5 * ddgi_inj_thr, c); }
+    var fw = 1.0;
+    if light.width > 0.0 {
+        fw = 1.0 - smoothstep(0.75 * light.width, light.width, length(light.position_range.xyz - origin));
+    }
+    return 1.0 - fw * wb;
+}
+
+fn ddgi_inject_visibility(p: u32, lid: u32) {
+    let origin = ddgi_origin[p].xyz;
+    let count = min(256u, frame.light_info.x);
+    for (var i = lid; i < count; i += DDGI_THREADS) {
+        let light = lights[i];
+        if ddgi_inj_c[i] <= 0.0 { continue; }
+        if ddgi_inject_share(i, light, origin) <= 0.0 { continue; }
+        let delta = light.position_range.xyz - origin;
+        let distance = length(delta);
+        let l = delta / distance;
+        if closest(Ray(origin + l * (2.0 * EPS), l), distance - 4.0 * EPS, true).object == MISS {
+            atomicOr(&ddgi_inj_bits[i >> 5u], 1u << (i & 31u));
+        }
+    }
+}
+
+// Lane k writes the k-th visible light in index order; lane 0 publishes the count.
+fn ddgi_inject_pack(p: u32, lid: u32) {
+    var total = 0u;
+    var found = 0xffffffffu;
+    for (var w = 0u; w < 8u; w++) {
+        var bits = atomicLoad(&ddgi_inj_bits[w]);
+        let n = countOneBits(bits);
+        if found == 0xffffffffu && lid < total + n {
+            var skip = lid - total;
+            loop {
+                let bit = firstTrailingBit(bits);
+                if skip == 0u { found = (w << 5u) + bit; break; }
+                bits &= bits - 1u;
+                skip--;
+            }
+        }
+        total += n;
+    }
+    if lid == 0u { ddgi_inj_n = min(total, DDGI_INJECT_MAX); }
+    if lid < DDGI_INJECT_MAX && found != 0xffffffffu {
+        let origin = ddgi_origin[p].xyz;
+        let light = lights[found];
+        let delta = light.position_range.xyz - origin;
+        let l = delta / length(delta);
+        let c = light.radiance.rgb * (ddgi_inject_factor(light, origin) * ddgi_inject_share(found, light, origin));
+        ddgi_inj[2u * lid] = vec4<f32>(c, 0.0);
+        ddgi_inj[2u * lid + 1u] = vec4<f32>(l, 0.0);
+    }
+}
+
+// Irradiance / pi of the injected lights for a texel looking along `dir`.
+fn ddgi_inject_texel(dir: vec3<f32>) -> vec3<f32> {
+    var e = vec3<f32>(0.0);
+    for (var k = 0u; k < ddgi_inj_n; k++) {
+        e += ddgi_inj[2u * k].xyz * max(0.0, dot(dir, ddgi_inj[2u * k + 1u].xyz));
+    }
+    return e * 0.31830988;
+}
+
 // Relocation, classification and light mask of workgroup probe `p` (one thread).
 fn ddgi_probe_record(p: u32, rays: u32) {
     let job = ddgi_job[p];
@@ -1044,7 +1181,7 @@ fn ddgi_probe_gather(p: u32, lid: u32, rays: u32, scratch_first: u32) -> DdgiGat
                 out.raw.direct.sun = sum.direct.sun * inv;
                 out.raw.direct.residual = sum.direct.residual * inv;
             }
-            if (groups & DDGI_OTHER) != 0u { out.raw.direct.other = sum.direct.other * inv; }
+            if (groups & DDGI_OTHER) != 0u { out.raw.direct.other = sum.direct.other * inv + ddgi_inject_texel(dir); }
             if geometry {
                 for (var e = 0u; e < 27u; e++) { sum.transfer[e >> 1u][e & 1u] += escaped[e / 3u]; }
                 for (var j = 0u; j < 14u; j++) { out.raw.transfer[j] = sum.transfer[j] * inv; }
@@ -1260,6 +1397,16 @@ fn ddgi_blend_probes(lid: u32, group: u32, rays: u32, probes_here: u32) {
     for (var p = 0u; p < probes_here; p++) {
         let live = ddgi_job[p].y != 0u;
         var gathered: DdgiGathered;
+        if lid < 8u { atomicStore(&ddgi_inj_bits[lid], 0u); }
+        workgroupBarrier();
+        if live { ddgi_inject_importance(p, lid); }
+        workgroupBarrier();
+        if live && lid == 0u { ddgi_inject_threshold(); }
+        workgroupBarrier();
+        if live { ddgi_inject_visibility(p, lid); }
+        workgroupBarrier();
+        if live { ddgi_inject_pack(p, lid); }
+        workgroupBarrier();
         if live {
             gathered = ddgi_probe_gather(p, lid, rays, ddgi_scratch_row() + (group * probes_here + p) * rays * DDGI_SCRATCH_ROWS);
         }

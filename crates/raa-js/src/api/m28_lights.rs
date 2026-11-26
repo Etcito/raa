@@ -268,6 +268,31 @@ pub(crate) fn parse_area_shading(source: &impl Properties) -> Result<AreaLightSh
     }
 }
 
+/// The light cutoff for `threshold` (display fraction, 0 disables) under the scene's fixed
+/// tone mapping: auto-exposure is deliberately not part of it (exposure is an artistic choice).
+pub(crate) fn light_cutoff_for(
+    tonemap: &raa_tonemap::ToneMapping,
+    threshold: f32,
+    forward_threshold: f32,
+) -> raa_lit::LightCutoff {
+    if threshold <= 0.0 {
+        return raa_lit::LightCutoff::OFF;
+    }
+    let radiance = |code: f32| {
+        if code > 0.0 {
+            raa_tonemap::curves::visible_radiance(tonemap, code)
+        } else {
+            0.0
+        }
+    };
+    raa_lit::LightCutoff {
+        threshold,
+        min_radiance: radiance(threshold),
+        forward_threshold,
+        forward_radiance: radiance(forward_threshold),
+    }
+}
+
 /// The refusal code of a malformed area-light shadow setting (contract
 /// `area-light-shadows-api`).
 pub(crate) const INVALID_AREA_SHADOWS: &str = "light.invalid_area_shadows";
@@ -466,7 +491,7 @@ pub(crate) fn detach(lights: &mut LocalLights, handle: LightHandle) -> Result<()
 pub(crate) use web::{frame, install};
 
 #[cfg(target_arch = "wasm32")]
-mod web {
+pub(crate) mod web {
     use super::*;
     use crate::engine::{Engine, InstallCtx};
     use crate::state::EngineState;
@@ -475,17 +500,28 @@ mod web {
     use raa_web::FrameInput;
     use wasm_bindgen::{JsCast, prelude::*};
 
+    /// Re-derives the registry's cutoff after the tone mapping changed.
+    pub(crate) fn sync_light_cutoff(st: &mut crate::state::EngineState) {
+        let current = st.lit.local_lights().cutoff();
+        let cutoff = light_cutoff_for(&st.tonemap.get(), current.threshold, current.forward_threshold);
+        st.lit.local_lights_mut().set_cutoff(cutoff);
+    }
+
     /// Registers the order-35 `light.tiles` pass against the renderer-owned `LocalLights`.
     pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
         raa_lit::install_local_lights(ctx.gpu, ctx.pipeline, ctx.lit)
     }
 
-    /// The shared frame hook: tiling prepares itself from `M2-FRAME-LIFECYCLE` state.
+    /// The shared frame hook: tiling prepares itself from `M2-FRAME-LIFECYCLE` state. The light
+    /// cutoff follows the tone mapping here too, because the render graph changes exposure
+    /// through its own handle (a bisection of a few microseconds; the registry is dirtied only
+    /// when the cutoff really changes).
     pub(crate) fn frame(
-        _st: &mut EngineState,
+        st: &mut EngineState,
         _gpu: &GpuContext,
         _input: &FrameInput,
     ) -> Result<(), RaaError> {
+        sync_light_cutoff(st);
         Ok(())
     }
 
@@ -771,6 +807,44 @@ mod web {
         /// published through LitHandle' supplies [`LitRenderer::set_area_stochastic`],
         /// [`LitRenderer::area_stochastic`] and [`LitRenderer::active_area_stochastic`] in
         /// `crates/raa-lit/src/renderer.rs:912`.
+        /// Sets the local-light influence cutoff: a light whose largest contribution stays
+        /// below `threshold` (a fraction of display white, default 2/255, 0 disables) after the
+        /// scene's fixed exposure and tone mapping is shortened to its influence radius or
+        /// switched off for every consumer. Throws `light.invalid_cutoff` when `threshold` is
+        /// not a finite number in [0, 1]. The optional second argument is the forward-tier threshold
+        /// (default 16/255, 0 disables): fainter or farther lights are probe-only. The optional third
+        /// argument is the per-tile forward budget (default 8, 0 = unlimited): beyond the N strongest
+        /// point/spot lights of a tile the others fade to the probes.
+        #[wasm_bindgen(js_name = setLightCutoff)]
+        pub fn set_light_cutoff(
+            &mut self,
+            threshold: f64,
+            forward_threshold: Option<f64>,
+            forward_budget: Option<u32>,
+        ) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                if !(threshold.is_finite() && (0.0..=1.0).contains(&threshold)) {
+                    return Err(RaaError::FrameGraph {
+                        code: "light.invalid_cutoff",
+                        message: format!("threshold must be in [0, 1], got {threshold}"),
+                    });
+                }
+                let forward = forward_threshold.unwrap_or(f64::from(raa_lit::DEFAULT_FORWARD_THRESHOLD));
+                if !(forward.is_finite() && (0.0..=1.0).contains(&forward)) {
+                    return Err(RaaError::FrameGraph {
+                        code: "light.invalid_cutoff",
+                        message: format!("forward threshold must be in [0, 1], got {forward}"),
+                    });
+                }
+                let cutoff = light_cutoff_for(&st.tonemap.get(), threshold as f32, forward as f32);
+                st.lit.local_lights_mut().set_cutoff(cutoff);
+                st.lit
+                    .local_lights_mut()
+                    .set_forward_budget(forward_budget.unwrap_or(raa_lit::DEFAULT_FORWARD_BUDGET));
+                Ok(())
+            })
+        }
+
         #[wasm_bindgen(js_name = setAreaLightShadows)]
         pub fn set_area_light_shadows(&mut self, settings: JsValue) -> Result<(), JsValue> {
             self.with_state(|_, st| {

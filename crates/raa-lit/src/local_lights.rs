@@ -10,6 +10,15 @@
 use raa_core::RaaError;
 use raa_math::{Mat4, Vec3};
 
+use crate::light_cutoff::{LightCutoff, budgeted};
+use std::cell::RefCell;
+
+/// Default per-tile forward budget: the N strongest point/spot lights of a tile are shaded in
+/// forward, the others fade to the probes (light_tiles.wgsl). 0 = unlimited.
+pub const DEFAULT_FORWARD_BUDGET: u32 = 8;
+
+/// Cached effective lights: registry generation, descriptors, forward radii.
+type Effective = (u64, Vec<LocalLight>, Vec<f32>);
 use crate::local_light::{LightHandle, LocalLight, MAX_LIGHT_HANDLE};
 
 use raa_shader::LIGHT_GPU_SIZE;
@@ -42,6 +51,10 @@ pub struct LocalLights {
     len: usize,
     next_handle: Option<LightHandle>,
     dirty: bool,
+    cutoff: LightCutoff,
+    generation: u64,
+    forward_budget: u32,
+    effective: RefCell<Effective>,
 }
 
 impl Default for LocalLights {
@@ -58,6 +71,10 @@ impl LocalLights {
             len: 0,
             next_handle: Some(1),
             dirty: false,
+            cutoff: LightCutoff::default(),
+            generation: 1,
+            forward_budget: DEFAULT_FORWARD_BUDGET,
+            effective: RefCell::new((0, Vec::new(), Vec::new())),
         }
     }
 
@@ -79,7 +96,7 @@ impl LocalLights {
             attach: None,
         });
         self.len += 1;
-        self.dirty = true;
+        self.touch();
         Ok(handle)
     }
 
@@ -123,7 +140,7 @@ impl LocalLights {
         }
         entry.desc = next;
         if world_desc(entry) != old {
-            self.dirty = true;
+            self.touch();
         }
         Ok(())
     }
@@ -136,7 +153,7 @@ impl LocalLights {
         }
         self.len -= 1;
         self.entries[self.len] = None;
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -161,7 +178,10 @@ impl LocalLights {
             world: *world,
             world_direction,
         });
-        self.dirty |= world_desc(entry) != old;
+        if world_desc(entry) != old {
+                    self.dirty = true;
+                    self.generation += 1;
+                }
         Ok(())
     }
 
@@ -205,7 +225,10 @@ impl LocalLights {
                     world_direction,
                     ..attachment
                 });
-                self.dirty |= world_desc(entry) != old;
+                if world_desc(entry) != old {
+                    self.dirty = true;
+                    self.generation += 1;
+                }
             }
         }
         Ok(())
@@ -228,6 +251,22 @@ impl LocalLights {
         self.len as u32
     }
 
+    /// Records the GPU loops must walk: one past the last light that is not off under the
+    /// cutoff. Trailing off lights cost nothing; off lights between live ones stay (dense
+    /// record indices are stable) and are skipped by their zero radiance.
+    pub fn gpu_count(&self) -> u32 {
+        let eff = self.effective();
+        eff.1
+            .iter()
+            .rposition(|l| !l.is_off())
+            .map_or(0, |last| last as u32 + 1)
+    }
+
+    /// Lights switched off by authoring (intensity 0) or by the display cutoff.
+    pub fn off_count(&self) -> u32 {
+        self.effective().1.iter().filter(|l| l.is_off()).count() as u32
+    }
+
     /// Number of lights currently attached to an instance-group parent.
     pub fn attached_count(&self) -> u32 {
         self.entries[..self.len]
@@ -243,28 +282,74 @@ impl LocalLights {
     /// exports from `gpu_constants.rs` define the allocation and stride; no keys are sent.
     pub fn write_gpu(&self, out: &mut [u8; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE]) {
         out.fill(0);
-        for (entry, record) in self.entries[..self.len]
-            .iter()
-            .flatten()
-            .zip(out.chunks_exact_mut(LIGHT_GPU_SIZE))
-        {
-            world_desc(entry).write_gpu(record.try_into().expect("one light record"));
+        let eff = self.effective();
+        let records = out.chunks_exact_mut(LIGHT_GPU_SIZE);
+        for ((light, forward), record) in eff.1.iter().zip(&eff.2).zip(records) {
+            light.write_gpu_tiered(*forward, record.try_into().expect("one light record"));
         }
     }
 
     /// Yields `(dense GPU record index, stable handle, world descriptor)` in the ascending-handle
     /// order that [`LocalLights::write_gpu`] packs, so index `i` names record `i` of its output.
     pub fn world_lights(&self) -> impl Iterator<Item = (usize, LightHandle, LocalLight)> + '_ {
+        let lights = self.effective().1.clone();
         self.entries[..self.len]
             .iter()
             .flatten()
+            .zip(lights)
             .enumerate()
-            .map(|(index, entry)| (index, entry.handle, world_desc(entry)))
+            .map(|(index, (entry, light))| (index, entry.handle, light))
+    }
+
+    /// The influence cutoff applied to every record and world descriptor this registry yields.
+    pub fn cutoff(&self) -> LightCutoff {
+        self.cutoff
+    }
+
+    /// Per-tile forward budget (0 = unlimited, at most 255).
+    pub fn forward_budget(&self) -> u32 {
+        self.forward_budget
+    }
+
+    /// Sets the per-tile forward budget; the next frame's light info carries it.
+    pub fn set_forward_budget(&mut self, budget: u32) {
+        self.forward_budget = budget.min(255);
+    }
+
+    /// Replaces the influence cutoff (scene exposure or threshold changed); the next frame
+    /// re-uploads the records only when the setting differs.
+    pub fn set_cutoff(&mut self, cutoff: LightCutoff) {
+        if cutoff != self.cutoff {
+            self.cutoff = cutoff;
+            self.touch();
+        }
     }
 
     /// Whether a registry mutation requires its backing GPU data to be refreshed.
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    fn touch(&mut self) {
+        self.dirty = true;
+        self.generation += 1;
+    }
+
+    /// World descriptors under the overlap-budgeted cutoff, cached per registry change.
+    fn effective(&self) -> std::cell::Ref<'_, Effective> {
+        {
+            let mut cache = self.effective.borrow_mut();
+            if cache.0 != self.generation {
+                let worlds: Vec<LocalLight> = self.entries[..self.len]
+                    .iter()
+                    .flatten()
+                    .map(world_desc)
+                    .collect();
+                let (lights, forward) = budgeted(&worlds, self.cutoff);
+                *cache = (self.generation, lights, forward);
+            }
+        }
+        self.effective.borrow()
     }
 
     /// Marks the current registry contents as uploaded.
@@ -372,11 +457,12 @@ mod tests {
                 (32, 0.0),
                 (36, 0.0),
                 (40, -1.0),
-                (56, 2.0),
                 (60, 3.0),
             ] {
                 assert_eq!(gpu_float(record, offset), expected, "offset {offset}");
             }
+            // point and spot carry the forward radius (0: forward everywhere), the others the width
+            assert_eq!(gpu_float(record, 56), if rank < 2 { 0.0 } else { 2.0 });
             assert!((gpu_float(record, 44) - 17.5_f32.to_radians().cos()).abs() < 1e-6);
             assert!((gpu_float(record, 48) - 14.0_f32.to_radians().cos()).abs() < 1e-6);
             assert_eq!(
@@ -640,5 +726,51 @@ mod tests {
             world_desc(lights.entries[0].as_ref().unwrap()).direction,
             [1.0, 0.0, 0.0]
         ));
+    }
+
+    #[test]
+    fn cutoff_shortens_dim_lights_switches_off_negligible_ones_and_trims_the_gpu_count() {
+        let mut lights = LocalLights::new();
+        let live = lights
+            .add(LocalLight { intensity: 0.05, range: 50.0, ..LocalLight::default() })
+            .unwrap();
+        let off = lights
+            .add(LocalLight { intensity: 0.0, ..LocalLight::default() })
+            .unwrap();
+        let tiny = lights
+            .add(LocalLight { intensity: 1e-6, ..LocalLight::default() })
+            .unwrap();
+        let mut out = [0xff; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE];
+        lights.write_gpu(&mut out);
+        let range = gpu_float(&out[..LIGHT_GPU_SIZE], 12);
+        assert!(range < 50.0 && range > 6.0, "dim light shortened: {range}");
+        for record in out[LIGHT_GPU_SIZE..3 * LIGHT_GPU_SIZE].chunks_exact(LIGHT_GPU_SIZE) {
+            assert_eq!([16, 20, 24].map(|o| gpu_float(record, o)), [0.0; 3], "off light");
+        }
+        assert_eq!((lights.active_count(), lights.gpu_count(), lights.off_count()), (3, 1, 2));
+        assert_eq!(lights.get(live).unwrap().range, 50.0, "authored value is kept");
+        assert!(lights.world_lights().filter(|(_, h, l)| (*h == off || *h == tiny) && l.is_off()).count() == 2);
+        lights.clear_dirty();
+        lights.set_cutoff(lights.cutoff());
+        assert!(!lights.is_dirty(), "same cutoff changes nothing");
+        lights.set_cutoff(crate::LightCutoff::OFF);
+        assert!(lights.is_dirty());
+        lights.write_gpu(&mut out);
+        assert_eq!(gpu_float(&out[..LIGHT_GPU_SIZE], 12), 50.0);
+        assert_eq!(lights.gpu_count(), 3, "without the cutoff the tiny light is live again");
+    }
+
+    #[test]
+    fn faint_lights_write_their_forward_radius_into_the_width_lane() {
+        let mut lights = LocalLights::new();
+        lights.add(LocalLight { intensity: 0.3, range: 25.0, ..LocalLight::default() }).unwrap();
+        lights.add(LocalLight { intensity: 8.0, range: 6.0, ..LocalLight::default() }).unwrap();
+        lights.add(LocalLight { intensity: 0.3, range: 25.0, shadows: true, ..LocalLight::default() }).unwrap();
+        let mut out = [0u8; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE];
+        lights.write_gpu(&mut out);
+        let lane = |i: usize| gpu_float(&out[i * LIGHT_GPU_SIZE..(i + 1) * LIGHT_GPU_SIZE], 56);
+        let expected = (0.3 / lights.cutoff().forward_radiance).sqrt();
+        assert!((lane(0) - expected).abs() < 1e-3 && lane(0) > 1.0 && lane(0) < 25.0, "{}", lane(0));
+        assert_eq!((lane(1), lane(2)), (0.0, 0.0), "strong and shadowed lights stay forward");
     }
 }

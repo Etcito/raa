@@ -451,7 +451,9 @@ impl Engine {
             if let Some(d) = js::optional_bool(&settings, "dither")? {
                 t.dither = d;
             }
-            st.tonemap.set(t)
+            st.tonemap.set(t)?;
+            crate::api::m28_lights::web::sync_light_cutoff(st);
+            Ok(())
         })
     }
 

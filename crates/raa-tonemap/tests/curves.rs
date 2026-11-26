@@ -152,3 +152,27 @@ fn looks_change_agx_only() {
         assert_eq!(map(mapper, Look::None, rgb), map(mapper, Look::Golden, rgb));
     }
 }
+
+#[test]
+fn visible_radiance_is_the_first_radiance_that_reaches_the_code() {
+    let code = 2.0 / 255.0;
+    for mapper in MAPPERS {
+        for ev in [-2.0_f32, 0.0, 1.5] {
+            let settings = ToneMapping {
+                mapper,
+                exposure_ev: ev,
+                ..ToneMapping::default()
+            };
+            let r = raa_tonemap::curves::visible_radiance(&settings, code);
+            let shown = |x: f32| display(tonemap(&settings, grey(x)))[0];
+            assert!(shown(r * 1.01) >= code - 1e-4, "{mapper:?} {ev}: above");
+            assert!(shown(r * 0.9) < code, "{mapper:?} {ev}: below");
+        }
+    }
+    let linear = ToneMapping {
+        mapper: ToneMapper::Linear,
+        ..ToneMapping::default()
+    };
+    let r = raa_tonemap::curves::visible_radiance(&linear, code);
+    assert!((r - 6.07e-4).abs() < 2e-5, "linear 0 EV: {r}");
+}
