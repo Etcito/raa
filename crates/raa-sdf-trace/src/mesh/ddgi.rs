@@ -61,9 +61,9 @@ const GROUP_ROWS: u64 = 320;
 /// Ray scratch of an update: 4 rows per ray and job (the bounced sky transfer of the hit).
 const SCRATCH_ROWS: u64 = 262_144;
 const SCRATCH_ROWS_PER_RAY: u64 = 4;
-/// Hand-over from the trace dispatch of an update to its blend dispatch (`ddgi_rays`): two rows
+/// Hand-over from the trace dispatch of an update to its blend dispatch (`ddgi_rays`): four rows
 /// per job for the most jobs a dispatch carries (8 rays per probe), then three rows per ray.
-const RAY_JOB_ROWS: u64 = 16_384;
+const RAY_JOB_ROWS: u64 = 32_768;
 const RAY_ROWS_PER_RAY: u64 = 3;
 /// Frames the sky projection and the relight run after a change (the environment's own filter
 /// lands a frame or more after its source changed).
@@ -1969,8 +1969,9 @@ mod tests {
         assert_eq!(kernel_index(64), 0);
         assert_eq!(kernel_index(65), 1);
         assert_eq!(kernel_index(256), 1);
-        // The hand-over holds every job of a dispatch: two rows each at the smallest ray count.
-        assert!(RAY_JOB_ROWS >= 2 * SCRATCH_ROWS / (SCRATCH_ROWS_PER_RAY * 8));
+        // The hand-over holds every job of a dispatch: four rows each at the smallest ray count.
+        assert!(RAY_JOB_ROWS >= 4 * SCRATCH_ROWS / (SCRATCH_ROWS_PER_RAY * 8));
+        assert!(ddgi_module().contains(&format!("const DDGI_RAY_ROWS: u32 = {RAY_JOB_ROWS}u;")));
         assert!(ddgi_update_module(64).contains("const DDGI_MAX_RAYS: u32 = 64u;"));
     }
 

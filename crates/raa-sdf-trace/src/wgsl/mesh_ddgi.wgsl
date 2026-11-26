@@ -42,9 +42,10 @@ struct DdgiParams {
 // Word 1: sun age (bits 0-7), other age (8-15), groups to refresh (16-18: 1 geometry and sky
 // transfer, 2 sun and sky residual, 4 other), bit 24: replace the light mask instead of adding.
 @group(0) @binding(29) var<storage, read> ddgi_jobs: array<u32>;
-// Split update: what the trace dispatch hands to the blend dispatch. Rows 2j, 2j+1: job j of the
-// dispatch as set up (`ddgi_job`, `ddgi_job_groups`); from DDGI_RAY_ROWS, three rows per ray of the
-// dispatch (job-major): its shaded groups, its direction, then distance | weight | tag.
+// Split update: what the trace dispatch hands to the blend dispatch. Rows 4j to 4j+3: job j of the
+// dispatch as set up (`ddgi_job`, `ddgi_job_groups`) and its light bits (8 words); from
+// DDGI_RAY_ROWS, three rows per ray of the dispatch (job-major): its shaded groups, its direction,
+// then distance | weight | tag.
 @group(0) @binding(30) var<storage, read_write> ddgi_rays: array<vec4<u32>>;
 
 fn raa_ddgi_word(index: u32) -> vec4<u32> {
@@ -55,9 +56,9 @@ const DDGI_THREADS: u32 = 64u;
 // Rays per probe the workgroup arrays hold. The module is built with 64 when the rays per probe
 // allow it (smaller workgroup footprint), else with the 256 the settings accept.
 const DDGI_MAX_RAYS: u32 = 256u;
-// First ray row of `ddgi_rays` (after two rows per job for the most jobs a dispatch can carry, at
+// First ray row of `ddgi_rays` (after four rows per job for the most jobs a dispatch can carry, at
 // 8 rays per probe).
-const DDGI_RAY_ROWS: u32 = 16384u;
+const DDGI_RAY_ROWS: u32 = 32768u;
 const DDGI_MISS: f32 = 1e27;
 const DDGI_RELOCATE: u32 = 1u;
 const DDGI_CLASSIFY: u32 = 2u;
@@ -1282,9 +1283,11 @@ fn ddgi_probes_here(rays: u32) -> u32 {
 // so every thread traces) and traces their rays together, then relocates and classifies each
 // (one thread per probe) and blends their tiles one probe after another (one irradiance texel and
 // four depth moments per thread). Runs as two dispatches over the same workgroups:
-// `ddgi_update_trace` (setup, trace, relocation and classification) then `ddgi_update_blend`
-// (blend and tiles), the rays handed over through `ddgi_rays`, so the trace runs without the
-// blend's registers and workgroup arrays.
+// `ddgi_update_trace` (setup, trace) then `ddgi_update_blend` (relocation, classification, light
+// mask, blend and tiles), the rays handed over through `ddgi_rays`, so the trace runs without the
+// blend's registers and workgroup arrays, and every ray of an update sees the volume as the
+// previous update left it (no record or group of the update is written before all rays are
+// traced: the update is deterministic).
 @compute @workgroup_size(64, 1, 1)
 fn ddgi_update_trace(@builtin(local_invocation_index) lid: u32,
                      @builtin(workgroup_id) group: vec3<u32>) {
@@ -1294,14 +1297,18 @@ fn ddgi_update_trace(@builtin(local_invocation_index) lid: u32,
     workgroupBarrier();
     ddgi_trace_rays(lid, group.x, rays, probes_here);
     workgroupBarrier();
-    storageBarrier();
-    // 2. Relocation and classification of each probe, and its light mask (one thread each).
-    if lid < probes_here && ddgi_job[lid].y != 0u { ddgi_probe_record(lid, rays); }
     // Hand-over to the blend dispatch.
     let first = group.x * probes_here;
     if lid < probes_here {
-        ddgi_rays[2u * (first + lid)] = ddgi_job[lid];
-        ddgi_rays[2u * (first + lid) + 1u] = ddgi_job_groups[lid];
+        let b = 8u * lid;
+        ddgi_rays[4u * (first + lid)] = ddgi_job[lid];
+        ddgi_rays[4u * (first + lid) + 1u] = ddgi_job_groups[lid];
+        ddgi_rays[4u * (first + lid) + 2u] = vec4<u32>(atomicLoad(&ddgi_light_bits[b]),
+            atomicLoad(&ddgi_light_bits[b + 1u]), atomicLoad(&ddgi_light_bits[b + 2u]),
+            atomicLoad(&ddgi_light_bits[b + 3u]));
+        ddgi_rays[4u * (first + lid) + 3u] = vec4<u32>(atomicLoad(&ddgi_light_bits[b + 4u]),
+            atomicLoad(&ddgi_light_bits[b + 5u]), atomicLoad(&ddgi_light_bits[b + 6u]),
+            atomicLoad(&ddgi_light_bits[b + 7u]));
     }
     for (var i = lid; i < probes_here * rays; i += DDGI_THREADS) {
         let at = DDGI_RAY_ROWS + 3u * (first * rays + i);
@@ -1319,8 +1326,15 @@ fn ddgi_update_blend(@builtin(local_invocation_index) lid: u32,
     let probes_here = ddgi_probes_here(rays);
     let first = group.x * probes_here;
     if lid < probes_here {
-        ddgi_job[lid] = ddgi_rays[2u * (first + lid)];
-        ddgi_job_groups[lid] = ddgi_rays[2u * (first + lid) + 1u];
+        let b = 8u * lid;
+        ddgi_job[lid] = ddgi_rays[4u * (first + lid)];
+        ddgi_job_groups[lid] = ddgi_rays[4u * (first + lid) + 1u];
+        let lo = ddgi_rays[4u * (first + lid) + 2u];
+        let hi = ddgi_rays[4u * (first + lid) + 3u];
+        for (var w = 0u; w < 4u; w++) {
+            atomicStore(&ddgi_light_bits[b + w], lo[w]);
+            atomicStore(&ddgi_light_bits[b + 4u + w], hi[w]);
+        }
     }
     for (var i = lid; i < probes_here * rays; i += DDGI_THREADS) {
         let at = DDGI_RAY_ROWS + 3u * (first * rays + i);
@@ -1332,6 +1346,10 @@ fn ddgi_update_blend(@builtin(local_invocation_index) lid: u32,
         ddgi_ray_tag[i] = w.z;
     }
     workgroupBarrier();
+    // 2. Relocation and classification of each probe, and its light mask (one thread each): here
+    // rather than in the trace dispatch, so no probe record changes while rays of other workgroups
+    // look up the volume (every bounce reads the records and groups of the previous update).
+    if lid < probes_here && ddgi_job[lid].y != 0u { ddgi_probe_record(lid, rays); }
     ddgi_blend_probes(lid, group.x, rays, probes_here);
 }
 
