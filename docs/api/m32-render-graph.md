@@ -16,6 +16,7 @@ interface RenderGraphDoc { format: 'raa.render-graph'; version: 1; name: string;
 interface RenderGraphIssue { code: string; severity: 'error' | 'warning'; nodeId?: string; port?: string; param?: string; link?: number; message: string; fix: string }
 interface RenderGraphResult { ok: boolean; issues: RenderGraphIssue[]; rebuilt: number }
 interface RenderGraphStats { frameIndex: number | null; nodes: { id: string; type: string; ran: boolean; resources: { port: string; width: number; height: number; layers: number; mips: number; format: string; bytes: number }[] }[] }
+interface LightingInterlaceState { mode: boolean; frame: number; real: boolean; phase: [number, number]; skipped: string[] }
 interface Engine {
   renderGraphCatalog(): RenderGraphCatalog
   setRenderGraph(graph: RenderGraphDoc | string | null): RenderGraphResult
@@ -24,6 +25,7 @@ interface Engine {
   renderGraphIssues(): RenderGraphIssue[]
   renderGraphStats(): RenderGraphStats
   renderGraphOwnedSetters(): string[]
+  lightingInterlace(): LightingInterlaceState | null
 }
 ```
 
@@ -38,6 +40,7 @@ interface Engine {
 | `renderGraphIssues()` | a fresh `RenderGraphIssue[]` | `api.disposed` |
 | `renderGraphStats()` | a fresh `RenderGraphStats` | `api.disposed` |
 | `renderGraphOwnedSetters()` | a fresh `string[]` | `api.disposed` |
+| `lightingInterlace()` | a fresh `LightingInterlaceState`, null before the first submitted frame | `api.disposed` |
 
 ### `renderGraphCatalog()`
 
@@ -160,6 +163,21 @@ not a graph is set.
   `combined = d0·s + (kd·e + s0)·a + em`. Exact formulas: raa-shader
   `src/wgsl/opaque_layers.wgsl`. The forward contributors (sky background, opaque particles,
   fur shells, VG shade) draw into `layerEm` in these modes.
+  `layers-interlaced` (msaa 1) is the 30 Hz half-resolution lighting cadence: the layers of
+  `layers` plus `layerE` every frame, and the signals only at one pixel per 2x2 block every
+  second frame. With n the real-frame counter (the lit scene frame index, advancing only on
+  submitted frames), an R frame (n even) evaluates s, a and (e, w) exactly as `layers-signals`
+  at the pixels with `(x & 1, y & 1) = phase`, `phase = [[0,0],[1,1],[1,0],[0,1]][(n / 2) % 4]`;
+  every other pixel and every pixel of a G frame (n odd) writes `color.a = layerKd.a = -1` and
+  `layerE = (0, 0, 0, -1)` ("no sample"), as do the clears under sky and contributor-only
+  pixels. There is no `layerR`. On a G frame `pass.shadow.csm` renders only its hero layers
+  (local lights), and the primary `pass.ao.gtao`, `pass.shadow.contact` and the `pass.gi.ddgi`
+  screen resolve record nothing, each only while no other enabled reader needs its output
+  (transparent OIT or fur shells with draws, opaque particles, VG shade, sun shafts and the
+  planar reflection keep the passes they read running). The DDGI probe update always runs.
+  `lightingInterlace()` reports the state of the latest submitted frame; lit shaders read it in
+  `FrameGpu.temporal.w` and `compute.wgsl` nodes in `rg_frame.interlace` (bit 0 mode, bit 1 R
+  frame, bits 2 and 3 px and py, bits 4-5 `(n / 2) % 4`).
 
 ## Document format
 

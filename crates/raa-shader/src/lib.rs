@@ -92,6 +92,11 @@ pub const PASS_FORWARD_LAYERS_FS_WGSL: &str = include_str!("wgsl/pass_forward_la
 /// six targets (d0 + s, kd + a, s0, em, e + w, residual).
 pub const PASS_FORWARD_LAYER_SIGNALS_FS_WGSL: &str =
     include_str!("wgsl/pass_forward_layer_signals.wgsl");
+/// Forward `fs_main` of [`VARIANT_FLAG_FORWARD_LAYERS`] |
+/// [`VARIANT_FLAG_FORWARD_LAYER_INTERLACED`]: five targets (d0 + s, kd + a, s0, em, e + w), the
+/// signals only at the phase pixel of an R frame (`FrameGpu.temporal.w`), -1 elsewhere.
+pub const PASS_FORWARD_LAYERS_INTERLACED_FS_WGSL: &str =
+    include_str!("wgsl/pass_forward_layers_interlaced.wgsl");
 /// Shadow caster entry point `vs_main` (no fragment stage); the light view-projection is a
 /// group-2 uniform.
 pub const PASS_SHADOW_WGSL: &str = include_str!("wgsl/pass_shadow.wgsl");
@@ -183,13 +188,22 @@ pub const VARIANT_FLAG_FORWARD_LAYERS: u32 = 1 << 27;
 /// `fs_main` of [`PASS_FORWARD_LAYER_SIGNALS_FS_WGSL`]. Ignored without the layers bit.
 pub const VARIANT_FLAG_FORWARD_LAYER_SIGNALS: u32 = 1 << 26;
 
-/// The forward pass body of a layers variant: [`PASS_FORWARD_WGSL`] up to its `fs_main`, then
-/// [`OPAQUE_LAYERS_WGSL`] and the layers `fs_main` (`signals` selects the six-target one).
-pub fn forward_layers_wgsl(signals: bool) -> String {
+/// With [`VARIANT_FLAG_FORWARD_LAYERS`]: lightingOutput "layers-interlaced", the five-target
+/// `fs_main` of [`PASS_FORWARD_LAYERS_INTERLACED_FS_WGSL`] (takes precedence over
+/// [`VARIANT_FLAG_FORWARD_LAYER_SIGNALS`]). Ignored without the layers bit.
+pub const VARIANT_FLAG_FORWARD_LAYER_INTERLACED: u32 = 1 << 25;
+
+/// The forward pass body of a layers variant of `flags`: [`PASS_FORWARD_WGSL`] up to its
+/// `fs_main`, then [`OPAQUE_LAYERS_WGSL`] and the layers `fs_main` selected by
+/// [`VARIANT_FLAG_FORWARD_LAYER_INTERLACED`] (five targets), else
+/// [`VARIANT_FLAG_FORWARD_LAYER_SIGNALS`] (six targets), else the four-target one.
+pub fn forward_layers_wgsl(flags: u32) -> String {
     let cut = PASS_FORWARD_WGSL
         .find("@fragment\nfn fs_main(")
         .expect("pass_forward.wgsl declares fs_main");
-    let fs = if signals {
+    let fs = if flags & VARIANT_FLAG_FORWARD_LAYER_INTERLACED != 0 {
+        PASS_FORWARD_LAYERS_INTERLACED_FS_WGSL
+    } else if flags & VARIANT_FLAG_FORWARD_LAYER_SIGNALS != 0 {
         PASS_FORWARD_LAYER_SIGNALS_FS_WGSL
     } else {
         PASS_FORWARD_LAYERS_FS_WGSL

@@ -411,7 +411,13 @@ impl FeaturePass for ContactPass {
     }
 
     /// One compute pass of ceil(w / 8) x ceil(h / 8) workgroups (nothing without a camera).
+    /// The primary pass (binding 8) records nothing on a G frame of forward
+    /// "layers-interlaced" (`LightingInterlace::skip_contact`): its texture stays bound and
+    /// published with the previous R frame's contents, which no enabled pass reads then.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        if !self.instance && ctx.lighting.interlace().skip_contact {
+            return Ok(());
+        }
         let has_camera = self
             .state
             .try_borrow()

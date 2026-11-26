@@ -1613,7 +1613,12 @@ impl FeaturePass for DdgiPass {
                 }
             }
         }
-        if let Some((width, height)) = staged.screen {
+        // A G frame of forward "layers-interlaced" (`LightingInterlace::skip_gi_resolve`) reads
+        // no probe GI: the resolve rows keep the previous R frame's values.
+        if let Some((width, height)) = staged
+            .screen
+            .filter(|_| !ctx.lighting.interlace().skip_gi_resolve)
+        {
             let depth = ctx.targets.depth_input(ctx.resources, DDGI_GI_NAME);
             let normal = ctx.targets.normal_input(ctx.resources, DDGI_GI_NAME);
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {

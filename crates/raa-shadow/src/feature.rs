@@ -312,13 +312,16 @@ impl FeaturePass for ShadowPass {
     }
 
     /// Renders the caster draws into the four cascade layers and each occupied hero layer
-    /// (nothing without a caster array).
+    /// (nothing without a caster array). On a G frame of forward "layers-interlaced" whose
+    /// other cascade readers are all off (`LightingInterlace::skip_cascades`, raa-lit) only
+    /// the hero layers, which the local lighting reads every frame, are rendered.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let st = self.state.try_borrow().map_err(|_| state_busy())?;
         let Some(casters) = st.casters.as_ref() else {
             return Ok(());
         };
-        casters.record(ctx.gpu, ctx.encoder, &self.lit, &st.heroes)
+        let cascades = !ctx.lighting.interlace().skip_cascades;
+        casters.record(ctx.gpu, ctx.encoder, &self.lit, &st.heroes, cascades)
     }
 }
 

@@ -92,6 +92,10 @@ pub enum LightingOutput {
     Layers,
     /// Forward only: Layers plus the signals (shadow, AO, probe GI) and the residual.
     LayersSignals,
+    /// Forward only: Layers every frame plus the signals only at the phase pixel of each 2x2
+    /// block on even real frames (raa-pipeline `LightingInterlace`), -1 elsewhere; the signal
+    /// passes are skipped on odd frames.
+    LayersInterlaced,
 }
 
 impl LightingOutput {
@@ -108,6 +112,7 @@ impl LightingOutput {
             Self::Shadow => 19,
             Self::Layers => 20,
             Self::LayersSignals => 21,
+            Self::LayersInterlaced => 22,
         }
     }
 }

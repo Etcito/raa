@@ -27,8 +27,9 @@ use raa_pipeline::{
     FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
 };
 use raa_shader::{
-    LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, PassKind, VARIANT_FLAG_FORWARD_LAYER_SIGNALS,
-    VARIANT_FLAG_FORWARD_LAYERS, VARIANT_FLAG_NO_AREA_LIGHTS, VariantKey,
+    LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, PassKind, VARIANT_FLAG_FORWARD_LAYER_INTERLACED,
+    VARIANT_FLAG_FORWARD_LAYER_SIGNALS, VARIANT_FLAG_FORWARD_LAYERS, VARIANT_FLAG_NO_AREA_LIGHTS,
+    VariantKey,
 };
 
 use crate::handle::{DrawMemo, LitHandle, PipelineSpec};
@@ -59,12 +60,12 @@ const DRAWN_CLASSES: [DrawClass; 2] = [DrawClass::Opaque, DrawClass::Fur];
 /// Material flags that select a pipeline (cull mode), kept in the variant key.
 const VARIANT_FLAGS: u32 = FLAG_DOUBLE_SIDED;
 
-/// Forward lightingOutput "layers" / "layers-signals" (camera forward only; see raa-shader
-/// `opaque_layers.wgsl` for the per-pixel identity). The opaque draws write the HDR chain
+/// Forward lightingOutput "layers" / "layers-signals" / "layers-interlaced" (camera forward
+/// only; see raa-shader `opaque_layers.wgsl` for the per-pixel identity). The opaque draws write the HDR chain
 /// (`color` = d0, alpha s in Signals) and the extra Rgba16Float targets of
 /// [`ForwardLayers::PORTS`] in one pass; the forward contributors (sky background, opaque
 /// particles, fur shells, VG shade, planar reflection composite) then draw into `layerEm` only.
-/// MSAA forward passes refuse both modes.
+/// MSAA forward passes refuse the three modes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ForwardLayers {
     /// The ordinary forward pass (one colour target).
@@ -75,6 +76,12 @@ pub enum ForwardLayers {
     /// Layers plus the signals: `color.a` = s, `layerKd.a` = a, `layerE` = (e, w) and the
     /// recomposition residual `layerR`.
     Signals,
+    /// "layers-interlaced": the layers every frame (`layerKd`, `layerS0`, `layerEm`,
+    /// `layerE`) and the signals of Signals only at the phase pixel of each 2x2 block on an R
+    /// frame (raa-pipeline `LightingInterlace`); every other pixel, every G frame pixel and the
+    /// cleared (sky / contributor-only) pixels hold -1 in `color.a`, `layerKd.a` and
+    /// `layerE.a` (`layerE.rgb` = 0). No residual.
+    Interlaced,
 }
 
 impl ForwardLayers {
@@ -88,6 +95,7 @@ impl ForwardLayers {
         match self {
             ForwardLayers::Off => 0,
             ForwardLayers::Layers => 3,
+            ForwardLayers::Interlaced => 4,
             ForwardLayers::Signals => 5,
         }
     }
@@ -99,6 +107,9 @@ impl ForwardLayers {
             ForwardLayers::Layers => VARIANT_FLAG_FORWARD_LAYERS,
             ForwardLayers::Signals => {
                 VARIANT_FLAG_FORWARD_LAYERS | VARIANT_FLAG_FORWARD_LAYER_SIGNALS
+            }
+            ForwardLayers::Interlaced => {
+                VARIANT_FLAG_FORWARD_LAYERS | VARIANT_FLAG_FORWARD_LAYER_INTERLACED
             }
         }
     }
@@ -440,9 +451,10 @@ struct ForwardPass {
     targets: Option<ForwardTargets>,
     reflection: Option<PlanarTargets>,
     combined_lighting: Option<wgpu::TextureView>,
-    /// The specs of ForwardLayers::Layers (4 targets) and ::Signals (6 targets).
+    /// The specs of ForwardLayers::Layers (4 targets), ::Signals (6) and ::Interlaced (5).
     layer_specs: Specs,
     signal_specs: Specs,
+    interlaced_specs: Specs,
     /// The ForwardLayers::PORTS targets (single sample, HDR_FORMAT) of the current mode and size.
     layers: Vec<wgpu::TextureView>,
 }
@@ -459,6 +471,7 @@ impl ForwardPass {
             combined_lighting: None,
             layer_specs: Specs::new(vec![color_target(HDR_FORMAT); 4]),
             signal_specs: Specs::new(vec![color_target(HDR_FORMAT); 6]),
+            interlaced_specs: Specs::new(vec![color_target(HDR_FORMAT); 5]),
             layers: Vec::new(),
         }
     }
@@ -520,20 +533,34 @@ impl ForwardPass {
             b: 0.0,
             a: 1.0,
         };
+        // Interlaced: the signal alphas of a pixel no opaque draw covers say "no sample".
+        let no_sample = wgpu::Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: -1.0,
+        };
+        let interlaced = mode == ForwardLayers::Interlaced;
         let background = background_clear(ctx.lighting.env().background);
         let n = mode.extra_targets();
         let mut attachments: [Option<wgpu::RenderPassColorAttachment<'_>>; 6] = Default::default();
-        attachments[0] = cleared(destination, opaque_black);
+        attachments[0] = cleared(
+            destination,
+            if interlaced { no_sample } else { opaque_black },
+        );
         for (i, view) in self.layers[..n].iter().enumerate() {
             let clear = match ForwardLayers::PORTS[i] {
                 "layerEm" => background,
+                "layerE" if interlaced => no_sample,
                 "layerE" => wgpu::Color::TRANSPARENT,
+                "layerKd" if interlaced => no_sample,
                 _ => opaque_black,
             };
             attachments[i + 1] = cleared(view, clear);
         }
         let specs = match mode {
             ForwardLayers::Signals => &self.signal_specs,
+            ForwardLayers::Interlaced => &self.interlaced_specs,
             _ => &self.layer_specs,
         };
         {
@@ -759,8 +786,8 @@ impl FeaturePass for ForwardPass {
                 return Err(RaaError::FrameGraph {
                     code: "forward.layers_msaa",
                     message: format!(
-                        "{FORWARD_NAME}: lightingOutput \"layers\" and \"layers-signals\" need \
-                         msaa 1 (the forward pass has {} samples)",
+                        "{FORWARD_NAME}: lightingOutput \"layers\", \"layers-signals\" and \
+                         \"layers-interlaced\" need msaa 1 (the forward pass has {} samples)",
                         self.msaa
                     ),
                 });

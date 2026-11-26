@@ -1,4 +1,5 @@
-// Forward lightingOutput "layers" / "layers-signals" (VARIANT_FLAG_FORWARD_LAYERS): the opaque
+// Forward lightingOutput "layers" / "layers-signals" / "layers-interlaced"
+// (VARIANT_FLAG_FORWARD_LAYERS): the opaque
 // lighting of raa_opaque_lighting split into demodulated layers and per-pixel signals so that,
 // for an opaque lit fragment,
 //
@@ -28,7 +29,8 @@
 //
 // The layers never read the sun shadow, the screen AO or the probe GI ("layers" skips them);
 // "layers-signals" evaluates the signals once more (raa_opaque_signals) and the full
-// raa_opaque_lighting for r.
+// raa_opaque_lighting for r; "layers-interlaced" evaluates them only at the phase pixel of an
+// R frame (pass_forward_layers_interlaced.wgsl) and has no r.
 
 struct RaaOpaqueLayers {
     d0: vec3<f32>,

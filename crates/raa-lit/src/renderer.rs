@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
 use raa_math::{Aabb, Mat4, Vec3};
 use raa_mesh::AttributedMesh;
-use raa_pipeline::{Pipeline, SubmissionState};
+use raa_pipeline::{LightingInterlace, Pipeline, SubmissionState};
 use raa_scene::{Camera, InstanceIndex, RenderList, Scene, frustum_planes};
 use raa_shader::{
     Composer, LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, MaterialFnId, MaterialFnRegistry, SlotProvider,
@@ -118,6 +118,61 @@ pub(crate) const TAA_PASS_NAME: &str = "taa";
 /// entry leaves every viewport with zero current and previous jitter and no accumulation.
 fn jitter_consumer(taa_enabled: Option<bool>) -> bool {
     taa_enabled == Some(true)
+}
+
+/// The enabled pipeline entries that read the sun shadow, contact, screen AO or DDGI screen
+/// resolve outside the camera forward's opaque draws (names of raa-oit, raa-lit's fur shells
+/// and opaque particles contributors, raa-shafts and raa-vg).
+#[derive(Clone, Copy, Debug, Default)]
+struct SignalReaders {
+    /// `transparent.oit`: raa_slot_shadow (cascades x contact) and raa_slot_ao.
+    oit: bool,
+    /// `fur.shells`: raa_slot_shadow and raa_slot_ao.
+    fur: bool,
+    /// `particles.opaque`: raa_slot_shadow and raa_slot_ao.
+    particles: bool,
+    /// `sunshafts`: the cascade layers of raa_shadow_map.
+    shafts: bool,
+    /// `vg.shade`: raa_opaque_lighting (cascades, contact, AO and DDGI resolve).
+    vg_shade: bool,
+}
+
+impl SignalReaders {
+    fn of(p: &Pipeline) -> SignalReaders {
+        let on = |name: &str| p.entry_enabled(name).unwrap_or(false);
+        SignalReaders {
+            oit: on("transparent.oit"),
+            fur: on("fur.shells"),
+            particles: on("particles.opaque"),
+            shafts: on("sunshafts"),
+            vg_shade: on("vg.shade"),
+        }
+    }
+}
+
+/// The forward "layers-interlaced" state of real frame `frame` (the scene frame index). On a
+/// G frame of the mode a signal pass is skipped only while no other reader of its output runs:
+/// OIT and fur shells count only with draws of their class (`any_draws`), the planar
+/// reflection capture reads the cascades and contact (raa_slot_shadow). The cascade hero layers
+/// (local lights) are always rendered, and the DDGI probe update always runs.
+fn interlace_state(
+    enabled: bool,
+    frame: u64,
+    readers: SignalReaders,
+    any_draws: impl Fn(DrawClass) -> bool,
+    planar_reflection: bool,
+) -> LightingInterlace {
+    let mut state = LightingInterlace::new(enabled, frame);
+    if state.generated() {
+        let transparent = readers.oit && any_draws(DrawClass::Transparent);
+        let fur = readers.fur && any_draws(DrawClass::Fur);
+        let slots = transparent || fur || readers.particles || readers.vg_shade;
+        state.skip_cascades = !(slots || readers.shafts || planar_reflection);
+        state.skip_contact = !(slots || planar_reflection);
+        state.skip_ao = !slots;
+        state.skip_gi_resolve = !readers.vg_shade;
+    }
+    state
 }
 
 struct CameraLodInput<'a> {
@@ -400,6 +455,10 @@ pub struct LitRenderer {
     pending_resolve: Option<(u64, SubmissionState, bool)>,
     /// A background that could not reach the pipeline (borrowed), applied at `prepare`.
     pending_background: Option<[f32; 3]>,
+    /// Forward "layers-interlaced" state of the latest prepare, and of the latest invocation
+    /// with an acknowledged submission ([`LitRenderer::lighting_interlace`]).
+    interlace_prepared: LightingInterlace,
+    interlace_submitted: Option<LightingInterlace>,
     /// Bounds last sent to the scene per uploaded sub-mesh; only changes are sent.
     sent_bounds: HashMap<MeshId, Aabb>,
     /// Sub-mesh ids of every uploaded lit mesh, refreshed on upload/update.
@@ -479,6 +538,8 @@ impl LitRenderer {
             readback,
             pending_resolve: None,
             pending_background: None,
+            interlace_prepared: LightingInterlace::default(),
+            interlace_submitted: None,
             sent_bounds: HashMap::new(),
             submeshes: HashMap::new(),
             visible_slots: Vec::new(),
@@ -1047,9 +1108,9 @@ impl LitRenderer {
         }
     }
 
-    /// Selects forward lightingOutput "layers" / "layers-signals" for every later camera
-    /// forward recording ([`ForwardLayers`](crate::ForwardLayers)). The modes need a forward
-    /// pass of 1 sample: with MSAA the forward record refuses them.
+    /// Selects forward lightingOutput "layers" / "layers-signals" / "layers-interlaced" for
+    /// every later camera forward recording ([`ForwardLayers`](crate::ForwardLayers)). The
+    /// modes need a forward pass of 1 sample: with MSAA the forward record refuses them.
     pub fn set_forward_layers(&mut self, mode: crate::ForwardLayers) {
         self.shared.borrow_mut().forward_layers = mode;
     }
@@ -1062,6 +1123,13 @@ impl LitRenderer {
     /// MSAA sample count of the forward pass (1 or 4).
     pub fn forward_msaa(&self) -> u32 {
         self.shared.borrow().msaa()
+    }
+
+    /// The forward "layers-interlaced" state of the latest scene invocation whose frame was
+    /// submitted (`None` before one): mode, real-frame counter n, R/G class, phase and the
+    /// signal passes it skipped. The state of a frame is fixed by its prepare.
+    pub fn lighting_interlace(&self) -> Option<LightingInterlace> {
+        self.interlace_submitted
     }
 
     /// The stored value of feature `id`; false for ignored ids.
@@ -1112,6 +1180,9 @@ impl LitRenderer {
             .try_borrow()
             .map(|p| p.scene_submission())
             .unwrap_or_default();
+        if self.scene_frame.acknowledged != 0 {
+            self.interlace_submitted = Some(self.interlace_prepared);
+        }
         self.scene_frame.finish();
         if let Ok(mut guard) = self.shared.try_borrow_mut() {
             self.scene_frame.flush(&mut guard.store);
@@ -1159,7 +1230,7 @@ impl LitRenderer {
         if let Some((index, observation, submitted)) = self.pending_resolve.take() {
             ReadbackCoordinator::resolve(&self.readback, gpu, index, observation, submitted);
         }
-        let (viewport, display_size, encode_srgb, tiling, taa_enabled) = {
+        let (viewport, display_size, encode_srgb, tiling, taa_enabled, readers) = {
             let p = self.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
             (
                 p.targets().map_or((1, 1), |t| t.size()),
@@ -1167,6 +1238,7 @@ impl LitRenderer {
                 !p.surface_is_srgb(),
                 p.entry_enabled(LIGHT_TILES_NAME).unwrap_or(false),
                 jitter_consumer(p.entry_enabled(TAA_PASS_NAME)),
+                SignalReaders::of(&p),
             )
         };
         if !self.scene_frame.open {
@@ -1396,6 +1468,20 @@ impl LitRenderer {
             }
         }
 
+        let interlace = interlace_state(
+            s.forward_layers == crate::ForwardLayers::Interlaced && s.msaa() == 1,
+            camera.frame_index,
+            readers,
+            |class| s.select.draws(class).iter().any(|d| d.instance_count > 0),
+            s.planar_reflection.is_some(),
+        );
+        self.interlace_prepared = interlace;
+        self.pipeline
+            .try_borrow_mut()
+            .map_err(|_| pipeline_busy())?
+            .lighting_mut()
+            .set_interlace(interlace);
+
         let [active_lights, tile_columns, tile_rows, tile_stride] =
             light_info(
                 self.local_lights.gpu_count(),
@@ -1415,6 +1501,7 @@ impl LitRenderer {
             history_valid: camera.history_valid,
             accumulation_enabled: taa_enabled,
             frame_parity: (camera.frame_index & 1) as u32,
+            interlace: interlace.word(),
             active_lights,
             tile_columns,
             tile_rows,

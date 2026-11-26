@@ -167,11 +167,15 @@ fn direct_sampling_follows_the_nonuniform_loop_rules() {
     }
 }
 
-/// Forward lightingOutput "layers" and "layers-signals" variants compose and validate with the
-/// layered Direct/Ambient providers (over raa-ibl and raa-lit's defaults) for every built-in.
+/// Forward lightingOutput "layers", "layers-signals" and "layers-interlaced" variants compose
+/// and validate with the layered Direct/Ambient providers (over raa-ibl and raa-lit's defaults)
+/// for every built-in.
 #[test]
 fn forward_layer_variants_validate_with_layered_providers() {
-    use raa_shader::{VARIANT_FLAG_FORWARD_LAYER_SIGNALS, VARIANT_FLAG_FORWARD_LAYERS};
+    use raa_shader::{
+        VARIANT_FLAG_FORWARD_LAYER_INTERLACED, VARIANT_FLAG_FORWARD_LAYER_SIGNALS,
+        VARIANT_FLAG_FORWARD_LAYERS,
+    };
     let composer = composer();
     let reg = registry();
     let names = ["raa.standard"]
@@ -182,6 +186,7 @@ fn forward_layer_variants_validate_with_layered_providers() {
         for flags in [
             VARIANT_FLAG_FORWARD_LAYERS,
             VARIANT_FLAG_FORWARD_LAYERS | VARIANT_FLAG_FORWARD_LAYER_SIGNALS,
+            VARIANT_FLAG_FORWARD_LAYERS | VARIANT_FLAG_FORWARD_LAYER_INTERLACED,
             VARIANT_FLAG_FORWARD_LAYERS | FLAG_DOUBLE_SIDED,
         ] {
             let key = VariantKey {

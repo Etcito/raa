@@ -54,13 +54,14 @@ const LOOKS: [(&str, Look); 3] = [
     ("golden", Look::Golden),
 ];
 const SHADING: [(&str, bool); 2] = [("ltc", false), ("formFactor", true)];
-const LIGHTING: [(&str, LightingOutput); 6] = [
+const LIGHTING: [(&str, LightingOutput); 7] = [
     ("combined", LightingOutput::Combined),
     ("direct", LightingOutput::Direct),
     ("indirect", LightingOutput::Indirect),
     ("shadow", LightingOutput::Shadow),
     ("layers", LightingOutput::Layers),
     ("layers-signals", LightingOutput::LayersSignals),
+    ("layers-interlaced", LightingOutput::LayersInterlaced),
 ];
 
 /// The Setting keys of `feature` in catalog key order: the members of its setter's input
@@ -527,12 +528,14 @@ fn desc_apply(h: &mut FeatureHandles<'_>, desc: &Desc) -> Result<(), RaaError> {
                 let layers = match mode {
                     LightingOutput::Layers => raa_lit::ForwardLayers::Layers,
                     LightingOutput::LayersSignals => raa_lit::ForwardLayers::Signals,
+                    LightingOutput::LayersInterlaced => raa_lit::ForwardLayers::Interlaced,
                     _ => raa_lit::ForwardLayers::Off,
                 };
                 if layers != raa_lit::ForwardLayers::Off && lit.forward_msaa() > 1 {
                     return Err(apply_refusal(
                         "lightingOutput",
-                        "\"layers\" and \"layers-signals\" need the forward msaa 1",
+                        "\"layers\", \"layers-signals\" and \"layers-interlaced\" need the \
+                         forward msaa 1",
                     ));
                 }
                 lit.set_forward_layers(layers);
@@ -674,6 +677,8 @@ impl AppliedDescs {
                     LightingOutput::Layers
                 } else if lit.forward_layers() == raa_lit::ForwardLayers::Signals {
                     LightingOutput::LayersSignals
+                } else if lit.forward_layers() == raa_lit::ForwardLayers::Interlaced {
+                    LightingOutput::LayersInterlaced
                 } else if lit.frame_feature(RAA_DIRECT_ONLY_FEATURE)
                     && lit.frame_feature(RAA_INDIRECT_ONLY_FEATURE)
                 {

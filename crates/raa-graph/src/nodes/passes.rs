@@ -542,9 +542,11 @@ fn forward_inputs() -> Vec<PortSpec> {
     ]
 }
 
-/// `color` and the lightingOutput "layers" / "layers-signals" targets (raa-lit
-/// `ForwardLayers::PORTS`, published only in those modes; `layerE` and `layerR` only in
-/// "layers-signals"). Layer formulas: raa-shader `opaque_layers.wgsl`.
+/// `color` and the lightingOutput "layers" / "layers-signals" / "layers-interlaced" targets
+/// (raa-lit `ForwardLayers::PORTS`, published only in those modes; `layerE` in
+/// "layers-signals" and "layers-interlaced", `layerR` only in "layers-signals"). Layer
+/// formulas: raa-shader `opaque_layers.wgsl`; the interlaced cadence:
+/// `pass_forward_layers_interlaced.wgsl`.
 fn forward_outputs() -> Vec<PortSpec> {
     let mut outputs = vec![color_output()];
     for (key, label) in [

@@ -32,7 +32,9 @@ struct FrameGpu {
     camera_jitter: vec4<f32>,
     // Active light count, tile columns, tile rows and tile stride in words.
     light_info: vec4<u32>,
-    // Frame parity, accumulation enabled (0/1), history valid (0/1), reserved zero.
+    // Frame parity, accumulation enabled (0/1), history valid (0/1), forward "layers-interlaced"
+    // word (raa-pipeline LightingInterlace::word: bit 0 mode, bit 1 R frame, bits 2-3 phase
+    // px/py, bits 4-5 lighting frame % 4; 0 with the mode off).
     temporal: vec4<u32>,
     reserved2: array<vec4<f32>, 5>,
 }

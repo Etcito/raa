@@ -252,16 +252,21 @@ impl Casters {
     /// Renders the shadow casters of `lit` into each cascade layer, then into hero layer `h`
     /// for every `h < hero_layers` whose `heroes[h]` is `Some`: the layer is cleared to 1.0,
     /// then every Opaque and Fur draw whose material lacks NO_SHADOW is drawn with the Shadow
-    /// variant of its material function (culling back faces unless DOUBLE_SIDED).
+    /// variant of its material function (culling back faces unless DOUBLE_SIDED). Without
+    /// `cascades` (a G frame of forward "layers-interlaced", nothing reads the cascades) only
+    /// the hero layers are rendered and the cascade layers keep their previous contents.
     pub(crate) fn record(
         &self,
         gpu: &GpuContext,
         encoder: &mut wgpu::CommandEncoder,
         lit: &LitHandle,
         heroes: &[Option<Mat4>; MAX_HERO_LIGHTS],
+        cascades: bool,
     ) -> Result<(), RaaError> {
-        for (i, (view, label)) in self.layers.iter().zip(LABELS).enumerate() {
-            self.record_layer(gpu, encoder, lit, view, label, i)?;
+        if cascades {
+            for (i, (view, label)) in self.layers.iter().zip(LABELS).enumerate() {
+                self.record_layer(gpu, encoder, lit, view, label, i)?;
+            }
         }
         for (h, label) in HERO_LABELS
             .iter()

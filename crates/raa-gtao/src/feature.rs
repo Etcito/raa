@@ -518,7 +518,14 @@ impl FeaturePass for GtaoPass {
 
     /// One compute pass: gtao -> raw, denoise_h raw -> blur, denoise_v blur -> out, each
     /// ceil(w / 8) x ceil(h / 8) workgroups (nothing without a camera).
+    ///
+    /// The primary pass (the `Ao` slot's texture) records nothing on a G frame of forward
+    /// "layers-interlaced" (`LightingInterlace::skip_ao`): the texture stays bound and published
+    /// with the previous R frame's AO, which no enabled pass reads on that frame.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        if !self.instance && ctx.lighting.interlace().skip_ao {
+            return Ok(());
+        }
         let has_camera = self
             .state
             .try_borrow()

@@ -467,8 +467,8 @@ pub(crate) struct LitShared {
     /// True when the latest `LitRenderer::prepare` saw the enabled pipeline entry `taa`
     /// (S43): the prepass then carries `VARIANT_FLAG_MOTION_DEFORM` and the frame is jittered.
     pub(crate) temporal_consumer: bool,
-    /// Forward lightingOutput "layers" / "layers-signals" (camera forward only); set by
-    /// `LitRenderer::set_forward_layers`.
+    /// Forward lightingOutput "layers" / "layers-signals" / "layers-interlaced" (camera
+    /// forward only); set by `LitRenderer::set_forward_layers`.
     pub(crate) forward_layers: crate::passes::ForwardLayers,
     /// The S10 NDC jitter of viewport 0 in the latest `LitRenderer::prepare` ([0, 0] without a
     /// temporal consumer).
