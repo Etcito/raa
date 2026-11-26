@@ -143,3 +143,32 @@ pub fn srgb_oetf(c: f32) -> f32 {
         1.055 * c.powf(1.0 / 2.4) - 0.055
     }
 }
+
+/// Scene-linear radiance (before exposure) at which a neutral grey, alone on a black
+/// background, first reaches the display code `code` (a fraction of white in [0, 1], e.g.
+/// `2.0 / 255.0`) after exposure, the mapper, the look and the sRGB OETF. Radiance below it
+/// shows as less than `code` on an 8 bit display; because the OETF slope is steepest at black,
+/// the same radiance added to a lit surface changes its code by less than `code` too. Local-light
+/// influence radii are derived from it (raa-lit `LightCutoff`). Bisection on the monotone
+/// pipeline; a mapper that never reaches `code` below 64 exposed units returns that bound.
+pub fn visible_radiance(settings: &ToneMapping, code: f32) -> f32 {
+    let scale = settings.exposure_scale().max(f32::MIN_POSITIVE);
+    let code = code.clamp(0.0, 1.0);
+    let shown = |x: f32| {
+        let out = tonemap(settings, [x / scale; 3]);
+        out.iter().map(|c| srgb_oetf(*c)).fold(0.0, f32::max)
+    };
+    let (mut lo, mut hi) = (0.0_f32, 64.0_f32);
+    if shown(hi) < code {
+        return hi / scale;
+    }
+    for _ in 0..48 {
+        let mid = 0.5 * (lo + hi);
+        if shown(mid) >= code {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi / scale
+}

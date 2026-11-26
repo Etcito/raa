@@ -195,11 +195,19 @@ impl WebApp for EngineApp {
             let p = pipeline.try_borrow().map_err(|_| pipeline_busy())?;
             TonemapPass::new(gpu, &p)
         };
-        tonemap.set(ToneMapping {
+        let initial_tonemap = ToneMapping {
             mapper: o.tone_mapper,
             exposure_ev: o.exposure_ev,
             ..ToneMapping::default()
-        })?;
+        };
+        tonemap.set(initial_tonemap)?;
+        lit.local_lights_mut().set_cutoff(raa_lit::LightCutoff {
+            threshold: raa_lit::DEFAULT_DISPLAY_THRESHOLD,
+            min_radiance: raa_tonemap::curves::visible_radiance(
+                &initial_tonemap,
+                raa_lit::DEFAULT_DISPLAY_THRESHOLD,
+            ),
+        });
         pipeline
             .try_borrow_mut()
             .map_err(|_| pipeline_busy())?

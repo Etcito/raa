@@ -10,6 +10,7 @@
 use raa_core::RaaError;
 use raa_math::{Mat4, Vec3};
 
+use crate::light_cutoff::LightCutoff;
 use crate::local_light::{LightHandle, LocalLight, MAX_LIGHT_HANDLE};
 
 use raa_shader::LIGHT_GPU_SIZE;
@@ -42,6 +43,7 @@ pub struct LocalLights {
     len: usize,
     next_handle: Option<LightHandle>,
     dirty: bool,
+    cutoff: LightCutoff,
 }
 
 impl Default for LocalLights {
@@ -58,6 +60,7 @@ impl LocalLights {
             len: 0,
             next_handle: Some(1),
             dirty: false,
+            cutoff: LightCutoff::default(),
         }
     }
 
@@ -228,6 +231,29 @@ impl LocalLights {
         self.len as u32
     }
 
+    /// Records the GPU loops must walk: one past the last light that is not off under the
+    /// cutoff. Trailing off lights cost nothing; off lights between live ones stay (dense
+    /// record indices are stable) and are skipped by their zero radiance.
+    pub fn gpu_count(&self) -> u32 {
+        self.entries[..self.len]
+            .iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, entry)| !world_desc(entry).with_cutoff(self.cutoff).is_off())
+            .map(|(index, _)| index as u32 + 1)
+            .last()
+            .unwrap_or(0)
+    }
+
+    /// Lights switched off by authoring (intensity 0) or by the display cutoff.
+    pub fn off_count(&self) -> u32 {
+        self.entries[..self.len]
+            .iter()
+            .flatten()
+            .filter(|entry| world_desc(entry).with_cutoff(self.cutoff).is_off())
+            .count() as u32
+    }
+
     /// Number of lights currently attached to an instance-group parent.
     pub fn attached_count(&self) -> u32 {
         self.entries[..self.len]
@@ -248,7 +274,9 @@ impl LocalLights {
             .flatten()
             .zip(out.chunks_exact_mut(LIGHT_GPU_SIZE))
         {
-            world_desc(entry).write_gpu(record.try_into().expect("one light record"));
+            world_desc(entry)
+                .with_cutoff(self.cutoff)
+                .write_gpu(record.try_into().expect("one light record"));
         }
     }
 
@@ -259,7 +287,21 @@ impl LocalLights {
             .iter()
             .flatten()
             .enumerate()
-            .map(|(index, entry)| (index, entry.handle, world_desc(entry)))
+            .map(|(index, entry)| (index, entry.handle, world_desc(entry).with_cutoff(self.cutoff)))
+    }
+
+    /// The influence cutoff applied to every record and world descriptor this registry yields.
+    pub fn cutoff(&self) -> LightCutoff {
+        self.cutoff
+    }
+
+    /// Replaces the influence cutoff (scene exposure or threshold changed); the next frame
+    /// re-uploads the records only when the setting differs.
+    pub fn set_cutoff(&mut self, cutoff: LightCutoff) {
+        if cutoff != self.cutoff {
+            self.cutoff = cutoff;
+            self.dirty = true;
+        }
     }
 
     /// Whether a registry mutation requires its backing GPU data to be refreshed.
@@ -640,5 +682,37 @@ mod tests {
             world_desc(lights.entries[0].as_ref().unwrap()).direction,
             [1.0, 0.0, 0.0]
         ));
+    }
+
+    #[test]
+    fn cutoff_shortens_dim_lights_switches_off_negligible_ones_and_trims_the_gpu_count() {
+        let mut lights = LocalLights::new();
+        let live = lights
+            .add(LocalLight { intensity: 0.05, range: 50.0, ..LocalLight::default() })
+            .unwrap();
+        let off = lights
+            .add(LocalLight { intensity: 0.0, ..LocalLight::default() })
+            .unwrap();
+        let tiny = lights
+            .add(LocalLight { intensity: 1e-6, ..LocalLight::default() })
+            .unwrap();
+        let mut out = [0xff; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE];
+        lights.write_gpu(&mut out);
+        let range = gpu_float(&out[..LIGHT_GPU_SIZE], 12);
+        assert!(range < 50.0 && range > 6.0, "dim light shortened: {range}");
+        for record in out[LIGHT_GPU_SIZE..3 * LIGHT_GPU_SIZE].chunks_exact(LIGHT_GPU_SIZE) {
+            assert_eq!([16, 20, 24].map(|o| gpu_float(record, o)), [0.0; 3], "off light");
+        }
+        assert_eq!((lights.active_count(), lights.gpu_count(), lights.off_count()), (3, 1, 2));
+        assert_eq!(lights.get(live).unwrap().range, 50.0, "authored value is kept");
+        assert!(lights.world_lights().filter(|(_, h, l)| (*h == off || *h == tiny) && l.is_off()).count() == 2);
+        lights.clear_dirty();
+        lights.set_cutoff(lights.cutoff());
+        assert!(!lights.is_dirty(), "same cutoff changes nothing");
+        lights.set_cutoff(crate::LightCutoff::OFF);
+        assert!(lights.is_dirty());
+        lights.write_gpu(&mut out);
+        assert_eq!(gpu_float(&out[..LIGHT_GPU_SIZE], 12), 50.0);
+        assert_eq!(lights.gpu_count(), 3, "without the cutoff the tiny light is live again");
     }
 }

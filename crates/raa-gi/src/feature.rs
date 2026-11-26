@@ -802,7 +802,7 @@ fn lighting_signature(
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     let lights = lit.local_lights();
     lights.write_gpu(scratch);
-    let used = (lights.active_count() as usize).min(raa_shader::MAX_LOCAL_LIGHTS)
+    let used = (lights.gpu_count() as usize).min(raa_shader::MAX_LOCAL_LIGHTS)
         * raa_shader::LIGHT_GPU_SIZE;
     let sun = sun_direction
         .into_iter()

@@ -415,7 +415,8 @@ impl HeroSelector {
         let limit = (settings.hero_count as usize).min(MAX_HERO_LIGHTS);
         self.candidates.clear();
         for (_, handle, light) in lights.world_lights() {
-            if !matches!(light.kind, LocalLightKind::Area) {
+            // An off light (or one below the display cutoff) takes no hero shadow map.
+            if !matches!(light.kind, LocalLightKind::Area) || light.is_off() {
                 continue;
             }
             let position = Vec3::from_array(light.position);

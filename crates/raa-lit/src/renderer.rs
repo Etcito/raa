@@ -1380,7 +1380,7 @@ impl LitRenderer {
         }
 
         let [active_lights, tile_columns, tile_rows, tile_stride] =
-            light_info(self.local_lights.active_count(), viewport, tiling);
+            light_info(self.local_lights.gpu_count(), viewport, tiling);
         let mut params = FrameParams {
             viewport,
             encode_srgb,

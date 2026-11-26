@@ -147,6 +147,7 @@ impl Engine {
                 look: raa_tonemap::Look::None,
                 dither: false,
             })?;
+            crate::api::m28_lights::web::sync_light_cutoff(st);
             Ok(())
         })
     }

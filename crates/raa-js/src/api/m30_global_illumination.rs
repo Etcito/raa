@@ -463,7 +463,7 @@ mod web {
             gi.set_view(&camera, viewport0(st, input), submitted);
         }
         gi.set_sun(&st.scene.light);
-        gi.set_local_light_count(st.lit.local_lights().active_count());
+        gi.set_local_light_count(st.lit.local_lights().gpu_count());
         if st.scene_invocation.is_discontinuous(0) {
             gi.invalidate_history();
         }
