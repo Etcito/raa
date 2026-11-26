@@ -293,6 +293,20 @@ fn trace_base_color(
     }))
 }
 
+/// `diffuseTransmission` (weight in [0, 1]) and `diffuseTransmissionColor` (linear RGB in
+/// [0, 1]): the opaque thin-translucency term of `raa_lit::SurfaceMaterial`
+/// (`diffuse_transmission`, `diffuse_transmission_color`); absent keys keep the defaults (0,
+/// white). Range errors surface as `material.invalid` from the material validation.
+fn diffuse_transmission(desc: &JsValue, m: &mut raa_lit::SurfaceMaterial) -> Result<(), RaaError> {
+    if let Some(weight) = optional_f32(desc, "diffuseTransmission")? {
+        m.diffuse_transmission = weight;
+    }
+    if let Some(color) = optional_vec3(desc, "diffuseTransmissionColor")? {
+        m.diffuse_transmission_color = color;
+    }
+    m.validate()
+}
+
 #[wasm_bindgen(js_class = Engine)]
 impl Engine {
     /// Adds a surface material from a `SurfaceMaterialDesc` and returns its material handle
@@ -306,6 +320,7 @@ impl Engine {
             let mut m = map_surface(&d, st)?;
             m.data = surface_data(&desc)?;
             m.trace_base_color = trace_base_color(&desc, m.base_color)?;
+            diffuse_transmission(&desc, &mut m)?;
             if optional_bool(&desc, "unlit", false)? {
                 m.flags |= raa_lit::FLAG_UNLIT;
             }
@@ -340,6 +355,7 @@ impl Engine {
             let mut m = map_surface(&d, st)?;
             m.data = surface_data(&desc)?;
             m.trace_base_color = trace_base_color(&desc, m.base_color)?;
+            diffuse_transmission(&desc, &mut m)?;
             if optional_bool(&desc, "unlit", false)? {
                 m.flags |= raa_lit::FLAG_UNLIT;
             }
