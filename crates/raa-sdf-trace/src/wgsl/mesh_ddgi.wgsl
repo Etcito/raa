@@ -633,23 +633,34 @@ fn ddgi_max3(v: vec3<f32>) -> f32 {
 fn ddgi_hysteresis(age: u32, fresh: bool, change: f32) -> f32 {
     let a = f32(age);
     var h = min(ddgi_params.tuning.x, a / (a + 1.0));
-    // Young groups: short window, see `ddgi_progressive`.
-    if a < ddgi_params.sampling.z { h = min(h, 0.8); }
+    h = ddgi_young(h, a);
     h = select(h, 0.0, fresh);
     if change > ddgi_params.tuning.z { h = max(0.0, h - 0.15); }
     return h;
 }
 
-// Start of a group under the time-based blends: a running mean of its first updates, capped at
-// a short exponential window (weight 0.8) until the group counts as converged (`sampling.z`
-// updates). The early updates of a probe are stale by construction (each bounce generation
-// arrives one update later and the old value of an invalidated group is a 2-update prior): a
-// plain running mean keeps 1/n of them, the window lets them decay geometrically.
+// Start of a group under the time-based blends: a running mean of its first updates under the
+// young caps of `ddgi_young`. The early updates of a probe are stale by construction (each
+// bounce generation arrives one update later and the old value of an invalidated group is a
+// prior from before the change): a plain running mean keeps 1/n of them.
 fn ddgi_progressive(h: f32, age: u32, fresh: bool) -> f32 {
     let a = f32(age);
-    var w = min(h, a / (a + 1.0));
-    if a < ddgi_params.sampling.z { w = min(w, 0.8); }
-    return select(w, 0.0, fresh);
+    return select(ddgi_young(min(h, a / (a + 1.0)), a), 0.0, fresh);
+}
+
+// Updates of a group's quick phase (the scheduler's QUICK_AGE): an invalidation caps a group's
+// age at 2..12 so its old value is a prior worth that many updates, but that prior is wrong
+// (the light moved) and under a running mean 2/(2+n) of it survives n updates (25% after the
+// quick phase, the room lit through a door that stays a fifth too bright after a sun turn).
+const DDGI_QUICK_AGE: f32 = 8.0;
+
+// Caps the blend weight `h` of a group at age `a`: 0.5 during the quick phase (the prior and
+// the stale bounces of the first updates halve per update: 1.6% left after six), 0.8 until it
+// counts as converged (`sampling.z` updates), so stale early updates decay geometrically.
+fn ddgi_young(h: f32, a: f32) -> f32 {
+    if a < DDGI_QUICK_AGE { return min(h, 0.5); }
+    if a < ddgi_params.sampling.z { return min(h, 0.8); }
+    return h;
 }
 
 // Seconds since the probe's previous update: the job's 7-bit log code (4 ms x 2^(q/8)).
