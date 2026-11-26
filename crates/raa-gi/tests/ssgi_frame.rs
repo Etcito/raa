@@ -287,20 +287,18 @@ fn disabling_gi_ssgi_drops_its_bytes_and_stays_valid() {
         skip(test, "software_gpu returned None");
         return;
     };
-    // The reference is the same rig with screen space off, so no SSGI bytes are allocated.
+    // The reference is the same rig with screen space off, so no SSGI bytes are allocated. It
+    // runs as many frames as the SSGI rig: since 168067a4 the lit HDR history is a submission
+    // pair (gi.screen wants it too), whose second texture exists only from the third frame.
     let mut reference = Rig::new(&gpu, false);
-    let off = reference.run(&gpu, 2).allocated_bytes;
+    let off = reference.run(&gpu, 4).allocated_bytes;
 
     let mut rig = Rig::new(&gpu, true);
     let on = rig.run(&gpu, 4).allocated_bytes;
-    // Since 168067a4 the GI feature keeps the previous-lit HDR history only while a part wants
-    // it (gi.ssgi does): against a rig that never ran SSGI, the SSGI cost also holds that
-    // Rgba16Float viewport texture (8 B per pixel).
-    let lit_history = u64::from(SIZE.0) * u64::from(SIZE.1) * 8;
     assert_eq!(
         on.checked_sub(off),
-        Some(ssgi_bytes(SIZE) + lit_history),
-        "the SSGI bytes of {SIZE:?} plus the lit history: {on} against {off}"
+        Some(ssgi_bytes(SIZE)),
+        "the SSGI bytes of {SIZE:?}: {on} against {off}"
     );
     rig.set_pass(false);
     let disabled = rig.run(&gpu, 2).allocated_bytes;

@@ -130,7 +130,7 @@ fn null_a_wrong_type_and_an_unknown_key_refuse_with_the_key_name() {
 }
 
 #[test]
-fn a_debug_view_outside_the_five_names_refuses() {
+fn a_debug_view_outside_the_six_names_refuses() {
     let (code, message) = refusal(parse_settings_patch(&entries(&[(
         "debugView",
         WireValue::Text("grid".to_string()),
@@ -138,7 +138,8 @@ fn a_debug_view_outside_the_five_names_refuses() {
     assert_eq!(code, "vg.invalid");
     assert_eq!(
         message,
-        "debugView: must be none, clusters, lod, raster or occlusion, got grid"
+        // 'instances' since 66932f25.
+        "debugView: must be none, clusters, lod, raster, occlusion or instances, got grid"
     );
 }
 

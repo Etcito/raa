@@ -17,9 +17,10 @@ fn luminance_weights() {
 
 #[test]
 fn bin_index_floor_and_range() {
-    assert_eq!(bin_index(9e-6), None);
-    assert_eq!(bin_index(1e-5), Some(0));
-    assert_eq!(bin_index(1.0), Some(56));
+    // log2 range -20..10 over 128 bins, luminance floor 1e-7 (82e99f15).
+    assert_eq!(bin_index(9e-8), None);
+    assert_eq!(bin_index(1e-7), Some(0));
+    assert_eq!(bin_index(1.0), Some(84));
     assert_eq!(bin_index(1024.0), Some(127));
     assert_eq!(bin_index(1e6), Some(127));
 }
@@ -30,7 +31,8 @@ fn band_average_two_bins() {
     hist[0] = 10;
     hist[127] = 10;
     let avg = band_average(&hist, 0.2, 0.7).expect("non-empty");
-    close(avg, (-0.7859375f32).exp2());
+    // (6 * -19.8828125 + 4 * 9.8828125) / 10
+    close(avg, (-7.9765625f32).exp2());
 }
 
 #[test]
@@ -39,7 +41,8 @@ fn band_average_cuts_bins_in_half() {
     hist[10] = 2;
     hist[20] = 2;
     let avg = band_average(&hist, 0.25, 0.75).expect("non-empty");
-    close(avg, (-5.8203125f32).exp2());
+    // (-17.5390625 + -15.1953125) / 2
+    close(avg, (-16.3671875f32).exp2());
 }
 
 #[test]

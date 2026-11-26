@@ -266,13 +266,19 @@ fn assert_weather_boundary(wgsl: &str, label: &str, csm: bool) {
         wgsl.contains("textureLoad(raa_cloud_transmittance, vec2<i32>(0, 0), 1, 0)"),
         "{label}"
     );
+    // CSM: the planar-capture path (67229f37, mirror reflections) shares one cloud term, then
+    // the cleared-shadow and cascade paths each apply it once.
     let calls = wgsl.matches("raa_cloud_shadow(world_pos)").count();
     assert_eq!(
         calls,
-        if csm { 2 } else { 1 },
+        if csm { 3 } else { 1 },
         "{label}: shadow result paths"
     );
     if csm {
+        assert!(
+            wgsl.contains("let cloud = raa_cloud_shadow(world_pos);"),
+            "{label}"
+        );
         assert!(
             wgsl.contains("return contact * raa_cloud_shadow(world_pos);"),
             "{label}"

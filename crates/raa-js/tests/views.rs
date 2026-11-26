@@ -221,7 +221,11 @@ fn sky_views_share_snapshot_and_precede_lit_preparation() {
     assert!(prepare.contains("v.camera(index)"));
     assert!(prepare.contains("camera.set_viewport(size.0, size.1)"));
     assert!(prepare.contains("st.scene_invocation.is_discontinuous(index)"));
-    assert!(prepare.contains("st.view_cameras[index].is_some_and"));
+    // Viewport camera cuts are marked by setViewportCamera/setViewports (168067a4), not by
+    // comparing a cached camera here.
+    assert!(!prepare.contains("view_cameras"));
+    let m21 = include_str!("../src/api/m21_views.rs");
+    assert!(m21.contains("st.scene_invocation.discontinuity(index as usize);"));
     assert!(prepare.contains("sky.set_view(index as u32, &camera, !cut)"));
     assert!(!prepare.contains("advance_frame"));
     assert!(!prepare.contains("scene_invocation.prepare("));

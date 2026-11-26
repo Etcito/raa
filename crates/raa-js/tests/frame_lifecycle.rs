@@ -289,7 +289,9 @@ fn sky_identity_survives_skipped_failed_and_partial_submissions() {
         history.begin();
         history.finish(ok, submission);
     }
-    assert_eq!(history.begin(), 2, "submission history remains independent");
+    // Only the third invocation really submitted (168067a4: pending views are no longer
+    // acknowledged), so the scene index advanced once while the sky identity reached 4.
+    assert_eq!(history.begin(), 1, "submission history remains independent");
     id = u64::MAX;
     assert_eq!(
         state::next_sky_invocation(&mut id).unwrap_err().code(),

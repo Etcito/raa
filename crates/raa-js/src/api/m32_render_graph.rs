@@ -12,13 +12,16 @@
 // are dead in one of the two builds.
 #![allow(dead_code)]
 
+#[cfg(target_arch = "wasm32")]
 use raa_graph::catalog::Catalog;
 use raa_graph::error::{Issue, Severity, Stage};
 use raa_graph::exec::{GraphExecutor, NodeStats, ResourceStat, SetResult};
 use raa_loader::json::JsonValue;
 
 /// The render graph state installed into the FeatureMap: the executor that owns the active graph
-/// and the catalog its plan was validated against.
+/// and the catalog its plan was validated against. wasm32 only: its models are GPU objects of the
+/// wasm32 `prediction_model` module, and `tests/render_graph.rs` includes this file natively.
+#[cfg(target_arch = "wasm32")]
 pub(crate) struct RenderGraphState {
     pub(crate) executor: GraphExecutor,
     pub(crate) catalog: Catalog,

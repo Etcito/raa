@@ -24,11 +24,15 @@ fn install_file_pins_the_taa_install() {
 
 #[test]
 fn pipeline_pins_the_per_view_history() {
+    // Since 168067a4 each viewport's temporary pipeline installs its own TAA (no handle kept in
+    // ViewPost) and a camera cut reaches its history through the lit scene-view discontinuity,
+    // cleared only by a real submission.
     let src = include_str!("../src/api/m07_pipeline.rs");
     for needle in [
-        "taa: raa_taa::TaaHandle",
-        "raa_taa::TaaFeature::install",
-        "post.taa.invalidate",
+        "raa_taa::TaaFeature::install(gpu, &temp, &frame)?;",
+        "p.set_view_passes(posts.0.len(), &mut temp.borrow_mut());",
+        "st.scene_invocation.is_discontinuous(index)",
+        "st.lit.prepare_scene_view(index, discontinuity)",
     ] {
         assert!(src.contains(needle), "m07_pipeline.rs lacks `{needle}`");
     }

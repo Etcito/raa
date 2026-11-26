@@ -52,8 +52,10 @@ fn registry_declares_a_path_module_per_file() {
     let reg = out_file("api_registry.rs");
     for stem in source_stems() {
         assert!(reg.contains(&format!("mod {stem};")), "no mod {stem}");
+        // build.rs writes the canonical path with `{:?}`: `/` separators on Unix, escaped `\\`
+        // on Windows.
         assert!(
-            reg.contains(&format!("/{stem}.rs\"]")),
+            reg.contains(&format!("/{stem}.rs\"]")) || reg.contains(&format!("\\\\{stem}.rs\"]")),
             "no #[path] for {stem}"
         );
     }
@@ -175,12 +177,20 @@ fn registry_calls_install_and_frame_in_file_order() {
 #[test]
 fn engine_wraps_render_and_probe_with_the_scene_invocation_boundary() {
     let src = include_str!("../src/engine.rs");
-    assert_eq!(src.matches("self.begin_scene_invocation()?;").count(), 2);
+    // Three boundaries: render_frame (render, renderInstrumented and the capture paths go
+    // through it, 028f0782), produceReal and probeNonEmpty.
+    assert_eq!(src.matches("self.begin_scene_invocation()").count(), 3);
     assert_eq!(
         src.matches("self.finish_scene_invocation(result.is_ok());")
             .count(),
-        2
+        3
     );
+    let render_frame = &src[src.find("fn render_frame(").expect("render_frame")..];
+    let render_frame = &render_frame[..render_frame.find("\n    }\n").expect("render_frame body")];
+    assert!(render_frame.contains("self.begin_scene_invocation()?;"));
+    assert!(render_frame.contains("self.finish_scene_invocation(result.is_ok());"));
+    assert!(src.contains("self.render_frame(now_ms, None).map_err(|e| js_err(&e))"));
+    assert!(src.contains("self.render_frame(now_ms, Some(&mut timing))"));
     for needle in [
         ".begin_scene_submission()",
         ".begin_scene_frame(index)",
@@ -196,8 +206,7 @@ fn engine_wraps_render_and_probe_with_the_scene_invocation_boundary() {
     let pipeline = include_str!("../src/api/m07_pipeline.rs");
     for needle in [
         "st.lit.prepare_scene_view(index, discontinuity)",
-        "st.scene_invocation.prepare(index)",
-        "st.scene_invocation.discontinuity(index)",
+        "st.scene_invocation.is_discontinuous(index)",
     ] {
         assert!(pipeline.contains(needle), "m07 lacks `{needle}`");
     }
