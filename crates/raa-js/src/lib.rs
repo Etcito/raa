@@ -41,9 +41,11 @@ pub(crate) mod api {
     pub(crate) use m21_views::ViewsState;
 }
 
-/// Module init: routes every wasm panic message to `console.error` so a panic names its
-/// cause instead of surfacing as a bare `RuntimeError: unreachable` (same behaviour as
-/// `console_error_panic_hook`, without the extra dependency). Runs once at instantiation.
+/// Module init: routes every wasm panic message to `console.error`, followed by the wasm call
+/// stack (function names come from the name section the `wasm-release` profile keeps), so a
+/// panic names its cause and location instead of surfacing as a bare
+/// `RuntimeError: unreachable` (same behaviour as `console_error_panic_hook`, without the
+/// extra dependency). Runs once at instantiation.
 #[cfg(target_arch = "wasm32")]
 mod panic_hook {
     use wasm_bindgen::prelude::*;
@@ -57,7 +59,12 @@ mod panic_hook {
     #[wasm_bindgen(start)]
     fn install_panic_hook() {
         std::panic::set_hook(Box::new(|info| {
-            console_error(&format!("raa-js wasm panic: {info}"));
+            let error = js_sys::Error::new("raa-js wasm panic");
+            let stack = js_sys::Reflect::get(&error, &JsValue::from_str("stack"))
+                .ok()
+                .and_then(|stack| stack.as_string())
+                .unwrap_or_default();
+            console_error(&format!("raa-js wasm panic: {info}\n{stack}"));
         }));
     }
 }
