@@ -105,6 +105,7 @@ export interface FoliageState {
 
 export interface Engine {
   /**
+   * Handoff: 9140 'Coordinate foliage presentations in the game engine' takes from packages/raa/types/m7-foliage.d.ts: prepareFoliage, removeFoliage, setFoliageGroup, foliageGroupState, FoliageMode, FoliageDesc, FoliageAssetInfo, FoliageGroupDesc, FoliageState
    * Prepares a foliage asset from `desc` asynchronously. Invalid descriptors refuse with
    * `foliage.invalid` before any mutation; execution failures reject with
    * `foliage.bake_failed`. The material lease is borrowed, not released.
