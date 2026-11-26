@@ -330,7 +330,14 @@ mod web {
             return Ok(());
         };
         let camera = st.scene.camera;
-        let viewport = viewport0(st, input);
+        // An explicit scene extent (temporal upscaling) draws the scene smaller than the
+        // canvas: the visibility buffer must match the prepass it merges into, as GI's grid
+        // does, or the merge reads its top-left part and virtualized geometry appears scaled
+        // about that corner, drifting against the camera.
+        let viewport = crate::api::m32_render_graph::web::graph_state(st)
+            .ok()
+            .and_then(|graph| graph.explicit_scene_size)
+            .unwrap_or_else(|| viewport0(st, input));
         let submitted = submitted_views(st);
         if st.scene_invocation.is_discontinuous(0) {
             vg.invalidate_history();
