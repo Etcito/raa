@@ -35,6 +35,11 @@ use crate::billboard_bake::{
 use crate::billboard_targets::BillboardTargets;
 use crate::contributor::ForwardContributor;
 use crate::extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
+use crate::foliage_bake::{
+    FoliageAsset, FoliageBakeSettings, FoliageBakeState, bake_foliage, check_material,
+    publish_foliage, retire_foliage,
+};
+use crate::foliage_resources::FoliageSource;
 use crate::frame::{FRAME_GPU_SIZE, FrameParams, write_frame_gpu};
 use crate::frame_history::{CameraHistory, FrameHistory, MAX_VIEWS, frame_jitter};
 use crate::handle::{LitHandle, LitShared};
@@ -420,6 +425,9 @@ pub struct LitRenderer {
     stochastic_selectors: [StochasticSelector; MAX_VIEWS],
     /// Mid-tier slots occupied by the most recently prepared view (0 before any prepare).
     active_area_stochastic: u32,
+    /// Latest requested foliage generation per material and the proxy meshes published by
+    /// pending [`LitRenderer::prepare_foliage`] futures since the last frame.
+    foliage_bakes: Rc<RefCell<FoliageBakeState>>,
 }
 
 // Keeps partial atlas allocations private to the bake until successful completion.
@@ -772,6 +780,7 @@ impl LitRenderer {
             area_stochastic_settings: StochasticShadowSettings::default(),
             stochastic_selectors: std::array::from_fn(|_| StochasticSelector::new()),
             active_area_stochastic: 0,
+            foliage_bakes: Rc::new(RefCell::new(FoliageBakeState::default())),
         };
         install_passes(pipeline, renderer.handle(), renderer.contributors())?;
         Ok(renderer)
@@ -827,6 +836,89 @@ impl LitRenderer {
         self.shared.borrow_mut().meshes.remove(id);
         self.shared.borrow_mut().remove_mesh_colors(id);
         self.submeshes.remove(&id);
+    }
+
+    // ---- foliage bake (m7-bake-service) ----
+
+    /// Prepares one native foliage generation of `source` for the compiled LOD1
+    /// `settings.material` and resolves to the published [`FoliageAsset`].
+    ///
+    /// Settings, the source (non-empty, generation equal to `settings.params.generation`)
+    /// and the material lease (live, with the '97. M7 foliage material data' envelope read
+    /// through [`LitRenderer::material_data`]'s store) are validated before any allocation.
+    /// The future owns every submission and partial allocation and holds no renderer borrow
+    /// across an await; a failure or a dropped future releases them. The asset is published
+    /// atomically (proxy mesh upload, then `LitHandle::set_foliage`) only after GPU
+    /// completion and only while this is the material's newest generation; source draws are
+    /// untouched until then. The upstream entry points are
+    /// `crates/raa-lit/src/foliage_resources.rs:301 FoliageResources::new`,
+    /// `crates/raa-lit/src/foliage_reference.rs:409 render_foliage_references`,
+    /// `crates/raa-lit/src/foliage_reference.rs:627 pack_foliage_layers`,
+    /// `crates/raa-lit/src/foliage_hull.rs:248 build_foliage_hull`,
+    /// `crates/raa-lit/src/foliage_stochastic.rs:74 build_stochastic_foliage`,
+    /// `crates/raa-lit/src/foliage_optimize.rs:1026 optimize_foliage` and
+    /// `crates/raa-lit/src/handle.rs:2151 LitHandle::set_foliage`.
+    ///
+    /// Handoff: 'Expose asynchronous foliage preparation to JavaScript' calls
+    /// [`LitRenderer::prepare_foliage`] with the FoliageSource it resolved through
+    /// `LitHandle::foliage_source` (handoff at `crates/raa-lit/src/handle.rs` on
+    /// `LitHandle::foliage_source`) and [`LitRenderer::release_foliage`] before releasing
+    /// the material lease; today they publish and retire one generation as described.
+    pub fn prepare_foliage(
+        &mut self,
+        gpu: &GpuContext,
+        source: FoliageSource,
+        settings: FoliageBakeSettings,
+    ) -> impl std::future::Future<Output = Result<FoliageAsset, RaaError>> + 'static {
+        let checked = (|| {
+            let route = settings.validate()?;
+            crate::foliage_bake::validate_source(&source, &settings.params)?;
+            check_material(&self.shared.borrow(), settings.material)?;
+            Ok(route)
+        })();
+        if checked.is_ok() {
+            self.foliage_bakes
+                .borrow_mut()
+                .begin(settings.material, settings.params.generation);
+        }
+        let gpu = gpu.clone();
+        let shared = Rc::clone(&self.shared);
+        let state = Rc::clone(&self.foliage_bakes);
+        let lit = self.handle();
+        async move {
+            let route = checked?;
+            let completed = bake_foliage(gpu.clone(), lit.clone(), source, settings, route).await?;
+            publish_foliage(&gpu, &shared, &lit, &state, &settings, completed)
+        }
+    }
+
+    /// Retires `asset`: detaches its material association, removes its proxy mesh, then
+    /// drops its resource generation (submitted work keeps it alive until completion). The
+    /// borrowed material and its data block are never removed.
+    pub fn release_foliage(&mut self, asset: FoliageAsset) {
+        let lit = self.handle();
+        let shared = Rc::clone(&self.shared);
+        let mesh = asset.mesh;
+        retire_foliage(
+            asset.resources,
+            || {
+                let _ = lit.set_foliage(asset.material, None);
+            },
+            || {
+                let mut s = shared.borrow_mut();
+                s.meshes.remove(mesh);
+                s.remove_mesh_colors(mesh);
+            },
+        );
+        self.submeshes.remove(&mesh);
+    }
+
+    /// Registers the sub-meshes of proxy meshes published since the last frame.
+    fn refresh_published_foliage(&mut self) {
+        let published = self.foliage_bakes.borrow_mut().take_published();
+        for id in published {
+            self.refresh_submeshes(id);
+        }
     }
 
     // ---- billboard bake ----
@@ -1625,6 +1717,7 @@ impl LitRenderer {
         if let Some(rgb) = self.pending_background {
             self.set_background(rgb);
         }
+        self.refresh_published_foliage();
         if let Some((index, observation, submitted)) = self.pending_resolve.take() {
             ReadbackCoordinator::resolve(&self.readback, gpu, index, observation, submitted);
         }
