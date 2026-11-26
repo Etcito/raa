@@ -4,8 +4,8 @@
 //! extension `ddgi` (exec_ext/ddgi.rs) converts them with [`settings_from_params`].
 
 use raa_sdf_trace::mesh::{
-    DDGI_GI_NAME, DDGI_MAX_CASCADES, DdgiBlend, DdgiDebug, DdgiFar, DdgiInvalidation, DdgiRelocation,
-    DdgiSettings,
+    DDGI_GI_NAME, DDGI_MAX_CASCADES, DdgiBlend, DdgiDebug, DdgiFar, DdgiInvalidation,
+    DdgiRelocation, DdgiSettings,
 };
 
 use crate::catalog::{
@@ -284,7 +284,11 @@ impl NodeFamily for Ddgi {
                 "",
                 Rebuild::None,
             ),
-            flag("lightCull", "Many lights: probe rays evaluate the lights of the probe's mask", d.light_cull),
+            flag(
+                "lightCull",
+                "Many lights: probe rays evaluate the lights of the probe's mask",
+                d.light_cull,
+            ),
             param(
                 "updateFraction",
                 "Max probes updated per frame (fraction)",

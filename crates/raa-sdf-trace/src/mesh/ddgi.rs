@@ -489,6 +489,7 @@ impl DdgiFeature {
             idle_frames: 0,
             lighting: LightingTrack::default(),
             clock: 0.0,
+            geometry_revision: None,
         }))?;
         pipeline.set_enabled(DDGI_GI_NAME, false)?;
         Ok(state)
@@ -711,6 +712,8 @@ struct DdgiPass {
     /// Seconds of rendered time (frame deltas, each capped at 50 ms so a stall or capture pause
     /// does not count as time the probes had to converge).
     clock: f64,
+    /// Revision of the traced geometry the probes were last invalidated against.
+    geometry_revision: Option<u64>,
 }
 
 /// What the lighting looked like when the groups were last invalidated or relit.
@@ -768,6 +771,44 @@ fn sky_change(a: &[[f32; 4]; 9], b: &[[f32; 4]; 9]) -> f32 {
 }
 
 impl DdgiPass {
+    /// Geometry edits: the probes within two cells of a changed bound restart (every group and
+    /// the depth moments, their classification and relocation redone on that first update and
+    /// their light mask rescanned); those within six cells keep their groups as a prior of
+    /// `RELIGHT_AGE` updates (occlusion and bounces changed). Missed revisions (more than one
+    /// since the last frame, only the last delta is kept) relight the whole volume. Returns the
+    /// probes touched.
+    fn invalidate_geometry(&mut self, dirty: &[([f32; 3], [f32; 3])], delta: bool) -> u32 {
+        if !delta {
+            return self.schedule.invalidate_all(GROUP_ALL, RELIGHT_AGE);
+        }
+        let near = |p: [f32; 3], margin: f32| {
+            dirty
+                .iter()
+                .any(|(lo, hi)| (0..3).all(|i| p[i] >= lo[i] - margin && p[i] <= hi[i] + margin))
+        };
+        let mut restart = Vec::new();
+        let mut relight = Vec::new();
+        self.schedule.for_each_probe(|slot, p, spacing| {
+            if near(p, 2.0 * spacing) {
+                restart.push(slot);
+            } else if near(p, 6.0 * spacing) {
+                relight.push(slot);
+            }
+        });
+        let mut n = 0;
+        for slot in restart {
+            self.schedule.restart_slot(slot);
+            n += 1;
+        }
+        for slot in relight {
+            n += u32::from(
+                self.schedule
+                    .invalidate_slot(slot, GROUP_ALL, RELIGHT_AGE, true),
+            );
+        }
+        n
+    }
+
     /// Applies the frame's lighting changes to the schedule; returns the invalidated probe groups
     /// (geometry, sun, other), the light edits and the probes the last edit invalidated.
     fn track_lighting(
@@ -1054,6 +1095,19 @@ impl FeaturePass for DdgiPass {
         }
         let mesh = self.mesh.borrow();
         let bounds = mesh.geometry.world_bounds().map(|b| (b.min, b.max));
+        let geometry_revision = mesh.geometry.revision;
+        let geometry_dirty: Vec<([f32; 3], [f32; 3])> = if self
+            .geometry_revision
+            .is_some_and(|old| old.wrapping_add(1) == geometry_revision)
+        {
+            mesh.geometry
+                .dirty_bounds
+                .iter()
+                .map(|b| (b.min, b.max))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let sky_diffuse = mesh.sky_diffuse;
         let triangles = mesh.geometry.count();
         let traceable = triangles > 0 && mesh.frame.is_some() && mesh.texture_atlas.is_some();
@@ -1077,11 +1131,18 @@ impl FeaturePass for DdgiPass {
                     16 * (gpu.table_row() + u64::from(change.index)),
                     &bytes,
                 );
-                self.schedule.set_extra(grid + change.index, change.position);
+                self.schedule
+                    .set_extra(grid + change.index, change.position);
             }
         }
-        let (invalidated, light_edits, edit_probes) =
+        let (mut invalidated, light_edits, edit_probes) =
             self.track_lighting(settings, &camera, sky_diffuse, ctx.lighting);
+        if let Some(old) = self.geometry_revision.replace(geometry_revision)
+            && old != geometry_revision
+        {
+            invalidated[0] +=
+                self.invalidate_geometry(&geometry_dirty, old.wrapping_add(1) == geometry_revision);
+        }
         let floor = MIN_BATCH.min(probes);
         // The ray scratch bounds a dispatch.
         let job_cap =
@@ -1558,10 +1619,8 @@ impl DdgiGpu {
         let sky = pipeline("gi.ddgi.sky", "ddgi_sky_project");
         let pixels = screen.map_or(0, |(w, h)| u64::from(w) * u64::from(h));
         let probes = cascades.iter().map(|c| c.probes).sum::<u32>() + extras;
-        let rows = layout(probes).rows
-            + pixels
-            + SCRATCH_ROWS
-            + TABLE_ROWS_PER_SLOT * u64::from(extras);
+        let rows =
+            layout(probes).rows + pixels + SCRATCH_ROWS + TABLE_ROWS_PER_SLOT * u64::from(extras);
         Self {
             cascades,
             revision,
@@ -1878,6 +1937,7 @@ mod tests {
             idle_frames: 0,
             lighting: LightingTrack::default(),
             clock: 0.0,
+            geometry_revision: None,
         };
         for _ in 0..16 {
             let m = pass_rng.random_rotation();

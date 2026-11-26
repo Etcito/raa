@@ -137,7 +137,9 @@ pub(super) fn elapsed_code(seconds: f64) -> u32 {
     if seconds < 0.0 {
         return 127;
     }
-    (8.0 * (seconds.max(0.004) / 0.004).log2()).round().clamp(0.0, 127.0) as u32
+    (8.0 * (seconds.max(0.004) / 0.004).log2())
+        .round()
+        .clamp(0.0, 127.0) as u32
 }
 
 impl Schedule {
@@ -291,6 +293,16 @@ impl Schedule {
             self.mask_reset[slot] |= reset_mask;
         }
         dropped
+    }
+
+    /// Restarts every group of one slot (age 0: its next update replaces them, depth moments
+    /// included) and rescans its light mask; the probe keeps its record and offset.
+    pub(super) fn restart_slot(&mut self, slot: u32) {
+        let slot = slot as usize;
+        self.age[slot] = 0;
+        self.age_sun[slot] = 0;
+        self.age_other[slot] = 0;
+        self.mask_reset[slot] = true;
     }
 
     /// `invalidate_slot` on every slot; returns how many dropped.
@@ -576,7 +588,8 @@ mod tests {
                 .all(|j| j[0] >> 16 == 0 && (j[1] >> 16) & 7 == GROUP_ALL)
         );
         assert!(
-            jobs.chunks(2).all(|j| (j[1] >> 24) & 1 == 1 && j[1] >> 25 == 127),
+            jobs.chunks(2)
+                .all(|j| (j[1] >> 24) & 1 == 1 && j[1] >> 25 == 127),
             "a recycled slot replaces its light mask"
         );
     }

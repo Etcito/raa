@@ -790,7 +790,9 @@ fn ddgi_job_setup(p: u32, j: u32) {
             ddgi_probes[row + 1u] = vec4<u32>(bitcast<vec3<u32>>(offset), 0u);
         }
     }
-    if !fresh && (record.w & RAA_DDGI_INACTIVE) != 0u && (turn & 7u) != 0u {
+    // An inactive probe is traced one update in 8, except while its geometry group is young (a
+    // geometry edit restarted it: its classification must be redone now).
+    if !fresh && (record.w & RAA_DDGI_INACTIVE) != 0u && (turn & 7u) != 0u && (job >> 16u) >= 8u {
         run = 0u;
         ddgi_probes[row] = vec4<u32>(record.xyz, (record.w & 0xffu) | (((turn + 1u) & 0xffu) << 8u));
     }
