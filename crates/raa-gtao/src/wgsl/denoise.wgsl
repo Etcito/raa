@@ -11,7 +11,8 @@ struct GtaoParams {
     inv_proj: mat4x4<f32>, // @64
     viewport: vec4<f32>,   // @128 (w, h, 1/w, 1/h)
     params: vec4<f32>,     // @144 (radius_m, intensity, power, frame index)
-    quality: vec4<f32>,    // @160 (slices, steps per side, 0, 0)
+    quality: vec4<f32>,    // @160 (slices, steps per side, pixels per texel, bilateral)
+    phase: vec4<f32>,      // @176 (px, py, 1 = phase mode, 0): forward "layers-interlaced"
 }
 
 @group(0) @binding(0) var src_ao: texture_2d<f32>;
@@ -40,7 +41,7 @@ fn raa_gtao_depth(coord: vec2<i32>, d: f32) -> f32 {
 }
 
 // Pass-scale study: quality.z pixels per AO texel side (0/1 = full resolution); a texel stands
-// for the centre pixel of its block.
+// for the centre pixel of its block (the phase pixel in phase mode, see raa_gtao_offset).
 fn raa_gtao_factor() -> u32 {
     return max(u32(gtao_params.quality.z), 1u);
 }
@@ -50,10 +51,19 @@ fn raa_gtao_low_size() -> vec2<u32> {
     return (vec2<u32>(gtao_params.viewport.xy) + vec2<u32>(f - 1u)) / f;
 }
 
+// The pixel offset of a texel inside its block: the centre, or the phase pixel (px, py) in phase
+// mode (forward "layers-interlaced", factor 2).
+fn raa_gtao_offset() -> vec2<u32> {
+    if (gtao_params.phase.z > 0.5) {
+        return vec2<u32>(gtao_params.phase.xy);
+    }
+    return vec2<u32>(raa_gtao_factor() / 2u);
+}
+
 fn raa_gtao_full(texel: vec2<i32>) -> vec2<i32> {
     let f = raa_gtao_factor();
     let full = vec2<u32>(gtao_params.viewport.xy) - vec2<u32>(1u);
-    return vec2<i32>(min(vec2<u32>(texel) * f + vec2<u32>(f / 2u), full));
+    return vec2<i32>(min(vec2<u32>(texel) * f + raa_gtao_offset(), full));
 }
 
 // Bilateral 7-tap filter of the source AO along `axis` (x or y), over AO texels.
@@ -112,10 +122,17 @@ fn upsample(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let f = raa_gtao_factor();
     let z = raa_gtao_depth(coord, d);
-    let at = (vec2<f32>(gid.xy) - f32(f / 2u)) / f32(f);
+    let at = (vec2<f32>(gid.xy) - vec2<f32>(raa_gtao_offset())) / f32(f);
     let corner = floor(at);
     let t = at - corner;
     let max_px = vec2<i32>(raa_gtao_low_size()) - vec2<i32>(1);
+    // Phase mode: the phase pixel of a block reads its own texel exactly (no reconstruction),
+    // so the forward's signal at that pixel is the AO computed for it.
+    if (gtao_params.phase.z > 0.5 && all(t == vec2<f32>(0.0))) {
+        let own = clamp(vec2<i32>(corner), vec2<i32>(0), max_px);
+        textureStore(out_v, coord, vec4<f32>(textureLoad(src_ao, own, 0).r, 0.0, 0.0, 1.0));
+        return;
+    }
     let bilateral = gtao_params.quality.w > 0.5;
     var sum = 0.0;
     var wsum = 0.0;

@@ -481,13 +481,29 @@ var<private> raa_ddgi_fallback: bool;
 fn raa_ddgi_screen(p: vec3<f32>, frag: vec2<f32>, eye: vec3<f32>) -> vec4<f32> {
     raa_ddgi_fallback = false;
     let screen = raa_ddgi_word(9u);
-    if screen.w == 0u { return vec4<f32>(0.0); }
+    let scale = screen.w & 0xffu;
+    if scale == 0u { return vec4<f32>(0.0); }
     let distance = length(p - eye);
-    // Texel i was resolved at pixel i * scale + scale / 2 (fragment centre + 0.5).
-    let at = (frag - 0.5 - f32(screen.w / 2u)) / f32(screen.w);
+    // Texel i was resolved at pixel i * scale + scale / 2 (fragment centre + 0.5), or at its
+    // phase pixel i * 2 + (px, py) in phase mode (bit 8, forward "layers-interlaced").
+    let phased = (screen.w & 0x100u) != 0u;
+    var offset = vec2<f32>(f32(scale / 2u));
+    if phased {
+        offset = vec2<f32>(f32((screen.w >> 9u) & 1u), f32((screen.w >> 10u) & 1u));
+    }
+    let at = (frag - 0.5 - offset) / f32(scale);
     let corner = floor(at);
     let f = at - corner;
     let size = vec2<i32>(i32(screen.y), i32(screen.z));
+    // Phase mode: the phase pixel returns its own block's resolved value unchanged.
+    if phased && all(f == vec2<f32>(0.0)) {
+        let own = clamp(vec2<i32>(corner), vec2<i32>(0), size - 1);
+        let row = raa_ddgi_word(screen.x + u32(own.y) * screen.y + u32(own.x));
+        if row.w != 0u {
+            let ba = unpack2x16float(row.y);
+            return vec4<f32>(unpack2x16float(row.x), ba.x, ba.y);
+        }
+    }
     var sum = vec4<f32>(0.0);
     var total = 0.0;
     var any_sum = vec4<f32>(0.0);

@@ -35,6 +35,7 @@ const OFF_INV_PROJ: usize = 64;
 const OFF_VIEWPORT: usize = 128;
 const OFF_PARAMS: usize = 144;
 const OFF_QUALITY: usize = 160;
+const OFF_PHASE: usize = 176;
 /// The frame index given to the noise wraps here so it stays exact as an f32.
 const FRAME_WRAP: u64 = 1024;
 
@@ -71,7 +72,9 @@ pub(crate) struct GtaoCamera {
 /// Resolution of the AO (pass-scale study): GTAO and its denoise run on one texel per
 /// `factor` x `factor` pixel block (sampled at the block's centre pixel), then one dispatch
 /// reconstructs full resolution, bilinear or depth-aware bilateral (4 taps, the denoise's
-/// `exp(-|dz| / (0.02 z))` weight). Factor 1 is the original full-resolution pass.
+/// `exp(-|dz| / (0.02 z))` weight). Factor 1 is the original full-resolution pass. With forward
+/// "layers-interlaced" and factor 2 the primary pass samples each block at the R frame's phase
+/// pixel instead of its centre, and the reconstruction copies the texel there unchanged.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct GtaoScale {
     pub factor: u32,
@@ -130,9 +133,10 @@ pub(crate) fn pack_params(
         ],
     );
     write_vec4(
-        &mut out[OFF_QUALITY..PARAMS_LEN],
+        &mut out[OFF_QUALITY..OFF_PHASE],
         [quality.slices as f32, quality.steps as f32, 0.0, 0.0],
     );
+    write_vec4(&mut out[OFF_PHASE..PARAMS_LEN], [0.0; 4]);
 }
 
 /// The surface-sized textures and the bind group of each dispatch over them.
@@ -499,13 +503,26 @@ impl FeaturePass for GtaoPass {
         );
         // quality.zw: pixels per AO texel side, bilateral reconstruction (pass-scale study).
         write_vec4(
-            &mut self.bytes[OFF_QUALITY..PARAMS_LEN],
+            &mut self.bytes[OFF_QUALITY..OFF_PHASE],
             [
                 st.quality.slices as f32,
                 st.quality.steps as f32,
                 textures.scale.factor as f32,
                 f32::from(u8::from(textures.scale.bilateral)),
             ],
+        );
+        // Phase mode (primary pass, forward "layers-interlaced", factor 2): each AO texel is
+        // computed at the phase pixel of its block and the upsample returns it unchanged there,
+        // so the forward's raa_slot_ao at the sampled pixel reads exactly that texel.
+        let interlace = ctx.lighting.interlace();
+        let phase = (!self.instance && interlace.enabled && textures.scale.factor == 2)
+            .then(|| interlace.phase());
+        write_vec4(
+            &mut self.bytes[OFF_PHASE..PARAMS_LEN],
+            match phase {
+                Some([px, py]) => [px as f32, py as f32, 1.0, 0.0],
+                None => [0.0; 4],
+            },
         );
         ctx.gpu.queue().write_buffer(&self.uniform, 0, &self.bytes);
         if !self.instance && self.needs_bind {
@@ -800,6 +817,7 @@ mod tests {
         assert_eq!(at(128), [1280.0, 720.0, 1.0 / 1280.0, 1.0 / 720.0]);
         assert_eq!(at(144), [0.5, 0.75, 2.0, 7.0]);
         assert_eq!(at(160), [2.0, 5.0, 0.0, 0.0]);
+        assert_eq!(at(176), [0.0; 4]);
     }
 
     #[test]

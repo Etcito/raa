@@ -1325,7 +1325,12 @@ impl FeaturePass for DdgiPass {
         if settings.relocation {
             flags |= FLAG_RELOCATE;
         }
-        gpu.write_header(ctx.gpu, &bases, &closed, flags, settings);
+        // Forward "layers-interlaced" at resolveScale 2: each resolve texel is resolved at the
+        // phase pixel of its block (raa_ddgi_screen then returns it unchanged there).
+        let interlace = ctx.lighting.interlace();
+        let phase = (interlace.enabled && settings.resolve_scale.clamp(1, 8) == 2)
+            .then(|| interlace.phase());
+        gpu.write_header(ctx.gpu, &bases, &closed, flags, settings, phase);
         let resolve = gpu.screen;
         ctx.lighting
             .set_spherical_gi(Some((gpu.probes.clone(), gpu.probes.clone())));
@@ -1950,6 +1955,7 @@ impl DdgiGpu {
         closed: &[u32],
         flags: u32,
         settings: DdgiSettings,
+        phase: Option<[u32; 2]>,
     ) {
         let probes = self.probes();
         let rows = layout(self.total());
@@ -1998,7 +2004,8 @@ impl DdgiGpu {
                 settings.surface_range.to_bits(),
             ],
         );
-        // Screen resolve rows: first row, width, height, pixels per texel side (0 = off).
+        // Screen resolve rows: first row, width, height, pixels per texel side (bits 0-7, 0 =
+        // off) | phase mode (bit 8, forward "layers-interlaced" at scale 2) | px << 9 | py << 10.
         let (width, height) = self.screen.unwrap_or((0, 0));
         push_u32(
             &mut header,
@@ -2007,7 +2014,7 @@ impl DdgiGpu {
                 width,
                 height,
                 if self.screen.is_some() {
-                    settings.resolve_scale.clamp(1, 8)
+                    settings.resolve_scale.clamp(1, 8) | screen_phase_bits(phase)
                 } else {
                     0
                 },
@@ -2137,6 +2144,13 @@ pub(crate) fn ddgi_module() -> String {
         include_str!("../wgsl/mesh_ddgi.wgsl"),
         raa_shader::DDGI_GI_WGSL,
     )
+}
+
+
+/// The phase bits of header row 9 `.w` (above the 8-bit resolve scale): bit 8 phase mode, bit 9
+/// px, bit 10 py; 0 without a phase.
+fn screen_phase_bits(phase: Option<[u32; 2]>) -> u32 {
+    phase.map_or(0, |[px, py]| 0x100 | ((px & 1) << 9) | ((py & 1) << 10))
 }
 
 #[cfg(test)]

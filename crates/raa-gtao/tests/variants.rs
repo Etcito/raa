@@ -92,6 +92,7 @@ fn gtao_params_field_order_matches_contract() {
         ("viewport", "vec4<f32>", 16),
         ("params", "vec4<f32>", 16),
         ("quality", "vec4<f32>", 16),
+        ("phase", "vec4<f32>", 16),
     ];
     let got: Vec<(&str, &str)> = body.iter().map(|(n, t)| (n.as_str(), t.as_str())).collect();
     let want: Vec<(&str, &str)> = expected.iter().map(|(n, t, _)| (*n, *t)).collect();

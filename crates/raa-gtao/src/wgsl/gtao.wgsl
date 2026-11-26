@@ -21,7 +21,8 @@ struct GtaoParams {
     inv_proj: mat4x4<f32>, // @64
     viewport: vec4<f32>,   // @128 (w, h, 1/w, 1/h)
     params: vec4<f32>,     // @144 (radius_m, intensity, power, frame index)
-    quality: vec4<f32>,    // @160 (slices, steps per side, 0, 0)
+    quality: vec4<f32>,    // @160 (slices, steps per side, pixels per texel, bilateral)
+    phase: vec4<f32>,      // @176 (px, py, 1 = phase mode, 0): forward "layers-interlaced"
 }
 
 @group(0) @binding(0) var depth_tex: texture_depth_2d;
@@ -95,7 +96,8 @@ fn raa_gtao_horizon_cos(
 @compute @workgroup_size(8, 8)
 fn gtao(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Pass-scale study: quality.z pixels per AO texel side (0/1 = full resolution). Texel
-    // `gid` is the AO of the centre pixel of its block; marching stays in full pixels.
+    // `gid` is the AO of the centre pixel of its block (the phase pixel in phase mode);
+    // marching stays in full pixels.
     let size = vec2<u32>(gtao_params.viewport.xy);
     let factor = max(u32(gtao_params.quality.z), 1u);
     let low = (size + vec2<u32>(factor - 1u)) / factor;
@@ -103,7 +105,13 @@ fn gtao(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let store_at = vec2<i32>(gid.xy);
-    let coord = vec2<i32>(min(gid.xy * factor + vec2<u32>(factor / 2u), size - vec2<u32>(1u)));
+    // Phase mode (forward "layers-interlaced", factor 2): texel `gid` is the AO of the R frame's
+    // phase pixel 2 gid + (px, py) of its block, the pixel the forward samples the signals at.
+    var offset = vec2<u32>(factor / 2u);
+    if (gtao_params.phase.z > 0.5) {
+        offset = vec2<u32>(gtao_params.phase.xy);
+    }
+    let coord = vec2<i32>(min(gid.xy * factor + offset, size - vec2<u32>(1u)));
     let d = textureLoad(depth_tex, coord, 0);
     if (d >= 1.0) {
         textureStore(out_ao, store_at, vec4<f32>(1.0));

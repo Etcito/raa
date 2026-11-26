@@ -178,6 +178,13 @@ not a graph is set.
   `lightingInterlace()` reports the state of the latest submitted frame; lit shaders read it in
   `FrameGpu.temporal.w` and `compute.wgsl` nodes in `rg_frame.interlace` (bit 0 mode, bit 1 R
   frame, bits 2 and 3 px and py, bits 4-5 `(n / 2) % 4`).
+  In this mode the half-resolution signal passes evaluate the phase pixel itself: with
+  `pass.ao.gtao` `scale` 2 the AO texel (x, y) is traced (and denoised with depth taps) at pixel
+  `2 (x, y) + phase`, and the full-resolution reconstruction copies that texel unchanged at the
+  phase pixel; with `pass.gi.ddgi` `resolveScale` 2 the screen resolve texel is resolved at the
+  phase pixel and `raa_ddgi_screen` returns its own block's value there. Other pixels keep the
+  bilinear / bilateral reconstruction (from the shifted texel positions); other modes and scales
+  are unchanged.
 - `pass.lighting.reconstruct` (category lighting, multi-instance stage node, pipeline entry
   `pass.lighting.reconstruct#<id>`, HDR chain member) turns the interlaced signals into the
   displayed HDR colour, one full-resolution compute dispatch per frame and no network (the
