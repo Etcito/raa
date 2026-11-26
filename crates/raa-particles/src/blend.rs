@@ -374,6 +374,12 @@ impl FeaturePass for BlendPass {
         REQUIRED
     }
 
+    /// Drops the bind groups over the frame targets, which would keep replaced targets alive;
+    /// `resize` rebuilds them.
+    fn release(&mut self, _gpu: &GpuContext) {
+        self.group = None;
+    }
+
     /// The depth view changed: group 2 is rebuilt over the new one.
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
         self.group = None;

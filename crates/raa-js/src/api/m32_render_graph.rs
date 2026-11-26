@@ -604,6 +604,8 @@ pub(crate) mod web {
             .features
             .require_mut::<RenderGraphState>("render graph")?;
         if result.ok {
+            // Timing samples recorded before the switch list the previous graph's passes.
+            st.pipeline.borrow_mut().invalidate_pass_timings();
             state.presentation_epoch = state.presentation_epoch.wrapping_add(1);
             if state.explicit_scene_size != scene_size {
                 st.pipeline.borrow_mut().set_scene_size(scene_size);

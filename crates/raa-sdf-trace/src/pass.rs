@@ -871,6 +871,15 @@ impl FeaturePass for TracePass {
     fn set_enabled(&mut self, enabled: bool, _lighting: &mut raa_pipeline::LightingResources) {
         self.scene.borrow_mut().enabled = enabled;
     }
+    /// Drops the frame-sized trace targets and the groups over them; `resize` recreates them.
+    fn release(&mut self, _gpu: &GpuContext) {
+        let mut scene = self.scene.borrow_mut();
+        scene.targets = None;
+        scene.target_revision += 1;
+        drop(scene);
+        self.groups = None;
+        self.groups_for = None;
+    }
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
         let size = targets.size();
         let mut scene = self.scene.borrow_mut();

@@ -307,6 +307,11 @@ impl FeaturePass for ContactPass {
         ORDER
     }
 
+    /// Drops the visibility texture and its group; `resize` recreates them.
+    fn release(&mut self, _gpu: &GpuContext) {
+        self.output = None;
+    }
+
     /// Recreates the full-resolution Rgba16Float output (R16Float is not a core storage
     /// format) and its bind group over the new depth target; the lighting gets the new view
     /// at the next prepare.

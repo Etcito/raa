@@ -95,6 +95,14 @@ impl FeaturePass for TaaPass {
         TAA_ORDER
     }
 
+    /// Drops the history pair and the targets; `resize` recreates them (history invalid).
+    fn release(&mut self, _gpu: &GpuContext) {
+        self.bound = None;
+        self.targets = None;
+        self.history = None;
+        self.invalidate();
+    }
+
     /// Creates or ensures the history, rebuilds the bind groups and invalidates.
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
         self.bound = None;

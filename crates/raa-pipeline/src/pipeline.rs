@@ -174,6 +174,8 @@ struct PassEntry {
     pass: Box<dyn FeaturePass>,
     /// Targets generation the pass was last resized for (0 = never resized).
     sized_for: u64,
+    /// Turned off since its last frame: `FeaturePass::release` runs at the next frame.
+    release_pending: bool,
 }
 
 impl PassEntry {
@@ -292,6 +294,7 @@ impl PipelineConfig {
                 enabled: true,
                 pass,
                 sized_for: 0,
+                release_pending: false,
             },
         );
         Ok(())
@@ -384,6 +387,9 @@ impl PipelineConfig {
                 format!("`{name}` is a required pass and cannot be disabled"),
             ));
         }
+        // A pass turned off releases its frame-sized resources at the next frame (see
+        // `FeaturePass::release`) unless it is turned on again before.
+        entry.release_pending = !enabled && (entry.enabled || entry.release_pending);
         entry.enabled = enabled;
         Ok(Some(entry.pass.as_mut()))
     }
@@ -663,6 +669,24 @@ impl Pipeline {
         &self.resources
     }
 
+    /// The names of the enabled passes in execution order (the passes a timing sample lists).
+    fn enabled_order(&self) -> Vec<String> {
+        self.config
+            .passes
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
+    /// Drops the latest GPU pass timing sample and any readback in flight: the next
+    /// [`Pipeline::pass_gpu_timings`] reports `Pending` until a frame recorded after this call is
+    /// read back. A render graph switch calls it. Independently, a sample whose pass list differs
+    /// from the enabled passes is never returned.
+    pub fn invalidate_pass_timings(&mut self) {
+        self.pass_timings.invalidate();
+    }
+
     /// Returns the latest GPU sample and requests a new one when no readback is pending.
     pub fn pass_gpu_timings(&mut self, gpu: &GpuContext) -> PassGpuTimings<'_> {
         if !gpu.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
@@ -675,7 +699,8 @@ impl Pipeline {
         if count == 0 || count > MAX_TIMED_PASSES {
             return PassGpuTimings::Unavailable("unsupported pass count");
         }
-        self.pass_timings.request()
+        let order = self.enabled_order();
+        self.pass_timings.request(&order)
     }
 
     /// Adds a graph frame under `name`, after the frames already added; its hooks run around
@@ -1128,6 +1153,12 @@ impl Pipeline {
             lighting: &mut self.lighting,
             resources: &self.resources,
         };
+        for entry in self.config.passes.iter_mut().filter(|e| e.release_pending) {
+            // invariant: `release_pending` is only set on a disabled entry
+            entry.pass.release(gpu);
+            entry.release_pending = false;
+            entry.sized_for = 0;
+        }
         for entry in self.config.passes.iter_mut().filter(|e| e.enabled) {
             if entry.sized_for != generation {
                 entry.pass.resize(gpu, targets);

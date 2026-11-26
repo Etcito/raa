@@ -268,6 +268,11 @@ impl FeaturePass for OpaqueCopyPass {
         ORDER
     }
 
+    /// Drops the surface-sized copies; `resize` recreates them.
+    fn release(&mut self, _gpu: &GpuContext) {
+        self.copies = None;
+    }
+
     /// Recreates `opaque_color` (HDR_FORMAT, full mip chain, TEXTURE_BINDING |
     /// RENDER_ATTACHMENT | COPY_DST, a full view and one view per mip), `opaque_depth`
     /// (R32Float, TEXTURE_BINDING | RENDER_ATTACHMENT) and the bind groups of every draw.

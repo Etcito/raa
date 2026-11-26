@@ -426,6 +426,12 @@ impl FeaturePass for ShaftsPass {
         ORDER
     }
 
+    /// Drops the frame-sized chain and its groups; `resize` recreates them.
+    fn release(&mut self, _gpu: &GpuContext) {
+        self.bound = None;
+        self.chain = None;
+    }
+
     /// Recreates the half-res march target (RENDER_ATTACHMENT | TEXTURE_BINDING), the march
     /// bind group and the composite bind group of both textures of the HDR chain.
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {

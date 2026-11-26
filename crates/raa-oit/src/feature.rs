@@ -399,6 +399,14 @@ impl FeaturePass for OitPass {
         ORDER
     }
 
+    /// Shrinks the per-pixel heads and the fragment pool to one pixel and drops the resolve
+    /// groups; `resize` rebuilds them at the frame size (the pool growth is kept).
+    fn release(&mut self, gpu: &GpuContext) {
+        self.sized.buffers = self.sized.buffers.rebuild(gpu, 1, 1);
+        self.sized.resolve = None;
+        self.sized.bound = None;
+    }
+
     /// Recreates the buffers for the new size and the resolve groups of the HDR chain.
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
         let settings = self.settings();

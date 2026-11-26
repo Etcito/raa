@@ -267,6 +267,17 @@ impl FeaturePass for GiAreaShadowPass {
         }
     }
 
+    /// Drops the frame-sized mask, history and ReSTIR resources (the next enabled prepare
+    /// allocates them again, as after an inactive frame).
+    fn release(&mut self, _gpu: &GpuContext) {
+        let mut state = self.part.state.borrow_mut();
+        state.resources = None;
+        state.restir = None;
+        state.key = None;
+        state.sdf = None;
+        state.limit = 0;
+    }
+
     /// Drops the cached bind groups after the targets were recreated.
     fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {
         let mut state = self.part.state.borrow_mut();
