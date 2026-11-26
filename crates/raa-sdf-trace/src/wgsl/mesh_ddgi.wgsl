@@ -848,10 +848,9 @@ fn ddgi_job_setup(p: u32, j: u32) {
 // Probe-only lights of workgroup probe `p`: every tiered point or spot light (width lane = forward
 // radius) in range of the probe, with its shadow ray from the probe. The injected weight is the
 // complement of the forward fade at the probe's distance, so forward and probe add to one light.
-// Called by all threads, in uniform control flow.
+// The caller resets `ddgi_inj_n` and brackets the call with workgroup barriers outside any
+// branch (Tint rejects a barrier under a condition read from workgroup memory).
 fn ddgi_inject_probe(p: u32, lid: u32) {
-    if lid == 0u { atomicStore(&ddgi_inj_n, 0u); }
-    workgroupBarrier();
     let origin = ddgi_origin[p].xyz;
     let count = min(256u, frame.light_info.x);
     for (var i = lid; i < count; i += DDGI_THREADS) {
@@ -876,7 +875,6 @@ fn ddgi_inject_probe(p: u32, lid: u32) {
             ddgi_inj[2u * slot + 1u] = vec4<f32>(l, 0.0);
         }
     }
-    workgroupBarrier();
 }
 
 // Irradiance / pi of the injected lights for a texel looking along `dir`.
@@ -1311,7 +1309,10 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
     for (var p = 0u; p < probes_here; p++) {
         let live = ddgi_job[p].y != 0u;
         var gathered: DdgiGathered;
+        if lid == 0u { atomicStore(&ddgi_inj_n, 0u); }
+        workgroupBarrier();
         if live { ddgi_inject_probe(p, lid); }
+        workgroupBarrier();
         if live {
             gathered = ddgi_probe_gather(p, lid, rays, ddgi_scratch_row() + (group.x * probes_here + p) * rays * DDGI_SCRATCH_ROWS);
         }
