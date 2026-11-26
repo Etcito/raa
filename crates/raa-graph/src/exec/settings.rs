@@ -54,10 +54,11 @@ const LOOKS: [(&str, Look); 3] = [
     ("golden", Look::Golden),
 ];
 const SHADING: [(&str, bool); 2] = [("ltc", false), ("formFactor", true)];
-const LIGHTING: [(&str, LightingOutput); 3] = [
+const LIGHTING: [(&str, LightingOutput); 4] = [
     ("combined", LightingOutput::Combined),
     ("direct", LightingOutput::Direct),
     ("indirect", LightingOutput::Indirect),
+    ("shadow", LightingOutput::Shadow),
 ];
 
 /// The Setting keys of `feature` in catalog key order: the members of its setter's input
@@ -520,8 +521,16 @@ fn desc_apply(h: &mut FeatureHandles<'_>, desc: &Desc) -> Result<(), RaaError> {
         }
         Desc::Isolation(mode) => {
             if let Some(lit) = h.lit.as_deref_mut() {
-                lit.set_frame_feature(RAA_DIRECT_ONLY_FEATURE, *mode == LightingOutput::Direct);
-                lit.set_frame_feature(RAA_INDIRECT_ONLY_FEATURE, *mode == LightingOutput::Indirect);
+                // Shadow (both flags): forward outputs the sun visibility.
+                let shadow = *mode == LightingOutput::Shadow;
+                lit.set_frame_feature(
+                    RAA_DIRECT_ONLY_FEATURE,
+                    *mode == LightingOutput::Direct || shadow,
+                );
+                lit.set_frame_feature(
+                    RAA_INDIRECT_ONLY_FEATURE,
+                    *mode == LightingOutput::Indirect || shadow,
+                );
             }
             Ok(())
         }
@@ -646,7 +655,11 @@ impl AppliedDescs {
                 .is_some_and(|lit| lit.frame_feature(RAA_INDIRECT_DIFFUSE_AO_FEATURE)),
             spherical: h.handles.spherical.as_ref().map(|gi| gi.borrow().settings),
             isolation: h.lit.as_deref().map(|lit| {
-                if lit.frame_feature(RAA_DIRECT_ONLY_FEATURE) {
+                if lit.frame_feature(RAA_DIRECT_ONLY_FEATURE)
+                    && lit.frame_feature(RAA_INDIRECT_ONLY_FEATURE)
+                {
+                    LightingOutput::Shadow
+                } else if lit.frame_feature(RAA_DIRECT_ONLY_FEATURE) {
                     LightingOutput::Direct
                 } else if lit.frame_feature(RAA_INDIRECT_ONLY_FEATURE) {
                     LightingOutput::Indirect

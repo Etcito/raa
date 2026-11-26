@@ -85,6 +85,8 @@ pub enum LightingOutput {
     IndirectSpecular,
     RoughGrid,
     Bounce(u32),
+    /// Forward only: the sun visibility (cascaded shadow x contact shadow) as grey.
+    Shadow,
 }
 
 impl LightingOutput {
@@ -98,6 +100,7 @@ impl LightingOutput {
             Self::IndirectDiffuse => 16,
             Self::IndirectSpecular => 17,
             Self::RoughGrid => 18,
+            Self::Shadow => 19,
         }
     }
 }

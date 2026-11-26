@@ -483,7 +483,8 @@ fn raa_ddgi_screen(p: vec3<f32>, frag: vec2<f32>, eye: vec3<f32>) -> vec4<f32> {
     let screen = raa_ddgi_word(9u);
     if screen.w == 0u { return vec4<f32>(0.0); }
     let distance = length(p - eye);
-    let at = frag / f32(screen.w) - 0.5;
+    // Texel i was resolved at pixel i * scale + scale / 2 (fragment centre + 0.5).
+    let at = (frag - 0.5 - f32(screen.w / 2u)) / f32(screen.w);
     let corner = floor(at);
     let f = at - corner;
     let size = vec2<i32>(i32(screen.y), i32(screen.z));

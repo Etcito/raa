@@ -193,6 +193,10 @@ pub struct DdgiSettings {
     /// replaces is, not by the material AO alone: probes 1.5 m apart carry no small-scale
     /// occlusion.
     pub screen_ao: bool,
+    /// Pixels per side of one screen-resolve texel (1 = full resolution, 2 = the default half
+    /// resolution, up to 8). The resolve samples the prepass at the centre pixel of its block
+    /// and forward blends the four nearest texels depth-matched (raa_ddgi_screen).
+    pub resolve_scale: u32,
     pub rays_per_probe: u32,
     pub hysteresis: f32,
     pub blend: DdgiBlend,
@@ -269,6 +273,7 @@ impl Default for DdgiSettings {
             cascade_counts: [16, 8, 12],
             far: DdgiFar::Clamp,
             screen_ao: true,
+            resolve_scale: 2,
             rays_per_probe: 64,
             hysteresis: 0.97,
             blend: DdgiBlend::Update,
@@ -644,8 +649,6 @@ const INITIAL_MS_PER_PROBE: f64 = 0.0033;
 /// as GPU-filling batches and a steady-state budget below a batch's cost is met by updating only
 /// every k-th frame. Per-probe costs are learned from batches of at least this size.
 const MIN_BATCH: u32 = 256;
-/// The screen resolve runs at 1/RESOLVE_SCALE of the frame on each axis.
-const RESOLVE_SCALE: u32 = 2;
 
 /// GPU timestamps around the update dispatch; one readback in flight at a time.
 struct UpdateTimer {
@@ -1107,8 +1110,8 @@ impl FeaturePass for DdgiPass {
         let cascades = settings.cascade_layouts();
         // One row per resolve texel inside the forward's one storage binding.
         let resolve_size = (
-            ctx.size.0.div_ceil(RESOLVE_SCALE),
-            ctx.size.1.div_ceil(RESOLVE_SCALE),
+            ctx.size.0.div_ceil(settings.resolve_scale.clamp(1, 8)),
+            ctx.size.1.div_ceil(settings.resolve_scale.clamp(1, 8)),
         );
         let rows = layout(probes).rows
             + u64::from(resolve_size.0) * u64::from(resolve_size.1)
@@ -1999,7 +2002,7 @@ impl DdgiGpu {
                 width,
                 height,
                 if self.screen.is_some() {
-                    RESOLVE_SCALE
+                    settings.resolve_scale.clamp(1, 8)
                 } else {
                     0
                 },

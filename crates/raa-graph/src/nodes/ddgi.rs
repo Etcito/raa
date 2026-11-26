@@ -234,6 +234,16 @@ impl NodeFamily for Ddgi {
                 d.screen_ao,
             ),
             param(
+                "resolveScale",
+                "Screen resolve pixels per texel side",
+                ParamKind::Int,
+                ParamValue::Int(i64::from(d.resolve_scale)),
+                Some((1.0, 8.0)),
+                Some(1.0),
+                "",
+                Rebuild::None,
+            ),
+            param(
                 "raysPerProbe",
                 "Rays per probe",
                 ParamKind::Int,
@@ -521,6 +531,7 @@ pub(crate) fn settings_from_params(params: &[(String, ParamValue)]) -> DdgiSetti
                 }
             }
             ("screenAo", ParamValue::Bool(b)) => s.screen_ao = *b,
+            ("resolveScale", ParamValue::Int(n)) => s.resolve_scale = (*n).clamp(1, 8) as u32,
             ("raysPerProbe", ParamValue::Int(n)) => {
                 s.rays_per_probe = (*n).clamp(0, 1 << 16) as u32
             }

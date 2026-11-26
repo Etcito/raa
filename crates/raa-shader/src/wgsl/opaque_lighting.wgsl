@@ -111,6 +111,10 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
     }
     if spherical_debug.a > 0.0 { return spherical_debug; }
     if raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
+        if raa_feature_enabled(RAA_INDIRECT_ONLY_FEATURE) {
+            // lightingOutput "shadow": the sun visibility alone (cascades x contact).
+            return vec4<f32>(vec3<f32>(shadow), 1.0);
+        }
         return vec4<f32>(select(s.emissive + direct + local, s.base_color + s.emissive, unlit), 1.0);
     }
     if raa_feature_enabled(RAA_INDIRECT_ONLY_FEATURE) {

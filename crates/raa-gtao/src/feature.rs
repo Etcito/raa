@@ -68,10 +68,30 @@ pub(crate) struct GtaoCamera {
     pub(crate) inv_proj: Mat4,
 }
 
+/// Resolution of the AO (pass-scale study): GTAO and its denoise run on one texel per
+/// `factor` x `factor` pixel block (sampled at the block's centre pixel), then one dispatch
+/// reconstructs full resolution, bilinear or depth-aware bilateral (4 taps, the denoise's
+/// `exp(-|dz| / (0.02 z))` weight). Factor 1 is the original full-resolution pass.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct GtaoScale {
+    pub factor: u32,
+    pub bilateral: bool,
+}
+
+impl Default for GtaoScale {
+    fn default() -> Self {
+        GtaoScale {
+            factor: 1,
+            bilateral: true,
+        }
+    }
+}
+
 /// State shared by the pass and every clone of a `GtaoHandle`.
 struct GtaoState {
     desc: AoDesc,
     quality: AoQuality,
+    scale: GtaoScale,
     /// None until the first `set_camera`.
     camera: Option<GtaoCamera>,
 }
@@ -125,6 +145,11 @@ struct Textures {
     blur_view: wgpu::TextureView,
     _out: wgpu::Texture,
     out_view: wgpu::TextureView,
+    /// Factor > 1: the low-resolution denoised AO and the reconstruction dispatch over it.
+    low: Option<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>,
+    /// Pixels per AO texel side and the low-resolution size.
+    scale: GtaoScale,
+    low_size: (u32, u32),
     gtao_group: wgpu::BindGroup,
     denoise_h_group: wgpu::BindGroup,
     denoise_v_group: wgpu::BindGroup,
@@ -204,6 +229,7 @@ struct GtaoPass {
     gtao: Kernel,
     denoise_h: Kernel,
     denoise_v: Kernel,
+    upsample: Kernel,
     uniform: wgpu::Buffer,
     bytes: [u8; PARAMS_LEN],
     textures: Option<Textures>,
@@ -234,12 +260,88 @@ impl GtaoPass {
             gtao: Kernel::new(device, &gtao_module, "gtao"),
             denoise_h: Kernel::new(device, &denoise_module, "denoise_h"),
             denoise_v: Kernel::new(device, &denoise_module, "denoise_v"),
+            upsample: Kernel::new(device, &denoise_module, "upsample"),
             uniform,
             bytes: [0; PARAMS_LEN],
             textures: None,
             needs_bind: true,
             bound: false,
         }
+    }
+
+    /// (Re)creates the textures at `size` (full) and `scale`: raw and blur R32Float and, for a
+    /// factor above 1, the low-resolution Rgba16Float result, all at ceil(size / factor); out
+    /// Rgba16Float at full size. The lighting gets the new view at the next prepare.
+    fn build(
+        &mut self,
+        device: &wgpu::Device,
+        size: (u32, u32),
+        scale: GtaoScale,
+        depth: wgpu::TextureView,
+        normal: wgpu::TextureView,
+    ) {
+        let factor = scale.factor.clamp(1, 8);
+        let low_size = (size.0.div_ceil(factor), size.1.div_ceil(factor));
+        let (raw, raw_view) =
+            create_texture(device, "raa-gtao.raw", low_size, wgpu::TextureFormat::R32Float);
+        let (blur, blur_view) =
+            create_texture(device, "raa-gtao.blur", low_size, wgpu::TextureFormat::R32Float);
+        let (out, out_view) = create_texture(
+            device,
+            "raa-gtao.out",
+            size,
+            wgpu::TextureFormat::Rgba16Float,
+        );
+        let low = (factor > 1).then(|| {
+            let (texture, view) = create_texture(
+                device,
+                "raa-gtao.low",
+                low_size,
+                wgpu::TextureFormat::Rgba16Float,
+            );
+            let group = self.upsample_group(device, &view, &out_view, &depth);
+            (texture, view, group)
+        });
+        let denoised = low.as_ref().map_or(&out_view, |(_, view, _)| view);
+        let (gtao_group, denoise_h_group, denoise_v_group) =
+            self.groups(device, &raw_view, &blur_view, denoised, &depth, &normal);
+        self.textures = Some(Textures {
+            size,
+            _raw: raw,
+            raw_view,
+            _blur: blur,
+            blur_view,
+            _out: out,
+            out_view,
+            low,
+            scale: GtaoScale { factor, ..scale },
+            low_size,
+            gtao_group,
+            denoise_h_group,
+            denoise_v_group,
+            depth,
+            normal,
+        });
+        self.needs_bind = true;
+    }
+
+    fn upsample_group(
+        &self,
+        device: &wgpu::Device,
+        low_view: &wgpu::TextureView,
+        out_view: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-gtao.upsample"),
+            layout: &self.upsample.layout,
+            entries: &[
+                view_entry(0, low_view),
+                view_entry(1, depth),
+                view_entry(3, out_view),
+                buffer_entry(4, &self.uniform),
+            ],
+        })
     }
 
     /// The three groups over `depth` and `normal` for the textures' raw, blur and out views.
@@ -319,42 +421,15 @@ impl FeaturePass for GtaoPass {
     /// over the new depth and normal targets; the lighting gets the new view at the next
     /// prepare. Each bind group lists only the bindings its entry uses (derived layouts).
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
-        let device = gpu.device();
         let (w, h) = targets.size();
-        let size = (w.max(1), h.max(1));
-        let (raw, raw_view) =
-            create_texture(device, "raa-gtao.raw", size, wgpu::TextureFormat::R32Float);
-        let (blur, blur_view) =
-            create_texture(device, "raa-gtao.blur", size, wgpu::TextureFormat::R32Float);
-        let (out, out_view) = create_texture(
-            device,
-            "raa-gtao.out",
-            size,
-            wgpu::TextureFormat::Rgba16Float,
+        let scale = self.state.try_borrow().map(|st| st.scale).unwrap_or_default();
+        self.build(
+            gpu.device(),
+            (w.max(1), h.max(1)),
+            scale,
+            targets.depth().clone(),
+            targets.normal().clone(),
         );
-        let (gtao_group, denoise_h_group, denoise_v_group) = self.groups(
-            device,
-            &raw_view,
-            &blur_view,
-            &out_view,
-            targets.depth(),
-            targets.normal(),
-        );
-        self.textures = Some(Textures {
-            size,
-            _raw: raw,
-            raw_view,
-            _blur: blur,
-            blur_view,
-            _out: out,
-            out_view,
-            gtao_group,
-            denoise_h_group,
-            denoise_v_group,
-            depth: targets.depth().clone(),
-            normal: targets.normal().clone(),
-        });
-        self.needs_bind = true;
     }
 
     /// Disabling resets binding 7 to the dummy (AO 1); enabling gives the output back to
@@ -375,38 +450,30 @@ impl FeaturePass for GtaoPass {
     /// rebuilt every frame while it already holds the dummy). Otherwise writes `GtaoParams`
     /// and, when needed, sets the output view on the lighting.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
-        let st = self.state.try_borrow().map_err(|_| state_busy())?;
+        let scale = self.state.try_borrow().map_err(|_| state_busy())?.scale;
         let depth = ctx.targets.depth_input(ctx.resources, &self.name);
         let normal = ctx.targets.normal_input(ctx.resources, &self.name);
-        if self
-            .textures
-            .as_ref()
-            .is_some_and(|t| t.depth != depth || t.normal != normal)
+        let wanted = GtaoScale {
+            factor: scale.factor.clamp(1, 8),
+            ..scale
+        };
+        if let Some((size, stale)) = self.textures.as_ref().map(|t| {
+            (
+                t.size,
+                t.depth != depth || t.normal != normal || t.scale != wanted,
+            )
+        }) && stale
         {
-            let (gtao_group, denoise_h_group, denoise_v_group) = {
-                let t = self.textures.as_ref().unwrap();
-                self.groups(
-                    ctx.gpu.device(),
-                    &t.raw_view,
-                    &t.blur_view,
-                    &t.out_view,
-                    &depth,
-                    &normal,
-                )
-            };
-            let t = self.textures.as_mut().unwrap();
-            t.depth = depth;
-            t.normal = normal;
-            t.gtao_group = gtao_group;
-            t.denoise_h_group = denoise_h_group;
-            t.denoise_v_group = denoise_v_group;
+            self.build(ctx.gpu.device(), size, wanted, depth, normal);
         }
+        let st = self.state.try_borrow().map_err(|_| state_busy())?;
         if let Some(t) = self.textures.as_ref() {
             let (w, h) = t.size;
-            for (port, view, format) in [
-                ("ao", &t.out_view, wgpu::TextureFormat::Rgba16Float),
-                ("raw", &t.raw_view, wgpu::TextureFormat::R32Float),
-                ("blur", &t.blur_view, wgpu::TextureFormat::R32Float),
+            let (lw, lh) = t.low_size;
+            for (port, view, format, (w, h)) in [
+                ("ao", &t.out_view, wgpu::TextureFormat::Rgba16Float, (w, h)),
+                ("raw", &t.raw_view, wgpu::TextureFormat::R32Float, (lw, lh)),
+                ("blur", &t.blur_view, wgpu::TextureFormat::R32Float, (lw, lh)),
             ] {
                 let desc = ImageDesc::new(ImageDim::D2, format, w, h, 1, 1);
                 ctx.resources.publish(&self.name, port, view, desc);
@@ -430,6 +497,16 @@ impl FeaturePass for GtaoPass {
             &st.quality,
             ctx.frame,
         );
+        // quality.zw: pixels per AO texel side, bilateral reconstruction (pass-scale study).
+        write_vec4(
+            &mut self.bytes[OFF_QUALITY..PARAMS_LEN],
+            [
+                st.quality.slices as f32,
+                st.quality.steps as f32,
+                textures.scale.factor as f32,
+                f32::from(u8::from(textures.scale.bilateral)),
+            ],
+        );
         ctx.gpu.queue().write_buffer(&self.uniform, 0, &self.bytes);
         if !self.instance && self.needs_bind {
             ctx.lighting.set_ao(textures.out_view.clone());
@@ -451,7 +528,7 @@ impl FeaturePass for GtaoPass {
         let Some(t) = self.textures.as_ref().filter(|_| has_camera) else {
             return Ok(());
         };
-        let groups = (t.size.0.div_ceil(WORKGROUP), t.size.1.div_ceil(WORKGROUP));
+        let groups = (t.low_size.0.div_ceil(WORKGROUP), t.low_size.1.div_ceil(WORKGROUP));
         let mut pass = ctx
             .encoder
             .begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -466,6 +543,11 @@ impl FeaturePass for GtaoPass {
             pass.set_pipeline(&kernel.pipeline);
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(groups.0, groups.1, 1);
+        }
+        if let Some((_, _, group)) = t.low.as_ref() {
+            pass.set_pipeline(&self.upsample.pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(t.size.0.div_ceil(WORKGROUP), t.size.1.div_ceil(WORKGROUP), 1);
         }
         Ok(())
     }
@@ -500,6 +582,7 @@ impl GtaoFeature {
         let state = Rc::new(RefCell::new(GtaoState {
             desc: AoDesc::default(),
             quality: AoQuality::default(),
+            scale: GtaoScale::default(),
             camera: None,
         }));
         p.add(Box::new(GtaoPass::new(gpu, state.clone())))?;
@@ -534,6 +617,7 @@ impl GtaoFeature {
         let state = Rc::new(RefCell::new(GtaoState {
             desc: AoDesc::default(),
             quality: AoQuality::default(),
+            scale: GtaoScale::default(),
             camera: None,
         }));
         p.add(Box::new(GtaoPass::named(gpu, state.clone(), name, true)))?;
@@ -585,6 +669,18 @@ impl GtaoHandle {
     pub fn set_tunable(&self, key: &str, value: f64) -> Result<(), RaaError> {
         let spec = raa_pipeline::validate_tunable(crate::tunables(), key, value)
             .map_err(|m| refusal("ao.invalid", &m))?;
+        match spec.key {
+            "scale" | "upsample" => {
+                let mut st = self.state.try_borrow_mut().map_err(|_| state_busy())?;
+                if spec.key == "scale" {
+                    st.scale.factor = value as u32;
+                } else {
+                    st.scale.bilateral = value != 0.0;
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
         let mut q = self.quality();
         match spec.key {
             "slices" => q.slices = value as u32,
@@ -643,6 +739,7 @@ mod tests {
             state: Rc::new(RefCell::new(GtaoState {
                 desc: AoDesc::default(),
                 quality: AoQuality::default(),
+                scale: GtaoScale::default(),
                 camera: None,
             })),
         };
@@ -704,6 +801,7 @@ mod tests {
             state: Rc::new(RefCell::new(GtaoState {
                 desc: AoDesc::default(),
                 quality: AoQuality::default(),
+                scale: GtaoScale::default(),
                 camera: None,
             })),
         };
@@ -744,6 +842,7 @@ mod tests {
         let state = Rc::new(RefCell::new(GtaoState {
             desc: AoDesc::default(),
             quality: AoQuality::default(),
+            scale: GtaoScale::default(),
             camera: None,
         }));
         let mut pass = GtaoPass::new(&gpu, state);

@@ -296,7 +296,7 @@ impl NodeFamily for RuntimeLighting {
                 "Lighting output",
                 ParamKind::Enum,
                 ParamValue::Enum("combined".into()),
-                &["combined", "direct", "indirect"],
+                &["combined", "direct", "indirect", "shadow"],
             ));
         }
         if let Some(ao) = types.iter_mut().find(|node| node.id == "pass.ao.gtao") {

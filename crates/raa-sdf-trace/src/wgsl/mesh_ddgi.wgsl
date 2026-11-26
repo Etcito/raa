@@ -1568,7 +1568,8 @@ fn ddgi_sky_project(@builtin(local_invocation_index) lid: u32) {
 }
 
 // Screen resolve: the volume interpolated once per resolve texel (row 9: first row, width, height,
-// scale; a texel covers scale x scale pixels and samples the prepass at its first pixel), so the
+// scale; a texel covers scale x scale pixels and samples the prepass at its centre pixel
+// id * scale + scale / 2), so the
 // forward shader reads up to four rows instead of eight probes. A row holds rgb and the blend
 // weight (f16) and the camera distance of the surface it was resolved for (f32); forward keeps
 // the texels resolved for its own surface and falls back to the full lookup when none was.
@@ -1578,7 +1579,7 @@ fn ddgi_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= screen.y || id.y >= screen.z { return; }
     let row = screen.x + id.y * screen.y + id.x;
     let full = textureDimensions(depth);
-    let pixel = min(id.xy * screen.w, full - 1u);
+    let pixel = min(id.xy * screen.w + vec2<u32>(screen.w / 2u), full - 1u);
     let z = textureLoad(depth, vec2<i32>(pixel), 0);
     let normal_view = textureLoad(normals, vec2<i32>(pixel), 0).xyz;
     if z >= 1.0 || dot(normal_view, normal_view) <= 0.0 {

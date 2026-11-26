@@ -39,15 +39,34 @@ fn raa_gtao_depth(coord: vec2<i32>, d: f32) -> f32 {
     return -raa_gtao_view_pos(uv, d).z;
 }
 
-// Bilateral 7-tap filter of the source AO along `axis` (x or y).
+// Pass-scale study: quality.z pixels per AO texel side (0/1 = full resolution); a texel stands
+// for the centre pixel of its block.
+fn raa_gtao_factor() -> u32 {
+    return max(u32(gtao_params.quality.z), 1u);
+}
+
+fn raa_gtao_low_size() -> vec2<u32> {
+    let f = raa_gtao_factor();
+    return (vec2<u32>(gtao_params.viewport.xy) + vec2<u32>(f - 1u)) / f;
+}
+
+fn raa_gtao_full(texel: vec2<i32>) -> vec2<i32> {
+    let f = raa_gtao_factor();
+    let full = vec2<u32>(gtao_params.viewport.xy) - vec2<u32>(1u);
+    return vec2<i32>(min(vec2<u32>(texel) * f + vec2<u32>(f / 2u), full));
+}
+
+// Bilateral 7-tap filter of the source AO along `axis` (x or y), over AO texels.
 fn raa_gtao_denoise(coord: vec2<i32>, axis: vec2<i32>) -> f32 {
-    let max_px = vec2<i32>(gtao_params.viewport.xy) - vec2<i32>(1);
-    let z = raa_gtao_depth(coord, textureLoad(depth_tex, coord, 0));
+    let max_px = vec2<i32>(raa_gtao_low_size()) - vec2<i32>(1);
+    let c = raa_gtao_full(coord);
+    let z = raa_gtao_depth(c, textureLoad(depth_tex, c, 0));
     var sum = 0.0;
     var wsum = 0.0;
     for (var i = 0u; i < TAPS; i = i + 1u) {
         let sp = clamp(coord + (i32(i) - 3) * axis, vec2<i32>(0), max_px);
-        let sz = raa_gtao_depth(sp, textureLoad(depth_tex, sp, 0));
+        let fp = raa_gtao_full(sp);
+        let sz = raa_gtao_depth(fp, textureLoad(depth_tex, fp, 0));
         let w = GAUSS[i] * exp(-abs(sz - z) / (0.02 * max(z, 1e-4)));
         sum = sum + textureLoad(src_ao, sp, 0).r * w;
         wsum = wsum + w;
@@ -57,7 +76,7 @@ fn raa_gtao_denoise(coord: vec2<i32>, axis: vec2<i32>) -> f32 {
 
 @compute @workgroup_size(8, 8)
 fn denoise_h(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let size = vec2<u32>(gtao_params.viewport.xy);
+    let size = raa_gtao_low_size();
     if (gid.x >= size.x || gid.y >= size.y) {
         return;
     }
@@ -67,11 +86,57 @@ fn denoise_h(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(8, 8)
 fn denoise_v(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let size = vec2<u32>(gtao_params.viewport.xy);
+    let size = raa_gtao_low_size();
     if (gid.x >= size.x || gid.y >= size.y) {
         return;
     }
     let coord = vec2<i32>(gid.xy);
     let ao = raa_gtao_denoise(coord, vec2<i32>(0, 1));
+    textureStore(out_v, coord, vec4<f32>(ao, 0.0, 0.0, 1.0));
+}
+
+// Full-resolution reconstruction of the low-resolution AO (factor > 1): the four nearest AO
+// texels with bilinear weights, times the denoise's depth weight when quality.w is 1
+// (joint-bilateral upsampling); sky pixels are unoccluded.
+@compute @workgroup_size(8, 8)
+fn upsample(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = vec2<u32>(gtao_params.viewport.xy);
+    if (gid.x >= size.x || gid.y >= size.y) {
+        return;
+    }
+    let coord = vec2<i32>(gid.xy);
+    let d = textureLoad(depth_tex, coord, 0);
+    if (d >= 1.0) {
+        textureStore(out_v, coord, vec4<f32>(1.0, 0.0, 0.0, 1.0));
+        return;
+    }
+    let f = raa_gtao_factor();
+    let z = raa_gtao_depth(coord, d);
+    let at = (vec2<f32>(gid.xy) - f32(f / 2u)) / f32(f);
+    let corner = floor(at);
+    let t = at - corner;
+    let max_px = vec2<i32>(raa_gtao_low_size()) - vec2<i32>(1);
+    let bilateral = gtao_params.quality.w > 0.5;
+    var sum = 0.0;
+    var wsum = 0.0;
+    var lin = 0.0;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let o = vec2<i32>(i32(i & 1u), i32(i >> 1u));
+        let texel = clamp(vec2<i32>(corner) + o, vec2<i32>(0), max_px);
+        let b = select(1.0 - t.x, t.x, o.x == 1) * select(1.0 - t.y, t.y, o.y == 1);
+        let v = textureLoad(src_ao, texel, 0).r;
+        lin = lin + v * b;
+        var w = b + 1e-4;
+        if (bilateral) {
+            let fp = raa_gtao_full(texel);
+            let sd = textureLoad(depth_tex, fp, 0);
+            let sz = select(raa_gtao_depth(fp, sd), 1e9, sd >= 1.0);
+            w = w * exp(-abs(sz - z) / (0.02 * max(z, 1e-4)));
+        }
+        sum = sum + v * w;
+        wsum = wsum + w;
+    }
+    // No depth-matching texel (thin feature lost at this resolution): bilinear.
+    let ao = select(lin, sum / max(wsum, 1e-30), bilateral && wsum > 1e-6);
     textureStore(out_v, coord, vec4<f32>(ao, 0.0, 0.0, 1.0));
 }

@@ -26,5 +26,5 @@ pub mod stages;
 mod tunables;
 
 pub use desc::{AoDesc, AoQuality};
-pub use feature::{GtaoFeature, GtaoHandle};
+pub use feature::{GtaoFeature, GtaoHandle, GtaoScale};
 pub use tunables::tunables;
