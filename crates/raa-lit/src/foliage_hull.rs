@@ -56,8 +56,22 @@ fn collect_points(source: &FoliageSource) -> Result<Vec<Point>, RaaError> {
     if !finite3(source.min) || !finite3(source.max) {
         return Err(invalid("foliage source bounds must be finite"));
     }
+    let corners = source
+        .triangles
+        .len()
+        .checked_mul(3)
+        .ok_or_else(|| invalid("foliage source has too many triangles for a hull"))?;
     let mut seen = HashSet::new();
+    seen.try_reserve(corners).map_err(|_| {
+        invalid(format!(
+            "foliage hull could not reserve {corners} position key(s)"
+        ))
+    })?;
     let mut points = Vec::new();
+    points.try_reserve_exact(corners).map_err(|_| {
+        let bytes = corners.saturating_mul(std::mem::size_of::<Point>());
+        invalid(format!("foliage hull could not allocate {bytes} bytes"))
+    })?;
     for triangle in &source.triangles {
         for position in triangle.positions {
             if !finite3(position) {
@@ -236,9 +250,10 @@ fn canonical_order(faces: &mut [Face]) {
 /// Builds the closed convex hull of every retained source-tree position.
 ///
 /// The result is indexed triangle-list [`MeshData`] in source-root metres with one
-/// outward-wound face normal per triangle and no vertex colour. An empty source returns
-/// an empty mesh; a non-finite source or one without three-dimensional extent is refused
-/// with `foliage.invalid`. Repeated calls on one source return numerically equal meshes.
+/// outward-wound face normal per triangle and no vertex colour. An empty, non-finite,
+/// collinear or coplanar source (one without three-dimensional extent), or one whose
+/// buffers cannot be allocated, is refused with `foliage.invalid`; this function never
+/// panics. Repeated calls on one source return numerically equal meshes.
 ///
 /// Handoff: 'Publish completed foliage assets in the renderer' (card #9135) calls
 /// `build_foliage_hull` and uploads the returned mesh as the native foliage hull; today
@@ -248,7 +263,7 @@ fn canonical_order(faces: &mut [Face]) {
 pub fn build_foliage_hull(source: &FoliageSource) -> Result<MeshData, RaaError> {
     let points = collect_points(source)?;
     if points.is_empty() {
-        return Ok(MeshData::new());
+        return Err(invalid("foliage source is empty: a hull needs positions"));
     }
     let eps = tolerance(&points);
     let tetrahedron = initial_tetrahedron(&points, eps)
@@ -292,9 +307,15 @@ pub fn build_foliage_hull(source: &FoliageSource) -> Result<MeshData, RaaError> 
     canonical_order(&mut faces);
 
     let mut mesh = MeshData::new();
-    mesh.positions.reserve(faces.len() * 3);
-    mesh.normals.reserve(faces.len() * 3);
-    mesh.indices.reserve(faces.len() * 3);
+    let corners = faces.len().saturating_mul(3);
+    let refused = |_| {
+        invalid(format!(
+            "foliage hull could not allocate {corners} corner(s)"
+        ))
+    };
+    mesh.positions.try_reserve_exact(corners).map_err(refused)?;
+    mesh.normals.try_reserve_exact(corners).map_err(refused)?;
+    mesh.indices.try_reserve_exact(corners).map_err(refused)?;
     for face in faces {
         let normal = face.normal.map(|v| v as f32);
         let base = mesh.positions.len() as u32;

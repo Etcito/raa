@@ -184,6 +184,35 @@ pub fn validate_source(source: &FoliageSource, params: &FoliageParams) -> Result
     Ok(())
 }
 
+/// Host bytes per source triangle on the impostor route: three stream-0 corners (24 B),
+/// three stream-1 corners (40 B), one instance record, its extra, its id, its zeroed
+/// previous-affine record (64 B) and its material slot and table entries (8 B).
+const IMPOSTOR_BYTES_PER_TRIANGLE: usize =
+    3 * 24 + 3 * 40 + crate::INSTANCE_GPU_SIZE + crate::INSTANCE_EXTRA_GPU_SIZE + 4 + 64 + 8;
+
+/// Checks that the impostor route can allocate its source-proportional host buffers for
+/// `triangles` source triangles and returns their byte total. An overflowing size or a
+/// refused allocation (probed with `Vec::try_reserve_exact`, never an abort) is
+/// `foliage.invalid` naming the byte count. Successful bakes are unchanged by the check.
+pub fn check_impostor_allocation(triangles: usize) -> Result<usize, RaaError> {
+    let bytes = triangles
+        .checked_mul(IMPOSTOR_BYTES_PER_TRIANGLE)
+        .ok_or_else(|| {
+            invalid(format!(
+                "foliage impostor bake of {triangles} triangle(s) needs more than {} bytes",
+                usize::MAX
+            ))
+        })?;
+    let largest = triangles.saturating_mul(3 * 40);
+    let mut probe: Vec<u8> = Vec::new();
+    probe.try_reserve_exact(largest).map_err(|_| {
+        invalid(format!(
+            "foliage impostor bake could not allocate {largest} bytes ({bytes} in total)"
+        ))
+    })?;
+    Ok(bytes)
+}
+
 /// Shared between the renderer and its pending preparations: the latest requested
 /// generation per material and the proxy meshes published since the last frame.
 #[derive(Default)]
@@ -329,6 +358,7 @@ pub(crate) async fn bake_foliage(
     let params = settings.params;
     let (mesh, volume, references, layers) = match route {
         FoliageRoute::Impostor => {
+            check_impostor_allocation(source.triangles.len())?;
             let hull = build_foliage_hull(&source)?;
             let references = render_foliage_references(
                 &gpu,
@@ -381,8 +411,10 @@ pub(crate) fn publish_foliage(
     completed: CompletedFoliage,
 ) -> Result<FoliageAsset, RaaError> {
     let params = settings.params;
+    let busy = || invalid("the foliage bake state is borrowed during publication");
     if !state
-        .borrow()
+        .try_borrow()
+        .map_err(|_| busy())?
         .is_current(settings.material, params.generation)
     {
         return Err(invalid(format!(
@@ -410,9 +442,11 @@ pub(crate) fn publish_foliage(
         }
     });
     let resources = Rc::new(completed.resources);
+    let mut published = state.try_borrow_mut().map_err(|_| busy())?;
     lit.set_foliage(settings.material, Some(Rc::clone(&resources)))?;
     guard.complete();
-    state.borrow_mut().publish(mesh);
+    published.publish(mesh);
+    drop(published);
     Ok(FoliageAsset {
         resources,
         mesh,

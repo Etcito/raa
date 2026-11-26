@@ -240,3 +240,86 @@ fn references_and_packed_layers_submit_on_the_gpu() {
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll");
 }
+
+/// Three triangles with sparse, large material ids (`u32::MAX` included).
+fn sparse_material_source() -> FoliageSource {
+    let mut source = triangle_source();
+    let base = source.triangles[0];
+    source.triangles = [4_000_000_000u32, 7, u32::MAX, 7]
+        .iter()
+        .enumerate()
+        .map(|(i, &material)| {
+            let mut t = base;
+            t.material = material;
+            t.source_tag = i as u32;
+            t
+        })
+        .collect();
+    source
+}
+
+#[test]
+fn sparse_large_material_ids_get_a_compact_table() {
+    let source = sparse_material_source();
+    let outcome = std::panic::catch_unwind(|| raa_lit::foliage_reference::material_slots(&source));
+    let (ids, slots) = outcome
+        .expect("material_slots must not panic")
+        .expect("sparse ids are accepted");
+    assert_eq!(ids, vec![7, 4_000_000_000, u32::MAX]);
+    assert_eq!(slots, vec![1, 0, 2, 0]);
+}
+
+#[test]
+fn sparse_large_material_ids_render_references() {
+    let test = "sparse_large_material_ids_render_references";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let pipeline = Rc::new(RefCell::new(Pipeline::new(
+        &gpu,
+        wgpu::TextureFormat::Rgba8Unorm,
+        false,
+    )));
+    let lit = LitRenderer::new(&gpu, &pipeline, LitOptions::default()).expect("lit renderer");
+    let source = sparse_material_source();
+    let references =
+        raa_lit::foliage_reference::render_foliage_references(&gpu, &lit.handle(), &source, 8, 64)
+            .expect("references of a sparse-material source");
+    assert_eq!(references.views.len(), 8);
+    raa_lit::foliage_reference::pack_foliage_layers(&gpu, &source, &references)
+        .expect("packed layers");
+    gpu.device()
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+}
+
+#[test]
+fn refused_requests_return_err_without_panicking() {
+    let test = "refused_requests_return_err_without_panicking";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let pipeline = Rc::new(RefCell::new(Pipeline::new(
+        &gpu,
+        wgpu::TextureFormat::Rgba8Unorm,
+        false,
+    )));
+    let lit = LitRenderer::new(&gpu, &pipeline, LitOptions::default()).expect("lit renderer");
+    let handle = lit.handle();
+    let source = sparse_material_source();
+    let mut nonfinite = source.clone();
+    nonfinite.max[1] = f32::NAN;
+    for (views, resolution, source) in [(7, 64, &source), (8, 63, &source), (8, 64, &nonfinite)] {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            raa_lit::foliage_reference::render_foliage_references(
+                &gpu, &handle, source, views, resolution,
+            )
+        }));
+        match outcome.expect("render_foliage_references must not panic") {
+            Ok(_) => panic!("views {views} resolution {resolution} must be refused"),
+            Err(err) => assert_eq!(err.code(), invalid_code(), "{}", err.message()),
+        }
+    }
+}

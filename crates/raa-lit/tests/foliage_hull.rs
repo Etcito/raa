@@ -228,12 +228,8 @@ fn cube_is_contained_with_volume_one_and_repeats_exactly() {
 }
 
 #[test]
-fn empty_source_returns_an_empty_mesh() {
-    let mesh = build_foliage_hull(&source(Vec::new())).expect("empty hull");
-    assert!(mesh.positions.is_empty());
-    assert!(mesh.normals.is_empty());
-    assert!(mesh.indices.is_empty());
-    mesh.validate().expect("valid empty mesh");
+fn empty_source_is_refused() {
+    assert_invalid(&source(Vec::new()));
 }
 
 #[test]

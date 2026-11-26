@@ -275,16 +275,54 @@ struct SourceGeometry {
     ids: Vec<u8>,
 }
 
-fn source_geometry(source: &FoliageSource) -> SourceGeometry {
+/// The byte size `count x per_item`, refused with a message naming the request when it
+/// overflows `usize`.
+fn buffer_bytes(what: &str, count: usize, per_item: usize) -> Result<usize, RaaError> {
+    count.checked_mul(per_item).ok_or_else(|| {
+        invalid(format!(
+            "foliage reference {what} buffer of {count} x {per_item} bytes overflows"
+        ))
+    })
+}
+
+/// An empty buffer with exactly `bytes` reserved, or `foliage.invalid` naming the byte
+/// count when the allocation is refused (never an allocation-failure abort).
+fn reserve_bytes(what: &str, bytes: usize) -> Result<Vec<u8>, RaaError> {
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(bytes).map_err(|_| {
+        invalid(format!(
+            "foliage reference {what} buffer could not allocate {bytes} bytes"
+        ))
+    })?;
+    Ok(buffer)
+}
+
+/// The source geometry of `triangles` with every instance record naming its compact
+/// material slot `slots[i]` (an index into the distinct-material table).
+fn source_geometry(source: &FoliageSource, slots: &[u32]) -> Result<SourceGeometry, RaaError> {
     let count = source.triangles.len();
+    let corners = buffer_bytes("corner", count, 3)?;
     let mut geometry = SourceGeometry {
-        stream0: Vec::with_capacity(count * 3 * 24),
-        stream1: Vec::with_capacity(count * 3 * 40),
-        instances: Vec::with_capacity(count * INSTANCE_GPU_SIZE),
-        extras: Vec::with_capacity(count * INSTANCE_EXTRA_GPU_SIZE),
-        ids: Vec::with_capacity(count * 4),
+        stream0: reserve_bytes("stream0", buffer_bytes("stream0", corners, 24)?)?,
+        stream1: reserve_bytes("stream1", buffer_bytes("stream1", corners, 40)?)?,
+        instances: reserve_bytes(
+            "instance",
+            buffer_bytes("instance", count, INSTANCE_GPU_SIZE)?,
+        )?,
+        extras: reserve_bytes(
+            "extras",
+            buffer_bytes("extras", count, INSTANCE_EXTRA_GPU_SIZE)?,
+        )?,
+        ids: reserve_bytes("id", buffer_bytes("id", count, 4)?)?,
     };
+    let mut extra = Vec::with_capacity(INSTANCE_EXTRA_GPU_SIZE);
+    InstanceExtra::default().write_gpu(&mut extra);
     for (index, triangle) in source.triangles.iter().enumerate() {
+        let slot = *slots
+            .get(index)
+            .ok_or_else(|| invalid(format!("foliage triangle {index} has no material slot")))?;
+        let id = u32::try_from(index)
+            .map_err(|_| invalid(format!("foliage triangle index {index} exceeds u32")))?;
         for corner in 0..3 {
             for value in triangle.positions[corner] {
                 geometry.stream0.extend_from_slice(&value.to_le_bytes());
@@ -306,23 +344,68 @@ fn source_geometry(source: &FoliageSource) -> SourceGeometry {
         write_instance_record(
             &mut record,
             &source.root_world,
-            triangle.material,
+            slot,
             triangle.source_tag,
             0,
         );
         geometry.instances.extend_from_slice(&record);
-        let mut extra = Vec::with_capacity(INSTANCE_EXTRA_GPU_SIZE);
-        InstanceExtra::default().write_gpu(&mut extra);
         geometry.extras.extend_from_slice(&extra);
-        geometry
-            .ids
-            .extend_from_slice(&(index as u32).to_le_bytes());
+        geometry.ids.extend_from_slice(&id.to_le_bytes());
     }
-    geometry
+    Ok(geometry)
+}
+
+/// The distinct material ids the triangles use, in ascending id order, and each
+/// triangle's slot in that list. Nothing is sized or looped by the numeric id value; the
+/// reference draws index the material table by slot. A refused allocation is
+/// `foliage.invalid` naming the byte count.
+pub fn material_slots(source: &FoliageSource) -> Result<(Vec<u32>, Vec<u32>), RaaError> {
+    let count = source.triangles.len();
+    let mut ids: Vec<u32> = Vec::new();
+    ids.try_reserve_exact(count).map_err(|_| {
+        invalid(format!(
+            "foliage material table could not allocate {} bytes",
+            count.saturating_mul(4)
+        ))
+    })?;
+    ids.extend(source.triangles.iter().map(|t| t.material));
+    ids.sort_unstable();
+    ids.dedup();
+    let mut slots: Vec<u32> = Vec::new();
+    slots.try_reserve_exact(count).map_err(|_| {
+        invalid(format!(
+            "foliage material slots could not allocate {} bytes",
+            count.saturating_mul(4)
+        ))
+    })?;
+    for triangle in &source.triangles {
+        let slot = ids.binary_search(&triangle.material).map_err(|_| {
+            invalid(format!(
+                "foliage material {} has no slot",
+                triangle.material
+            ))
+        })?;
+        slots.push(
+            u32::try_from(slot)
+                .map_err(|_| invalid("foliage material table exceeds u32".into()))?,
+        );
+    }
+    Ok((ids, slots))
+}
+
+/// Refuses with a message, instead of a `RefCell` panic, when the renderer state is
+/// mutably borrowed. Every `LitHandle` accessor this module calls borrows it immutably and
+/// returns before the next call, so a free state here stays free for those calls.
+fn ensure_lit_free(lit: &LitHandle) -> Result<(), RaaError> {
+    lit.shared.try_borrow().map(|_| ()).map_err(|_| {
+        invalid("the renderer state is borrowed while the foliage references render".into())
+    })
 }
 
 fn compose_reference(lit: &LitHandle, key: &VariantKey) -> Result<String, RaaError> {
-    let shared = lit.shared.borrow();
+    let shared = lit.shared.try_borrow().map_err(|_| {
+        invalid("the renderer state is borrowed while the foliage reference composes".into())
+    })?;
     shared
         .composer()
         .compose_foliage_reference(&shared.fns, key)
@@ -334,6 +417,7 @@ fn reference_pipelines(
     lit: &LitHandle,
     classes: &[(MaterialFnId, u32)],
 ) -> Result<HashMap<(u32, bool), wgpu::RenderPipeline>, RaaError> {
+    ensure_lit_free(lit)?;
     let frame_layout = lit.frame_layout();
     let mut pipelines = HashMap::new();
     for &(fn_id, flags) in classes {
@@ -421,22 +505,49 @@ pub fn render_foliage_references(
     gpu.ensure_live()?;
     let cameras = reference_cameras(source.min, source.max, source.root_world, views)?;
 
-    let max_material = source
-        .triangles
-        .iter()
-        .map(|t| t.material)
-        .max()
-        .unwrap_or(0);
-    let mut material_bytes =
-        Vec::with_capacity((max_material as usize + 1) * crate::SURFACE_MATERIAL_GPU_SIZE);
-    let mut classes = Vec::with_capacity(max_material as usize + 1);
-    for id in 0..=max_material {
+    ensure_lit_free(lit)?;
+    let (material_ids, slots) = material_slots(source)?;
+    let mut material_bytes = reserve_bytes(
+        "material",
+        buffer_bytes(
+            "material",
+            material_ids.len(),
+            crate::SURFACE_MATERIAL_GPU_SIZE,
+        )?,
+    )?;
+    let mut classes = Vec::new();
+    classes.try_reserve_exact(material_ids.len()).map_err(|_| {
+        invalid(format!(
+            "foliage material classes could not allocate {} entries",
+            material_ids.len()
+        ))
+    })?;
+    for &id in &material_ids {
         let record = lit.material_record(MaterialId(id)).unwrap_or_default();
         classes.push((lit.material_fn_of(MaterialId(id)), record.flags));
         record.write_gpu(&mut material_bytes);
     }
     let pipelines = reference_pipelines(gpu, lit, &classes)?;
-    let geometry = source_geometry(source);
+    let geometry = source_geometry(source, &slots)?;
+    // The private previous-affine buffer `SourceDrawBuffers::new` zero-fills: proven
+    // allocatable here so a too-large source is an error, not an allocation abort.
+    drop(reserve_bytes(
+        "previous",
+        buffer_bytes("previous", source.triangles.len(), 64)?,
+    )?);
+    let max_buffer = gpu.device().limits().max_buffer_size;
+    for (what, len) in [
+        ("stream0", geometry.stream0.len()),
+        ("stream1", geometry.stream1.len()),
+        ("instance", geometry.instances.len()),
+    ] {
+        if len as u64 > max_buffer {
+            return Err(invalid(format!(
+                "foliage reference {what} buffer of {len} bytes exceeds the device limit of {max_buffer} bytes"
+            )));
+        }
+    }
+    ensure_lit_free(lit)?;
     let buffers = SourceDrawBuffers::new(
         gpu,
         lit,
@@ -522,19 +633,28 @@ pub fn render_foliage_references(
             pass.set_vertex_buffer(0, stream0.slice(..));
             pass.set_vertex_buffer(1, buffers.ids.slice(..));
             pass.set_vertex_buffer(2, stream1.slice(..));
-            for (index, triangle) in source.triangles.iter().enumerate() {
-                let (fn_id, flags) = classes[triangle.material as usize];
+            for (index, &slot) in slots.iter().enumerate() {
+                let &(fn_id, flags) = classes
+                    .get(slot as usize)
+                    .ok_or_else(|| invalid(format!("foliage material slot {slot} has no class")))?;
                 let pipeline = pipelines
                     .get(&(fn_id.0, flags & FLAG_DOUBLE_SIDED != 0))
-                    .expect("every reference material class built its pipeline");
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "foliage material function {} has no reference pipeline",
+                            fn_id.0
+                        ))
+                    })?;
                 pass.set_pipeline(pipeline);
-                let base = 3 * index as u32;
-                pass.draw(base..base + 3, index as u32..index as u32 + 1);
+                let index = index as u32;
+                let base = 3 * index;
+                pass.draw(base..base + 3, index..index + 1);
             }
         }
         submission = Some(gpu.queue().submit([encoder.finish()]));
     }
-    let submission = submission.expect("at least one reference view is submitted");
+    let submission =
+        submission.ok_or_else(|| invalid("no foliage reference view was submitted".into()))?;
     let table = cameras
         .iter()
         .map(|c| (c.root_to_clip.to_cols_array(), [c.near, c.far]))

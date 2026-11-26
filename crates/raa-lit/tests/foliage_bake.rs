@@ -199,3 +199,18 @@ fn release_detaches_before_removing_and_dropping() {
     assert_eq!(*log.borrow(), vec![("detach", true), ("mesh", true)]);
     assert!(weak.upgrade().is_none(), "the generation is dropped last");
 }
+
+#[test]
+fn impostor_route_refuses_too_large_allocations_without_panicking() {
+    use raa_lit::foliage_bake::check_impostor_allocation;
+    let small = check_impostor_allocation(4).expect("a small source fits");
+    assert!(small > 0);
+    for triangles in [usize::MAX, usize::MAX / 128, isize::MAX as usize / 100] {
+        let outcome = std::panic::catch_unwind(|| check_impostor_allocation(triangles));
+        let err = outcome
+            .expect("the impostor allocation check must not panic")
+            .expect_err("a too-large impostor allocation must be refused");
+        assert!(err.message().contains("bytes"), "{}", err.message());
+        assert_eq!(code(err), "foliage.invalid");
+    }
+}
