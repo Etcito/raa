@@ -387,7 +387,7 @@ impl ExecExtension for WiringExtension {
                 resolve_display: matches!(node.type_id.as_str(), "pass.taa" | "neural.super-resolution"),
                 display_post: matches!(
                     node.type_id.as_str(),
-                    "pass.bloom" | "pass.grading" | "pass.sharpen"
+                    "pass.bloom" | "pass.exposure.auto" | "pass.grading" | "pass.sharpen"
                 ),
             });
         }

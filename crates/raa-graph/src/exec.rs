@@ -54,6 +54,9 @@ pub struct HandleSet {
     pub nrc: Option<raa_sdf_trace::mesh::NrcHandle>,
     pub taa: Option<raa_taa::TaaHandle>,
     pub sky: Option<raa_sky::SkyHandle>,
+    /// The auto-exposure handles: the main pipeline's, then one per viewport post chain. Written
+    /// only by the `exposure` extension (node `pass.exposure.auto`).
+    pub auto_exposure: Vec<raa_exposure::AutoExposureHandle>,
 }
 
 /// What one executor call works with: the device, the pipeline, the handles, the Engine's view

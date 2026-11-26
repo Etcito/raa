@@ -14,7 +14,7 @@ pub fn family() -> Box<dyn NodeFamily> {
 }
 
 /// The chain passes whose `color` input and output become generic.
-const CHAIN: [&str; 14] = [
+const CHAIN: [&str; 15] = [
     "pass.gi.history",
     "pass.ssr",
     "pass.fog",
@@ -26,6 +26,7 @@ const CHAIN: [&str; 14] = [
     "neural.super-resolution",
     "pass.dof",
     "pass.bloom",
+    "pass.exposure.auto",
     "pass.grading",
     "pass.sharpen",
     "pass.cel.resolve",

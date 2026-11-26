@@ -201,6 +201,9 @@ fn create_apply_pipeline(
     })
 }
 
+/// Cached bind groups: the two own HDR chain textures plus graph-bound chain images.
+const MAX_GROUPS: usize = 8;
+
 /// The cached bind groups of one HDR chain texture: the compute pair and the apply draw read it.
 struct TextureGroups {
     texture: wgpu::Texture,
@@ -222,7 +225,8 @@ struct AutoExposurePass {
     result: wgpu::Buffer,
     slots: ReadbackSlots,
     scratch: [u8; PARAMS_SIZE],
-    /// One entry per HDR chain texture (A and B), rebuilt by `resize` only.
+    /// One entry per HDR chain texture (A and B, rebuilt by `resize`) and per graph-bound
+    /// source seen by `record` (at most MAX_GROUPS in all).
     groups: Vec<TextureGroups>,
 }
 
@@ -368,13 +372,25 @@ impl FeaturePass for AutoExposurePass {
     /// Histogram and resolve, the apply draw into hdr.dst(), the swap, then the state copy.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let hdr = ctx.targets.hdr();
+        // A render graph binds its own chain images (`HdrChain::bind`), possibly at another
+        // extent after a temporal resolve: their groups are created on first use and kept in a
+        // small cache, as raa-sharpen does.
+        if !self.groups.iter().any(|g| g.texture == *hdr.src_texture()) {
+            if self.groups.len() >= MAX_GROUPS {
+                self.groups.remove(0);
+            }
+            let groups = self.texture_groups(ctx.gpu.device(), hdr.src_texture(), hdr.src());
+            self.groups.push(groups);
+        }
         let Some(groups) = self.groups.iter().find(|g| g.texture == *hdr.src_texture()) else {
             return Err(RaaError::Resource(
-                "exposure.auto: the HDR source is not a texture the pass was resized for"
-                    .to_owned(),
+                "exposure.auto: no bind group for the HDR source".to_owned(),
             ));
         };
-        let (width, height) = ctx.size;
+        // The source's own extent: a graph-bound chain image after a temporal resolve is display
+        // sized while `ctx.size` is the scene extent.
+        let extent = hdr.src_texture().size();
+        let (width, height) = (extent.width, extent.height);
         let x = width.div_ceil(SAMPLE_STRIDE).div_ceil(HISTOGRAM_WORKGROUP);
         let y = height.div_ceil(SAMPLE_STRIDE).div_ceil(HISTOGRAM_WORKGROUP);
         {

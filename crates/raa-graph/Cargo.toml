@@ -30,6 +30,7 @@ raa-dof = { path = "../raa-dof" }
 raa-fog = { path = "../raa-fog" }
 raa-shafts = { path = "../raa-shafts" }
 raa-grading = { path = "../raa-grading" }
+raa-exposure = { path = "../raa-exposure" }
 raa-cel = { path = "../raa-cel" }
 raa-tonemap = { path = "../raa-tonemap" }
 raa-oit = { path = "../raa-oit" }

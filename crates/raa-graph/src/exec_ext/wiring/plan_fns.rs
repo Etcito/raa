@@ -137,6 +137,7 @@ pub fn chain_type(ty: &str) -> bool {
                 | "pass.bloom"
                 | "ssr.composite"
                 | "ssr.replace"
+                | "pass.exposure.auto"
                 | "pass.grading"
                 | "pass.sharpen"
                 | "pass.cel.resolve"

@@ -973,6 +973,7 @@ dependencies = [
  "raa-contact",
  "raa-core",
  "raa-dof",
+ "raa-exposure",
  "raa-fog",
  "raa-geom",
  "raa-gi",

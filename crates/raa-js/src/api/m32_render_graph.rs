@@ -220,6 +220,20 @@ pub(crate) mod web {
             nrc: st.features.get::<raa_sdf_trace::mesh::NrcHandle>().cloned(),
             taa: st.features.get::<TaaHandle>().cloned(),
             sky: st.features.get::<raa_sky::SkyHandle>().cloned(),
+            auto_exposure: {
+                let mut all: Vec<raa_exposure::AutoExposureHandle> = st
+                    .features
+                    .get::<raa_exposure::AutoExposureHandle>()
+                    .cloned()
+                    .into_iter()
+                    .collect();
+                let mut index = 0;
+                while let Some(view) = crate::api::m07_pipeline::view_auto_exposure(st, index) {
+                    all.push(view);
+                    index += 1;
+                }
+                all
+            },
         };
         let pipeline = st.pipeline.clone();
         let lit = &mut st.lit;
