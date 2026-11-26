@@ -746,11 +746,13 @@ struct MapState {
 /// queue completion on a native host.
 struct BufferRead {
     buffer: wgpu::Buffer,
+    #[cfg(not(target_arch = "wasm32"))]
     gpu: GpuContext,
     state: Arc<Mutex<MapState>>,
 }
 
 impl BufferRead {
+    #[cfg(not(target_arch = "wasm32"))]
     fn new(gpu: &GpuContext, buffer: wgpu::Buffer) -> BufferRead {
         let state = Arc::new(Mutex::new(MapState::default()));
         let signal = Arc::clone(&state);
@@ -769,6 +771,23 @@ impl BufferRead {
             gpu: gpu.clone(),
             state,
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn new(_gpu: &GpuContext, buffer: wgpu::Buffer) -> BufferRead {
+        let state = Arc::new(Mutex::new(MapState::default()));
+        let signal = Arc::clone(&state);
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let mut state = signal.lock().unwrap_or_else(|error| error.into_inner());
+                state.done = true;
+                state.error = result.err().map(|error| error.to_string());
+                if let Some(waker) = state.waker.take() {
+                    waker.wake();
+                }
+            });
+        BufferRead { buffer, state }
     }
 }
 

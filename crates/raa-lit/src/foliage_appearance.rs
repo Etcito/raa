@@ -219,11 +219,13 @@ struct MapState {
 /// One mapped readback of an appearance output staging buffer.
 struct Readback {
     buffer: wgpu::Buffer,
+    #[cfg(not(target_arch = "wasm32"))]
     gpu: GpuContext,
     state: Arc<Mutex<MapState>>,
 }
 
 impl Readback {
+    #[cfg(not(target_arch = "wasm32"))]
     fn new(gpu: &GpuContext, buffer: wgpu::Buffer) -> Readback {
         let state = Arc::new(Mutex::new(MapState::default()));
         let signal = Arc::clone(&state);
@@ -242,6 +244,23 @@ impl Readback {
             gpu: gpu.clone(),
             state,
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn new(_gpu: &GpuContext, buffer: wgpu::Buffer) -> Readback {
+        let state = Arc::new(Mutex::new(MapState::default()));
+        let signal = Arc::clone(&state);
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let mut s = signal.lock().unwrap_or_else(|e| e.into_inner());
+                s.done = true;
+                s.error = result.err().map(|e| e.to_string());
+                if let Some(waker) = s.waker.take() {
+                    waker.wake();
+                }
+            });
+        Readback { buffer, state }
     }
 }
 
