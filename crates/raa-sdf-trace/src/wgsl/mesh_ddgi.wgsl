@@ -632,7 +632,10 @@ fn ddgi_max3(v: vec3<f32>) -> f32 {
 // shortens it.
 fn ddgi_hysteresis(age: u32, fresh: bool, change: f32) -> f32 {
     let a = f32(age);
-    var h = select(min(ddgi_params.tuning.x, a / (a + 1.0)), 0.0, fresh);
+    var h = min(ddgi_params.tuning.x, a / (a + 1.0));
+    // Young groups: short window, see `ddgi_progressive`.
+    if a < ddgi_params.sampling.z { h = min(h, 0.8); }
+    h = select(h, 0.0, fresh);
     if change > ddgi_params.tuning.z { h = max(0.0, h - 0.15); }
     return h;
 }
