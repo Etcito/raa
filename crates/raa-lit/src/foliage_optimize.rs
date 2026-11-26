@@ -433,6 +433,11 @@ pub fn assemble_optimized_foliage(
         )));
     }
     let mut mesh = MeshData::new();
+    let wood_count = source.triangles.iter().filter(|t| !t.foliage).count();
+    crate::foliage_stochastic::reserve_triangles(
+        &mut mesh,
+        wood_count.saturating_add(terminal.len()),
+    )?;
     let mut wood = 0u32;
     for triangle in &source.triangles {
         if triangle.foliage {
@@ -674,7 +679,13 @@ impl FoliageCompute {
         };
         gpu.queue()
             .write_buffer(&params, 0, &params_record.to_bytes());
-        let mut records = Vec::with_capacity(triangles.len() * TRIANGLE_RECORD_STRIDE);
+        let record_len = triangles.len() * TRIANGLE_RECORD_STRIDE;
+        let mut records = Vec::new();
+        records.try_reserve_exact(record_len).map_err(|_| {
+            invalid(format!(
+                "cannot reserve {record_len} bytes of foliage triangle records"
+            ))
+        })?;
         for triangle in triangles {
             records.extend_from_slice(&triangle_to_record(*triangle));
         }
@@ -746,6 +757,9 @@ struct MapState {
 /// queue completion on a native host.
 struct BufferRead {
     buffer: wgpu::Buffer,
+    /// `None` copies the whole mapped range; `Some(stride)` keeps only the first 32-bit
+    /// word of every `stride`-byte record (see [`read_record_heads`]).
+    stride: Option<u64>,
     #[cfg(not(target_arch = "wasm32"))]
     gpu: GpuContext,
     state: Arc<Mutex<MapState>>,
@@ -768,6 +782,7 @@ impl BufferRead {
             });
         BufferRead {
             buffer,
+            stride: None,
             gpu: gpu.clone(),
             state,
         }
@@ -787,8 +802,74 @@ impl BufferRead {
                     waker.wake();
                 }
             });
-        BufferRead { buffer, state }
+        BufferRead {
+            buffer,
+            stride: None,
+            state,
+        }
     }
+}
+
+impl BufferRead {
+    /// Reads only the first word of every `stride`-byte record of the mapped buffer.
+    fn record_heads(mut self, stride: u64) -> BufferRead {
+        self.stride = Some(stride);
+        self
+    }
+}
+
+/// Bytes of one mapped window a chunked readback copies into the heap at a time.
+const READBACK_WINDOW: u64 = 1 << 20;
+
+/// The first little-endian 32-bit word of every `stride`-byte record of the mapped
+/// `buffer`, as bytes. It walks the buffer in whole-record windows of about
+/// [`READBACK_WINDOW`] bytes, so the heap never holds the full mapped range (a mapped range
+/// is a heap copy on the web backend); the result is reserved fallibly.
+fn read_record_heads(buffer: &wgpu::Buffer, stride: u64) -> Result<Vec<u8>, RaaError> {
+    let size = buffer.size();
+    if stride < 4 || !size.is_multiple_of(stride) {
+        return Err(bake_failed(format!(
+            "foliage readback of {size} bytes is not whole {stride}-byte records"
+        )));
+    }
+    let records = size / stride;
+    let mut heads = Vec::new();
+    heads
+        .try_reserve_exact(records as usize * 4)
+        .map_err(|_| bake_failed(format!("cannot reserve {} readback bytes", records * 4)))?;
+    // Window offsets stay multiples of the 8-byte map alignment: an even record count
+    // per window when the stride is only 4-aligned.
+    let mut per_window = (READBACK_WINDOW / stride).max(2);
+    if !stride.is_multiple_of(8) {
+        per_window -= per_window % 2;
+    }
+    let mut first = 0u64;
+    while first < records {
+        let last = (first + per_window).min(records);
+        let mapped = buffer
+            .slice(first * stride..last * stride)
+            .get_mapped_range()
+            .map_err(|error| bake_failed(format!("foliage mapped range unavailable: {error}")))?;
+        for record in mapped.chunks_exact(stride as usize) {
+            heads.extend_from_slice(&record[..4]);
+        }
+        first = last;
+    }
+    Ok(heads)
+}
+
+/// A fallible heap copy of the whole mapped `buffer`.
+fn read_all(buffer: &wgpu::Buffer) -> Result<Vec<u8>, RaaError> {
+    let mapped = buffer
+        .slice(..)
+        .get_mapped_range()
+        .map_err(|error| bake_failed(format!("foliage mapped range unavailable: {error}")))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(mapped.len())
+        .map_err(|_| bake_failed(format!("cannot reserve {} readback bytes", mapped.len())))?;
+    bytes.extend_from_slice(&mapped);
+    Ok(bytes)
 }
 
 impl Future for BufferRead {
@@ -814,20 +895,12 @@ impl Future for BufferRead {
                 "foliage readback failed: {error}"
             ))));
         }
-        let bytes = {
-            let slice = this.buffer.slice(..);
-            let mapped = match slice.get_mapped_range() {
-                Ok(mapped) => mapped,
-                Err(error) => {
-                    return Poll::Ready(Err(bake_failed(format!(
-                        "foliage mapped range unavailable: {error}"
-                    ))));
-                }
-            };
-            mapped.to_vec()
+        let bytes = match this.stride {
+            Some(stride) => read_record_heads(&this.buffer, stride),
+            None => read_all(&this.buffer),
         };
         this.buffer.unmap();
-        Poll::Ready(Ok(bytes))
+        Poll::Ready(bytes)
     }
 }
 
@@ -902,11 +975,20 @@ fn read_bin_counts(
             });
         encoder.copy_buffer_to_buffer(&bins, 0, &staging, 0, size);
         gpu.queue().submit([encoder.finish()]);
-        let mapped = BufferRead::new(&gpu, staging).await?;
-        Ok(mapped
-            .chunks_exact(stride as usize)
-            .map(|record| u32::from_le_bytes([record[0], record[1], record[2], record[3]]))
-            .collect())
+        // Only each tile's count word reaches the heap, never the full bin records.
+        let heads = BufferRead::new(&gpu, staging).record_heads(stride).await?;
+        let mut counts = Vec::new();
+        counts
+            .try_reserve_exact(heads.len() / 4)
+            .map_err(|_| bake_failed(format!("cannot reserve {} bin counts", heads.len() / 4)))?;
+        counts.extend(
+            heads
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| u32::from_le_bytes(*word)),
+        );
+        Ok(counts)
     }
 }
 

@@ -1771,7 +1771,20 @@ impl LitHandle {
         }
         source_normal_matrix(&root_world, "root_world")?;
         let s = self.shared.borrow();
-        let mut triangles = Vec::new();
+        // The snapshot is reserved once at its exact size, fallibly: growing it by pushes
+        // held the old and the doubled list at once (up to three times the snapshot), and
+        // a refused growth aborted the wasm module instead of returning an error.
+        let total = draws.iter().fold(0usize, |sum, draw| {
+            let count = s.meshes.source(draw.0).map_or(0, |(_, _, count)| count);
+            sum.saturating_add(count as usize / 3)
+        });
+        let mut triangles: Vec<SourceTriangle> = Vec::new();
+        triangles.try_reserve_exact(total).map_err(|_| {
+            foliage_invalid(format!(
+                "foliage source of {total} triangles needs {} bytes the heap cannot hold",
+                total.saturating_mul(std::mem::size_of::<SourceTriangle>())
+            ))
+        })?;
         let mut bounds = Aabb::EMPTY;
         for &(mesh, material, source_tag, model_to_root, foliage) in draws {
             let normal_matrix = source_normal_matrix(&model_to_root, "model_to_root")?;

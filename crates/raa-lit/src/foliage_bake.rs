@@ -184,16 +184,17 @@ pub fn validate_source(source: &FoliageSource, params: &FoliageParams) -> Result
     Ok(())
 }
 
-/// Host bytes per source triangle on the impostor route: three stream-0 corners (24 B),
-/// three stream-1 corners (40 B), one instance record, its extra, its id, its zeroed
-/// previous-affine record (64 B) and its material slot and table entries (8 B).
-const IMPOSTOR_BYTES_PER_TRIANGLE: usize =
-    3 * 24 + 3 * 40 + crate::INSTANCE_GPU_SIZE + crate::INSTANCE_EXTRA_GPU_SIZE + 4 + 64 + 8;
+/// Host bytes per source triangle on the impostor route that still scale with the source.
+/// The reference views keep one instance record per draw run and encode the vertex streams
+/// one window at a time, so the per-triangle share is the hull's working set: three corner
+/// points (`3 x 24` B, `f64`) and three position keys (`3 x 12` B).
+const IMPOSTOR_BYTES_PER_TRIANGLE: usize = 3 * 24 + 3 * 12;
 
 /// Checks that the impostor route can allocate its source-proportional host buffers for
 /// `triangles` source triangles and returns their byte total. An overflowing size or a
-/// refused allocation (probed with `Vec::try_reserve_exact`, never an abort) is
-/// `foliage.invalid` naming the byte count. Successful bakes are unchanged by the check.
+/// refused allocation (probed with `Vec::try_reserve_exact` at the size of the largest
+/// one, the hull's corner points, never an abort) is `foliage.invalid` naming the byte
+/// count. Successful bakes are unchanged by the check.
 pub fn check_impostor_allocation(triangles: usize) -> Result<usize, RaaError> {
     let bytes = triangles
         .checked_mul(IMPOSTOR_BYTES_PER_TRIANGLE)
@@ -203,7 +204,7 @@ pub fn check_impostor_allocation(triangles: usize) -> Result<usize, RaaError> {
                 usize::MAX
             ))
         })?;
-    let largest = triangles.saturating_mul(3 * 40);
+    let largest = triangles.saturating_mul(3 * 24);
     let mut probe: Vec<u8> = Vec::new();
     probe.try_reserve_exact(largest).map_err(|_| {
         invalid(format!(

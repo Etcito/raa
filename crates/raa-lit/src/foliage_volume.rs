@@ -94,13 +94,22 @@ impl FoliageVolumeAccumulator {
         let voxel = extent.map(|size| size / f64::from(resolution));
         let mean_face_area =
             (voxel[0] * voxel[1] + voxel[1] * voxel[2] + voxel[2] * voxel[0]) / 3.0;
+        // Sized from the validated resolution (at most 32^3 cells), reserved fallibly.
         let count = resolution as usize * resolution as usize * resolution as usize;
+        let mut cells = Vec::new();
+        cells.try_reserve_exact(count).map_err(|_| {
+            invalid(format!(
+                "cannot reserve {} bytes of foliage volume cells",
+                count * std::mem::size_of::<Cell>()
+            ))
+        })?;
+        cells.resize(count, Cell::default());
         Ok(FoliageVolumeAccumulator {
             min,
             extent,
             resolution,
             mean_face_area,
-            cells: vec![Cell::default(); count],
+            cells,
         })
     }
 

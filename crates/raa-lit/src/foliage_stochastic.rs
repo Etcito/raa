@@ -36,6 +36,21 @@ fn push_triangle(
     Ok(())
 }
 
+/// Reserves, at their exact size, the three corners and indices of `triangles` emitted
+/// triangles in `mesh`. A size that overflows or an allocation that is refused returns
+/// `foliage.invalid` naming the byte count instead of aborting on a later push.
+pub(crate) fn reserve_triangles(mesh: &mut MeshData, triangles: usize) -> Result<(), RaaError> {
+    let corners = triangles
+        .checked_mul(3)
+        .ok_or_else(|| invalid("foliage mesh corner count overflows"))?;
+    let bytes = corners.saturating_mul(12 + 12 + 4);
+    let refused = |_| invalid(format!("cannot reserve {bytes} bytes of foliage mesh"));
+    mesh.positions.try_reserve_exact(corners).map_err(refused)?;
+    mesh.normals.try_reserve_exact(corners).map_err(refused)?;
+    mesh.indices.try_reserve_exact(corners).map_err(refused)?;
+    Ok(())
+}
+
 /// The assembled stochastic foliage mesh and its native volume payload.
 ///
 /// `mesh` has three independent vertices per emitted triangle, triangle-constant source
@@ -86,6 +101,8 @@ pub fn build_stochastic_foliage(
     }
     let mut volume = FoliageVolumeAccumulator::new(source.min, source.max, resolution)?;
     let mut mesh = MeshData::new();
+    let wood_count = source.triangles.iter().filter(|t| !t.foliage).count();
+    reserve_triangles(&mut mesh, wood_count.saturating_add(samples.len()))?;
     let mut wood = 0usize;
     for triangle in &source.triangles {
         if triangle.foliage {

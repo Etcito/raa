@@ -14,7 +14,7 @@ mod foliage_resources {
 mod foliage_sampling;
 
 use foliage_resources::{FoliageSource, SourceTriangle};
-use foliage_sampling::{FoliageRng, sample_foliage};
+use foliage_sampling::{FoliageRng, FoliageSurface, sample_foliage};
 use raa_core::RaaError;
 
 fn triangle(positions: [[f32; 3]; 3], normals: [[f32; 3]; 3], foliage: bool) -> SourceTriangle {
@@ -223,4 +223,28 @@ fn shading_normals_stay_independent_of_the_geometric_plane() {
             );
         }
     }
+}
+
+#[test]
+fn a_reused_surface_table_samples_exactly_like_sample_foliage() {
+    let mut triangles = Vec::new();
+    for i in 0..12 {
+        let x = i as f32;
+        triangles.push(triangle(
+            [[x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x, 1.0 + 0.5 * x, 0.0]],
+            [[0.0, 0.0, 1.0]; 3],
+            i % 3 != 0,
+        ));
+    }
+    let source = source(triangles);
+    let surface = FoliageSurface::new(&source).expect("table builds");
+    for seed in [0, 7, 991] {
+        assert_eq!(
+            surface.sample(&source, 33, seed).expect("table samples"),
+            sample_foliage(&source, 33, seed).expect("sampling succeeds"),
+            "seed {seed}"
+        );
+    }
+    let code = surface.sample(&source, 0, 1).unwrap_err().code();
+    assert_eq!(code, invalid_code());
 }

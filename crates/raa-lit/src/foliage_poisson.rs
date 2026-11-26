@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use raa_core::RaaError;
 
 use super::foliage_resources::{FoliageSource, MicroTriangle};
-use super::foliage_sampling::{FoliageRng, FoliageSample, sample_foliage};
+use super::foliage_sampling::{FoliageRng, FoliageSample, FoliageSurface, sample_foliage};
 
 /// Candidate batches tried at one radius, each `count` samples long.
 const BATCHES_PER_RADIUS: u32 = 8;
@@ -136,6 +136,7 @@ pub fn initialize_foliage(
     triangles
         .try_reserve_exact(target)
         .map_err(|_| invalid("cannot reserve the foliage micro-triangles"))?;
+    let mut surface: Option<FoliageSurface> = None;
     let mut batches = BATCHES_PER_RADIUS;
     let mut reductions = 0u32;
     loop {
@@ -168,7 +169,14 @@ pub fn initialize_foliage(
             }
             batches = BATCHES_PER_RADIUS;
         }
-        batch = sample_foliage(source, count, rng.next_u32())?;
+        // Every further batch reuses one eligible-area table instead of rebuilding it.
+        if surface.is_none() {
+            surface = Some(FoliageSurface::new(source)?);
+        }
+        let table = surface
+            .as_ref()
+            .ok_or_else(|| invalid("the foliage eligible-area table is missing"))?;
+        batch = table.sample(source, count, rng.next_u32())?;
         if batch.is_empty() {
             return Ok(Vec::new());
         }

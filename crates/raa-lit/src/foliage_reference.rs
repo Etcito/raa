@@ -264,17 +264,6 @@ fn clear_color(view: &wgpu::TextureView) -> Option<wgpu::RenderPassColorAttachme
     })
 }
 
-/// Stream 0 (`position`, `normal`) and stream 1 (`uv`, `tangent`, `colour`) bytes of the
-/// retained source triangles, in the S10 lit vertex layouts, plus one instance record and
-/// id per triangle.
-struct SourceGeometry {
-    stream0: Vec<u8>,
-    stream1: Vec<u8>,
-    instances: Vec<u8>,
-    extras: Vec<u8>,
-    ids: Vec<u8>,
-}
-
 /// The byte size `count x per_item`, refused with a message naming the request when it
 /// overflows `usize`.
 fn buffer_bytes(what: &str, count: usize, per_item: usize) -> Result<usize, RaaError> {
@@ -297,62 +286,233 @@ fn reserve_bytes(what: &str, bytes: usize) -> Result<Vec<u8>, RaaError> {
     Ok(buffer)
 }
 
-/// The source geometry of `triangles` with every instance record naming its compact
-/// material slot `slots[i]` (an index into the distinct-material table).
-fn source_geometry(source: &FoliageSource, slots: &[u32]) -> Result<SourceGeometry, RaaError> {
-    let count = source.triangles.len();
-    let corners = buffer_bytes("corner", count, 3)?;
-    let mut geometry = SourceGeometry {
-        stream0: reserve_bytes("stream0", buffer_bytes("stream0", corners, 24)?)?,
-        stream1: reserve_bytes("stream1", buffer_bytes("stream1", corners, 40)?)?,
-        instances: reserve_bytes(
-            "instance",
-            buffer_bytes("instance", count, INSTANCE_GPU_SIZE)?,
-        )?,
-        extras: reserve_bytes(
-            "extras",
-            buffer_bytes("extras", count, INSTANCE_EXTRA_GPU_SIZE)?,
-        )?,
-        ids: reserve_bytes("id", buffer_bytes("id", count, 4)?)?,
-    };
+/// Bytes of stream 0 (`position`, `normal`) per source corner in the S10 lit layout.
+pub const REFERENCE_STREAM0_CORNER_BYTES: usize = 24;
+/// Bytes of stream 1 (`uv`, `tangent`, `colour`) per source corner in the S10 lit layout.
+pub const REFERENCE_STREAM1_CORNER_BYTES: usize = 40;
+/// Source triangles encoded per vertex-stream upload window: the heap holds one window of
+/// both streams (`4096 * 3 * 64` bytes), never the streams of the whole source.
+pub const REFERENCE_STREAM_CHUNK_TRIANGLES: usize = 4096;
+
+/// One reference draw: `count` consecutive source triangles from `first` that share one
+/// compact material slot and one source tag, drawn with the one instance record `index`
+/// of its run (`draw(3 * first..3 * (first + count), index..index + 1)`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ReferenceRun {
+    pub first: u32,
+    pub count: u32,
+    pub slot: u32,
+    pub source_tag: u32,
+}
+
+/// The host-side draw plan of the reference views: the distinct material table, the runs
+/// and one instance record, extra and id per run (never per triangle). Every array is
+/// sized from the source's distinct materials and runs and reserved fallibly.
+pub struct ReferenceDrawPlan {
+    pub material_ids: Vec<u32>,
+    pub runs: Vec<ReferenceRun>,
+    pub instances: Vec<u8>,
+    pub extras: Vec<u8>,
+    pub ids: Vec<u8>,
+}
+
+impl ReferenceDrawPlan {
+    /// The heap bytes the plan holds.
+    pub fn heap_bytes(&self) -> usize {
+        self.material_ids.capacity() * 4
+            + self.runs.capacity() * std::mem::size_of::<ReferenceRun>()
+            + self.instances.capacity()
+            + self.extras.capacity()
+            + self.ids.capacity()
+    }
+}
+
+fn push_fallible<T>(list: &mut Vec<T>, value: T, what: &str) -> Result<(), RaaError> {
+    list.try_reserve(1).map_err(|_| {
+        invalid(format!(
+            "foliage reference {what} could not grow past {} entries",
+            list.len()
+        ))
+    })?;
+    list.push(value);
+    Ok(())
+}
+
+/// Builds the [`ReferenceDrawPlan`] of `source`. The material table is the ascending
+/// distinct ids (as [`material_slots`] orders them), found without a per-triangle array;
+/// consecutive triangles with the same slot and tag share one run and its record. A
+/// refused allocation is `foliage.invalid`, never an allocation-failure abort.
+pub fn reference_draw_plan(source: &FoliageSource) -> Result<ReferenceDrawPlan, RaaError> {
+    let mut material_ids: Vec<u32> = Vec::new();
+    for triangle in &source.triangles {
+        if let Err(at) = material_ids.binary_search(&triangle.material) {
+            material_ids
+                .try_reserve(1)
+                .map_err(|_| invalid("foliage material table could not grow".to_string()))?;
+            material_ids.insert(at, triangle.material);
+        }
+    }
+    let mut runs: Vec<ReferenceRun> = Vec::new();
+    for (index, triangle) in source.triangles.iter().enumerate() {
+        let index = u32::try_from(index)
+            .map_err(|_| invalid(format!("foliage triangle index {index} exceeds u32")))?;
+        let slot = material_ids
+            .binary_search(&triangle.material)
+            .map_err(|_| {
+                invalid(format!(
+                    "foliage material {} has no slot",
+                    triangle.material
+                ))
+            })? as u32;
+        match runs.last_mut() {
+            Some(run)
+                if run.slot == slot
+                    && run.source_tag == triangle.source_tag
+                    && run.first + run.count == index =>
+            {
+                run.count += 1;
+            }
+            _ => push_fallible(
+                &mut runs,
+                ReferenceRun {
+                    first: index,
+                    count: 1,
+                    slot,
+                    source_tag: triangle.source_tag,
+                },
+                "run list",
+            )?,
+        }
+    }
+    let mut instances = reserve_bytes(
+        "instance",
+        buffer_bytes("instance", runs.len(), INSTANCE_GPU_SIZE)?,
+    )?;
+    let mut extras = reserve_bytes(
+        "extras",
+        buffer_bytes("extras", runs.len(), INSTANCE_EXTRA_GPU_SIZE)?,
+    )?;
+    let mut ids = reserve_bytes("id", buffer_bytes("id", runs.len(), 4)?)?;
     let mut extra = Vec::with_capacity(INSTANCE_EXTRA_GPU_SIZE);
     InstanceExtra::default().write_gpu(&mut extra);
-    for (index, triangle) in source.triangles.iter().enumerate() {
-        let slot = *slots
-            .get(index)
-            .ok_or_else(|| invalid(format!("foliage triangle {index} has no material slot")))?;
-        let id = u32::try_from(index)
-            .map_err(|_| invalid(format!("foliage triangle index {index} exceeds u32")))?;
+    for (index, run) in runs.iter().enumerate() {
+        let mut record = [0u8; INSTANCE_GPU_SIZE];
+        write_instance_record(&mut record, &source.root_world, run.slot, run.source_tag, 0);
+        instances.extend_from_slice(&record);
+        extras.extend_from_slice(&extra);
+        ids.extend_from_slice(&(index as u32).to_le_bytes());
+    }
+    Ok(ReferenceDrawPlan {
+        material_ids,
+        runs,
+        instances,
+        extras,
+        ids,
+    })
+}
+
+/// Encodes stream 0 and stream 1 of the source triangles `first..first + count` into the
+/// cleared `stream0` and `stream1`, reserving their exact window size fallibly. The bytes
+/// are those of the S10 lit layouts: position and normal, then uv, the unit tangent
+/// `(1, 0, 0, 1)` and the white colour per corner.
+pub fn encode_reference_streams(
+    source: &FoliageSource,
+    first: usize,
+    count: usize,
+    stream0: &mut Vec<u8>,
+    stream1: &mut Vec<u8>,
+) -> Result<(), RaaError> {
+    let triangles = source
+        .triangles
+        .get(first..first.saturating_add(count))
+        .ok_or_else(|| {
+            invalid(format!(
+                "foliage stream window {first}+{count} leaves the source"
+            ))
+        })?;
+    stream0.clear();
+    stream1.clear();
+    let corners = buffer_bytes("corner", count, 3)?;
+    for (stream, per_corner, what) in [
+        (&mut *stream0, REFERENCE_STREAM0_CORNER_BYTES, "stream0"),
+        (&mut *stream1, REFERENCE_STREAM1_CORNER_BYTES, "stream1"),
+    ] {
+        let bytes = buffer_bytes(what, corners, per_corner)?;
+        stream.try_reserve_exact(bytes).map_err(|_| {
+            invalid(format!(
+                "foliage reference {what} window could not allocate {bytes} bytes"
+            ))
+        })?;
+    }
+    for triangle in triangles {
         for corner in 0..3 {
             for value in triangle.positions[corner] {
-                geometry.stream0.extend_from_slice(&value.to_le_bytes());
+                stream0.extend_from_slice(&value.to_le_bytes());
             }
             for value in triangle.normals[corner] {
-                geometry.stream0.extend_from_slice(&value.to_le_bytes());
+                stream0.extend_from_slice(&value.to_le_bytes());
             }
             for value in triangle.uv[corner] {
-                geometry.stream1.extend_from_slice(&value.to_le_bytes());
+                stream1.extend_from_slice(&value.to_le_bytes());
             }
             for value in [1.0f32, 0.0, 0.0, 1.0] {
-                geometry.stream1.extend_from_slice(&value.to_le_bytes());
+                stream1.extend_from_slice(&value.to_le_bytes());
             }
             for value in [1.0f32, 1.0, 1.0, 1.0] {
-                geometry.stream1.extend_from_slice(&value.to_le_bytes());
+                stream1.extend_from_slice(&value.to_le_bytes());
             }
         }
-        let mut record = [0u8; INSTANCE_GPU_SIZE];
-        write_instance_record(
-            &mut record,
-            &source.root_world,
-            slot,
-            triangle.source_tag,
-            0,
-        );
-        geometry.instances.extend_from_slice(&record);
-        geometry.extras.extend_from_slice(&extra);
-        geometry.ids.extend_from_slice(&id.to_le_bytes());
     }
-    Ok(geometry)
+    Ok(())
+}
+
+/// The two source vertex buffers of `source`, uploaded window by window through
+/// [`encode_reference_streams`] so the heap holds one window, never the whole streams.
+fn upload_reference_streams(
+    gpu: &GpuContext,
+    source: &FoliageSource,
+    stream0_bytes: u64,
+    stream1_bytes: u64,
+) -> Result<(wgpu::Buffer, wgpu::Buffer), RaaError> {
+    let buffer = |label: &str, size: u64| {
+        gpu.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: size.max(4),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    };
+    let mut window0 = Vec::new();
+    let mut window1 = Vec::new();
+    let total = source.triangles.len();
+    if total <= REFERENCE_STREAM_CHUNK_TRIANGLES {
+        // One window holds the whole source: the shared source upload path takes it.
+        encode_reference_streams(source, 0, total, &mut window0, &mut window1)?;
+        return Ok((
+            crate::renderer::source_vertex_buffer(gpu, "stream0", &window0),
+            crate::renderer::source_vertex_buffer(gpu, "stream1", &window1),
+        ));
+    }
+    let stream0 = buffer("raa.lit.source.stream0", stream0_bytes);
+    let stream1 = buffer("raa.lit.source.stream1", stream1_bytes);
+    let mut first = 0usize;
+    while first < total {
+        let count = REFERENCE_STREAM_CHUNK_TRIANGLES.min(total - first);
+        encode_reference_streams(source, first, count, &mut window0, &mut window1)?;
+        let corner = first as u64 * 3;
+        gpu.queue().write_buffer(
+            &stream0,
+            corner * REFERENCE_STREAM0_CORNER_BYTES as u64,
+            &window0,
+        );
+        gpu.queue().write_buffer(
+            &stream1,
+            corner * REFERENCE_STREAM1_CORNER_BYTES as u64,
+            &window1,
+        );
+        first += count;
+    }
+    Ok((stream0, stream1))
 }
 
 /// The distinct material ids the triangles use, in ascending id order, and each
@@ -506,7 +666,8 @@ pub fn render_foliage_references(
     let cameras = reference_cameras(source.min, source.max, source.root_world, views)?;
 
     ensure_lit_free(lit)?;
-    let (material_ids, slots) = material_slots(source)?;
+    let plan = reference_draw_plan(source)?;
+    let material_ids = &plan.material_ids;
     let mut material_bytes = reserve_bytes(
         "material",
         buffer_bytes(
@@ -522,24 +683,20 @@ pub fn render_foliage_references(
             material_ids.len()
         ))
     })?;
-    for &id in &material_ids {
+    for &id in material_ids {
         let record = lit.material_record(MaterialId(id)).unwrap_or_default();
         classes.push((lit.material_fn_of(MaterialId(id)), record.flags));
         record.write_gpu(&mut material_bytes);
     }
     let pipelines = reference_pipelines(gpu, lit, &classes)?;
-    let geometry = source_geometry(source, &slots)?;
-    // The private previous-affine buffer `SourceDrawBuffers::new` zero-fills: proven
-    // allocatable here so a too-large source is an error, not an allocation abort.
-    drop(reserve_bytes(
-        "previous",
-        buffer_bytes("previous", source.triangles.len(), 64)?,
-    )?);
+    let corners = buffer_bytes("corner", source.triangles.len(), 3)?;
+    let stream0_bytes = buffer_bytes("stream0", corners, REFERENCE_STREAM0_CORNER_BYTES)?;
+    let stream1_bytes = buffer_bytes("stream1", corners, REFERENCE_STREAM1_CORNER_BYTES)?;
     let max_buffer = gpu.device().limits().max_buffer_size;
     for (what, len) in [
-        ("stream0", geometry.stream0.len()),
-        ("stream1", geometry.stream1.len()),
-        ("instance", geometry.instances.len()),
+        ("stream0", stream0_bytes),
+        ("stream1", stream1_bytes),
+        ("instance", plan.instances.len()),
     ] {
         if len as u64 > max_buffer {
             return Err(invalid(format!(
@@ -547,14 +704,20 @@ pub fn render_foliage_references(
             )));
         }
     }
+    // The previous-affine buffer `SourceDrawBuffers::new` zero-fills holds one record per
+    // run: proven allocatable here so it is an error, not an allocation abort.
+    drop(reserve_bytes(
+        "previous",
+        buffer_bytes("previous", plan.runs.len(), 64)?,
+    )?);
     ensure_lit_free(lit)?;
     let buffers = SourceDrawBuffers::new(
         gpu,
         lit,
         &material_bytes,
-        &geometry.instances,
-        &geometry.extras,
-        &geometry.ids,
+        &plan.instances,
+        &plan.extras,
+        &plan.ids,
     );
 
     let array_usage = wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -593,8 +756,8 @@ pub fn render_foliage_references(
         wgpu::TextureUsages::RENDER_ATTACHMENT,
     );
 
-    let stream0 = crate::renderer::source_vertex_buffer(gpu, "stream0", &geometry.stream0);
-    let stream1 = crate::renderer::source_vertex_buffer(gpu, "stream1", &geometry.stream1);
+    let (stream0, stream1) =
+        upload_reference_streams(gpu, source, stream0_bytes as u64, stream1_bytes as u64)?;
     let mut submission = None;
     for (view, camera) in cameras.iter().enumerate() {
         let mut frame = [0u8; FRAME_GPU_SIZE];
@@ -633,7 +796,8 @@ pub fn render_foliage_references(
             pass.set_vertex_buffer(0, stream0.slice(..));
             pass.set_vertex_buffer(1, buffers.ids.slice(..));
             pass.set_vertex_buffer(2, stream1.slice(..));
-            for (index, &slot) in slots.iter().enumerate() {
+            for (index, run) in plan.runs.iter().enumerate() {
+                let slot = run.slot;
                 let &(fn_id, flags) = classes
                     .get(slot as usize)
                     .ok_or_else(|| invalid(format!("foliage material slot {slot} has no class")))?;
@@ -647,8 +811,12 @@ pub fn render_foliage_references(
                     })?;
                 pass.set_pipeline(pipeline);
                 let index = index as u32;
-                let base = 3 * index;
-                pass.draw(base..base + 3, index..index + 1);
+                let range = run
+                    .first
+                    .checked_mul(3)
+                    .zip((run.first + run.count).checked_mul(3))
+                    .ok_or_else(|| invalid(format!("foliage run {index} exceeds u32 vertices")))?;
+                pass.draw(range.0..range.1, index..index + 1);
             }
         }
         submission = Some(gpu.queue().submit([encoder.finish()]));

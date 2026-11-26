@@ -53,6 +53,29 @@ pub fn needs_bin_retry(counts: &[u32], capacity: u32) -> bool {
     counts.iter().any(|&count| count > capacity)
 }
 
+/// The fixed 128-view by 80-byte view table of the bins shader: each view's column-major
+/// root-to-clip matrix then its near/far metres, zero after the last view. It is reserved
+/// fallibly; more than 128 views or a non-finite value refuses `foliage.invalid`.
+pub fn bin_view_table(views: &[([f32; 16], [f32; 2])]) -> Result<Vec<u8>, RaaError> {
+    if views.len() > 128 {
+        return Err(invalid("more than 128 bin views"));
+    }
+    let mut table = Vec::new();
+    table
+        .try_reserve_exact(128 * 80)
+        .map_err(|_| invalid("cannot reserve the bin view table"))?;
+    table.resize(128 * 80, 0u8);
+    for (i, (matrix, near_far)) in views.iter().enumerate() {
+        for (j, value) in matrix.iter().chain(near_far.iter()).enumerate() {
+            if !value.is_finite() {
+                return Err(invalid("non-finite view table"));
+            }
+            table[i * 80 + j * 4..i * 80 + j * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    Ok(table)
+}
+
 /// Handoff: 'Rasterize differentiable foliage coverage and normals' calls `encode_bins`;
 /// 'Run differentiable foliage optimization' calls `encode_bins`. It resets tile counts
 /// and records conservative projected-box binning; counts above capacity signal retry.
@@ -86,15 +109,7 @@ pub fn encode_bins(
         message: e.message,
     })?;
     let device = gpu.device();
-    let mut table = vec![0u8; 128 * 80];
-    for (i, (matrix, near_far)) in work.references.views.iter().enumerate() {
-        for (j, value) in matrix.iter().chain(near_far.iter()).enumerate() {
-            if !value.is_finite() {
-                return Err(invalid("non-finite view table"));
-            }
-            table[i * 80 + j * 4..i * 80 + j * 4 + 4].copy_from_slice(&value.to_le_bytes());
-        }
-    }
+    let table = bin_view_table(&work.references.views)?;
     let views = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("foliage.bin.views"),
         contents: &table,

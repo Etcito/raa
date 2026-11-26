@@ -143,7 +143,13 @@ pub fn pack_samples(
     source: &FoliageSource,
     samples: &[FoliageSample],
 ) -> Result<Vec<u8>, RaaError> {
-    let mut out = Vec::with_capacity(samples.len() * SAMPLE_INPUT_STRIDE);
+    let bytes = samples.len().saturating_mul(SAMPLE_INPUT_STRIDE);
+    let mut out = Vec::new();
+    out.try_reserve_exact(bytes).map_err(|_| {
+        invalid(format!(
+            "cannot reserve {bytes} bytes of foliage sample inputs"
+        ))
+    })?;
     for sample in samples {
         out.extend_from_slice(&pack_sample(source, sample)?);
     }

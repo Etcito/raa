@@ -140,12 +140,136 @@ fn tangent_basis(normal: [f32; 3]) -> ([f32; 3], [f32; 3]) {
     (tangent, cross(normal, tangent))
 }
 
+/// The cumulative eligible-area table of one foliage source.
+///
+/// It is built once per source ([`FoliageSurface::new`]) and reused by every sampling pass
+/// of a generation, so repeated passes (the Poisson batches of `initialize_foliage`) never
+/// rebuild or grow it. Its two arrays hold one entry per eligible triangle and are reserved
+/// fallibly at their exact size: a refused allocation is `foliage.invalid`, never an abort.
+#[derive(Clone, Debug)]
+pub struct FoliageSurface {
+    eligible: Vec<u32>,
+    cumulative: Vec<f64>,
+    total: f64,
+}
+
+impl FoliageSurface {
+    /// Builds the table of the `foliage` triangles of `source` with a positive finite area.
+    pub fn new(source: &FoliageSource) -> Result<FoliageSurface, RaaError> {
+        let count = source
+            .triangles
+            .iter()
+            .filter(|triangle| area(triangle).is_some())
+            .count();
+        let mut eligible = Vec::new();
+        eligible.try_reserve_exact(count).map_err(|_| {
+            invalid(format!(
+                "cannot reserve {} bytes of eligible foliage triangles",
+                count.saturating_mul(size_of::<u32>())
+            ))
+        })?;
+        let mut cumulative = Vec::new();
+        cumulative.try_reserve_exact(count).map_err(|_| {
+            invalid(format!(
+                "cannot reserve {} bytes of cumulative foliage area",
+                count.saturating_mul(size_of::<f64>())
+            ))
+        })?;
+        let mut total = 0.0f64;
+        for (index, triangle) in source.triangles.iter().enumerate() {
+            if let Some(value) = area(triangle) {
+                total += value as f64;
+                eligible.push(index as u32);
+                cumulative.push(total);
+            }
+        }
+        Ok(FoliageSurface {
+            eligible,
+            cumulative,
+            total,
+        })
+    }
+
+    /// Samples `source`, the source this table was built from, into `count` strata; see
+    /// [`sample_foliage`].
+    pub fn sample(
+        &self,
+        source: &FoliageSource,
+        count: u32,
+        seed: u32,
+    ) -> Result<Vec<FoliageSample>, RaaError> {
+        if count == 0 {
+            return Err(invalid("foliage sample count must be positive"));
+        }
+        let (eligible, cumulative, total) = (&self.eligible, &self.cumulative, self.total);
+        if eligible.is_empty() || !total.is_finite() || total <= 0.0 {
+            return Ok(Vec::new());
+        }
+        let count_usize = count as usize;
+        let bytes = count_usize
+            .checked_mul(size_of::<FoliageSample>())
+            .filter(|bytes| *bytes <= isize::MAX as usize)
+            .ok_or_else(|| invalid("foliage sample count overflows the address space"))?;
+        let mut samples = Vec::new();
+        samples
+            .try_reserve_exact(count_usize)
+            .map_err(|_| invalid(format!("cannot reserve {bytes} bytes of foliage samples")))?;
+        let represented_area = (total / count as f64) as f32;
+        let scale = (total / (count as f64 * PROXY_AREA as f64)).sqrt() as f32;
+
+        let mut rng = FoliageRng::new(seed);
+        for stratum in 0..count {
+            let offset = rng.next_f32() as f64;
+            let target = (stratum as f64 + offset) / count as f64 * total;
+            let slot = cumulative
+                .partition_point(|bound| *bound <= target)
+                .min(cumulative.len() - 1);
+            let index = eligible[slot];
+            let triangle = source.triangles.get(index as usize).ok_or_else(|| {
+                invalid(format!(
+                    "foliage triangle {index} is not in the sampled source"
+                ))
+            })?;
+
+            let root = rng.next_f32().sqrt();
+            let second = rng.next_f32();
+            let weights = [1.0 - root, root * (1.0 - second), root * second];
+            let position = interpolate(triangle.positions, weights);
+            let normal = unit(
+                interpolate(triangle.normals, weights),
+                geometric_normal(triangle),
+            );
+
+            let (tangent, bitangent) = tangent_basis(normal);
+            let azimuth = rng.next_f32() * TAU;
+            let mut corners = [[0.0f32; 3]; 3];
+            for (vertex, corner) in corners.iter_mut().enumerate() {
+                let (sin, cos) = (azimuth + vertex as f32 * (TAU / 3.0)).sin_cos();
+                for axis in 0..3 {
+                    let radial = cos * tangent[axis] + sin * bitangent[axis];
+                    corner[axis] = position[axis] + scale * radial;
+                }
+            }
+
+            samples.push(FoliageSample {
+                source_triangle: index,
+                barycentric: weights,
+                position,
+                normal,
+                corners,
+                represented_area,
+            });
+        }
+        Ok(samples)
+    }
+}
+
 /// Samples the eligible surface of `source` into `count` strata.
 ///
 /// Only `foliage` triangles with a positive finite area participate. A positive
 /// `count` is required; an allocation that cannot be represented or reserved returns
 /// `foliage.invalid`, and no sample is silently dropped. A source without an eligible
-/// triangle returns an empty list.
+/// triangle returns an empty list. It builds one [`FoliageSurface`] and samples it.
 ///
 /// Handoff: 'Assemble stochastic foliage and its volume' reads `sample_foliage`
 /// samples (source triangle, position, normal, corners and represented area) as the
@@ -158,69 +282,5 @@ pub fn sample_foliage(
     if count == 0 {
         return Err(invalid("foliage sample count must be positive"));
     }
-    let mut eligible = Vec::new();
-    let mut cumulative = Vec::new();
-    let mut total = 0.0f64;
-    for (index, triangle) in source.triangles.iter().enumerate() {
-        if let Some(value) = area(triangle) {
-            total += value as f64;
-            eligible.push(index as u32);
-            cumulative.push(total);
-        }
-    }
-    if eligible.is_empty() || !total.is_finite() || total <= 0.0 {
-        return Ok(Vec::new());
-    }
-    let count_usize = count as usize;
-    let bytes = count_usize
-        .checked_mul(size_of::<FoliageSample>())
-        .filter(|bytes| *bytes <= isize::MAX as usize)
-        .ok_or_else(|| invalid("foliage sample count overflows the address space"))?;
-    let mut samples = Vec::new();
-    samples
-        .try_reserve_exact(count_usize)
-        .map_err(|_| invalid(format!("cannot reserve {bytes} bytes of foliage samples")))?;
-    let represented_area = (total / count as f64) as f32;
-    let scale = (total / (count as f64 * PROXY_AREA as f64)).sqrt() as f32;
-
-    let mut rng = FoliageRng::new(seed);
-    for stratum in 0..count {
-        let offset = rng.next_f32() as f64;
-        let target = (stratum as f64 + offset) / count as f64 * total;
-        let slot = cumulative
-            .partition_point(|bound| *bound <= target)
-            .min(cumulative.len() - 1);
-        let index = eligible[slot];
-        let triangle = &source.triangles[index as usize];
-
-        let root = rng.next_f32().sqrt();
-        let second = rng.next_f32();
-        let weights = [1.0 - root, root * (1.0 - second), root * second];
-        let position = interpolate(triangle.positions, weights);
-        let normal = unit(
-            interpolate(triangle.normals, weights),
-            geometric_normal(triangle),
-        );
-
-        let (tangent, bitangent) = tangent_basis(normal);
-        let azimuth = rng.next_f32() * TAU;
-        let mut corners = [[0.0f32; 3]; 3];
-        for (vertex, corner) in corners.iter_mut().enumerate() {
-            let (sin, cos) = (azimuth + vertex as f32 * (TAU / 3.0)).sin_cos();
-            for axis in 0..3 {
-                let radial = cos * tangent[axis] + sin * bitangent[axis];
-                corner[axis] = position[axis] + scale * radial;
-            }
-        }
-
-        samples.push(FoliageSample {
-            source_triangle: index,
-            barycentric: weights,
-            position,
-            normal,
-            corners,
-            represented_area,
-        });
-    }
-    Ok(samples)
+    FoliageSurface::new(source)?.sample(source, count, seed)
 }
