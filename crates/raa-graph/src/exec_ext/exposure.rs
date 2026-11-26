@@ -1,7 +1,9 @@
 //! Executor extension `exposure`: writes the parameters of the plan's `pass.exposure.auto` node to
 //! every auto-exposure handle (the main pipeline's and each viewport's). The node's pipeline entry
 //! `exposure.auto` is enabled by the plan like any pass; `clear` and a plan without the node put
-//! back the descriptions found before the first apply.
+//! back the descriptions found before the first apply. While a graph with the node is active, `frame`
+//! writes the node's description again over any external `setAutoExposure` (a host applying its own
+//! auto-exposure preference would otherwise turn the pass-through into an adapting exposure).
 
 use raa_exposure::AutoExposureDesc;
 
@@ -11,12 +13,17 @@ use crate::plan::GraphPlan;
 use crate::registry::exposure::{EXPOSURE_TYPE, desc_from_params};
 
 pub fn extension() -> Box<dyn ExecExtension> {
-    Box::new(ExposureExtension { saved: None })
+    Box::new(ExposureExtension {
+        saved: None,
+        desired: None,
+    })
 }
 
 struct ExposureExtension {
     /// The handles' descriptions before the first apply, put back by `clear`.
     saved: Option<Vec<AutoExposureDesc>>,
+    /// The description of the active node, kept on every handle by `frame`.
+    desired: Option<AutoExposureDesc>,
 }
 
 impl ExecExtension for ExposureExtension {
@@ -74,10 +81,23 @@ impl ExecExtension for ExposureExtension {
                 )]
             })?;
         }
+        self.desired = Some(desc);
+        Ok(())
+    }
+
+    fn frame(&mut self, h: &mut FeatureHandles<'_>) -> Result<(), raa_core::RaaError> {
+        if let Some(desc) = self.desired {
+            for handle in &h.handles.auto_exposure {
+                if handle.get() != desc {
+                    handle.set(desc)?;
+                }
+            }
+        }
         Ok(())
     }
 
     fn clear(&mut self, h: &mut FeatureHandles<'_>) {
+        self.desired = None;
         let Some(saved) = self.saved.take() else {
             return;
         };
