@@ -393,6 +393,10 @@ pub struct DdgiStats {
     pub converge_age: u32,
     /// Measured GPU cost of one probe update (ms), the budget's conversion factor.
     pub ms_per_probe: f64,
+    /// Frame time (ms) of the last frames without the update, and the headroom under the 30 fps
+    /// floor the last runtime burst was sized for.
+    pub rest_ms: f64,
+    pub headroom_ms: f64,
     /// Last measured GPU time of the update dispatch (ms), when timestamps are available.
     pub update_ms: Option<f64>,
     /// Steady state: frames between update batches (1 while bursting).
@@ -545,6 +549,10 @@ impl DdgiFeature {
             update_ms: None,
             batch_ms: 0.0,
             idle_frames: 0,
+            rest_ms: [0.0; 2],
+            prev_cost_ms: 0.0,
+            starved: 0,
+            headroom_ms: 0.0,
             lighting: LightingTrack::default(),
             clock: 0.0,
             geometry_revision: None,
@@ -641,6 +649,16 @@ struct Staged {
     extra: Vec<(usize, u32)>,
     staging: Option<Buffer>,
 }
+
+/// The slowest frame the game accepts (30 fps). Runtime updates fill the headroom under it.
+const FRAME_FLOOR_MS: f64 = 33.3;
+/// Margin under the floor for cost-model error and the other work of the frame's tail.
+const FLOOR_SAFETY_MS: f64 = 2.5;
+/// Largest GPU time one runtime update burst may take, whatever the headroom (a misprediction of
+/// the cost model can then not alone break the floor).
+const MAX_BURST_MS: f64 = 10.0;
+/// With no headroom the smallest batch still runs every this many frames, so GI keeps moving.
+const STARVED_PERIOD: u32 = 4;
 
 /// Starting cost model before the first timestamp readback (RTX 3090, Sponza, 64 rays).
 const INITIAL_MS_PER_PROBE: f64 = 0.0033;
@@ -770,6 +788,15 @@ struct DdgiPass {
     /// Smoothed GPU time of one update batch (ms), 0 before the first readback.
     batch_ms: f64,
     idle_frames: u32,
+    /// Frame time (ms) of the last two frames without this pass's update (their wall interval
+    /// less the update estimated for them): the rest of the frame the burst must leave room for.
+    rest_ms: [f64; 2],
+    /// Estimated cost (ms) of the update planned by the previous prepare.
+    prev_cost_ms: f64,
+    /// Frames since the last burst that was skipped for lack of headroom.
+    starved: u32,
+    /// Last headroom (ms) the burst was sized for.
+    headroom_ms: f64,
     lighting: LightingTrack,
     /// Seconds of rendered time (frame deltas, each capped at 50 ms so a stall or capture pause
     /// does not count as time the probes had to converge).
@@ -1230,7 +1257,38 @@ impl FeaturePass for DdgiPass {
                 probes_for(w.chunk_ms * first)
             }
             Some(_) => 0,
-            None => probes_for(settings.burst_ms),
+            None => {
+                // Fill the headroom under the 30 fps floor: what is left of the frame after the
+                // slowest of the last two frames' other work, with a margin, capped.
+                let dt_ms = if ctx.dt_s > 0.0 {
+                    (f64::from(ctx.dt_s) * 1000.0).min(250.0)
+                } else {
+                    1000.0 / 60.0
+                };
+                // A long gap is an idle view (frames are drawn on demand), not a slow frame.
+                let rest = if dt_ms > 100.0 {
+                    self.rest_ms[1]
+                } else {
+                    (dt_ms - self.prev_cost_ms).max(0.0)
+                };
+                self.rest_ms = [self.rest_ms[1], rest];
+                let rest_est = self.rest_ms[0].max(self.rest_ms[1]);
+                let headroom = (FRAME_FLOOR_MS - FLOOR_SAFETY_MS - 1.15 * rest_est).min(MAX_BURST_MS);
+                self.headroom_ms = headroom.max(0.0);
+                let min_cost = f64::from(floor) * self.ms_per_probe;
+                if headroom >= min_cost {
+                    self.starved = 0;
+                    probes_for(headroom as f32)
+                } else {
+                    self.starved += 1;
+                    if self.starved >= STARVED_PERIOD {
+                        self.starved = 0;
+                        floor
+                    } else {
+                        0
+                    }
+                }
+            }
         };
         // Probes one warm-up submit traces: the chunk budget over the cost model, in dispatches of
         // at most `job_cap` probes.
@@ -1316,6 +1374,11 @@ impl FeaturePass for DdgiPass {
             }
         }
 
+        self.prev_cost_ms = (jobs.len() / 2) as f64 * self.ms_per_probe
+            + extra_jobs
+                .iter()
+                .map(|(j, _)| (j.len() / 2) as f64 * self.ms_per_probe)
+                .sum::<f64>();
         let rotation = self.random_rotation();
         let gpu = self.gpu.as_mut().expect("DDGI pool");
         let mut flags = settings.debug as u32 * 256;
@@ -1696,6 +1759,8 @@ impl FeaturePass for DdgiPass {
             visibility: staged.visibility,
             converge_age: staged.converge_age,
             ms_per_probe: self.ms_per_probe,
+            rest_ms: self.rest_ms[0].max(self.rest_ms[1]),
+            headroom_ms: self.headroom_ms,
             update_ms: self.update_ms,
             interval: staged.interval,
             screen_resolve: staged.screen.is_some(),
@@ -2293,6 +2358,10 @@ mod tests {
             update_ms: None,
             batch_ms: 0.0,
             idle_frames: 0,
+            rest_ms: [0.0; 2],
+            prev_cost_ms: 0.0,
+            starved: 0,
+            headroom_ms: 0.0,
             lighting: LightingTrack::default(),
             clock: 0.0,
             geometry_revision: None,
