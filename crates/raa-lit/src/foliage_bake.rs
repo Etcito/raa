@@ -35,8 +35,9 @@ use crate::foliage_resources::{
     FOLIAGE_MODE_DIFFERENTIABLE, FOLIAGE_MODE_SHELL, FOLIAGE_MODE_STOCHASTIC, FoliageParams,
     FoliageResources, FoliageSource,
 };
-use crate::foliage_sampling::sample_foliage;
+use crate::foliage_sampling::{FoliageSample, sample_foliage};
 use crate::foliage_stochastic::build_stochastic_foliage;
+use crate::foliage_volume::FoliageVolumeAccumulator;
 use crate::handle::LitShared;
 use crate::meshes::LitMeshId;
 
@@ -184,27 +185,48 @@ pub fn validate_source(source: &FoliageSource, params: &FoliageParams) -> Result
     Ok(())
 }
 
-/// Host bytes per source triangle on the impostor route that still scale with the source.
-/// The reference views keep one instance record per draw run and encode the vertex streams
-/// one window at a time, so the per-triangle share is the hull's working set: three corner
-/// points (`3 x 24` B, `f64`) and three position keys (`3 x 12` B).
-const IMPOSTOR_BYTES_PER_TRIANGLE: usize = 3 * 24 + 3 * 12;
+/// Host bytes the impostor route allocates per eligible source triangle besides the hull:
+/// the sampling table of `FoliageSurface::new` (`eligible: u32` and `cumulative: f64`).
+const SAMPLING_BYTES_PER_TRIANGLE: usize = 4 + 8;
+
+/// The hull's distinct-position set for `triangles` source triangles in the worst case
+/// (every corner a distinct position): the final table plus the previous one, live
+/// together while the last doubling rehashes. `None` when the size overflows.
+fn hull_worst_bytes(triangles: usize) -> Option<usize> {
+    let set = crate::foliage_hull::hull_set_bytes(triangles.checked_mul(3)?)?;
+    set.checked_add(set / 2)
+}
 
 /// Checks that the impostor route can allocate its source-proportional host buffers for
-/// `triangles` source triangles and returns their byte total. An overflowing size or a
-/// refused allocation (probed with `Vec::try_reserve_exact` at the size of the largest
-/// one, the hull's corner points, never an abort) is `foliage.invalid` naming the byte
-/// count. Successful bakes are unchanged by the check.
+/// `triangles` source triangles and returns their byte total: the hull's distinct-position
+/// set in the worst case ([`crate::foliage_hull::hull_set_bytes`] of every corner, plus
+/// the previous table during its last doubling) and the sampling table (12 B per
+/// triangle). The source snapshot itself is already allocated by the caller; the hull no
+/// longer copies corners, and the reference views keep one instance record per draw run
+/// and encode the vertex streams one window at a time. An overflowing size or a refused
+/// allocation (probed with `Vec::try_reserve_exact` at the size of the largest one, the
+/// hull's final table, never an abort) is `foliage.invalid` naming the byte count.
+/// Successful bakes are unchanged by the check.
+///
+/// For the 2 609 340-triangle 41-part sample tree: hull set at most 67 108 864 B (plus
+/// 33 554 432 B while it grows), sampling table 31 312 080 B, 131 975 376 B in total, next
+/// to the 281 808 720 B snapshot (108 B per `SourceTriangle`). Before this card the hull
+/// reserved 187 872 480 B of points and 218 103 812 B of position keys.
 pub fn check_impostor_allocation(triangles: usize) -> Result<usize, RaaError> {
-    let bytes = triangles
-        .checked_mul(IMPOSTOR_BYTES_PER_TRIANGLE)
-        .ok_or_else(|| {
-            invalid(format!(
-                "foliage impostor bake of {triangles} triangle(s) needs more than {} bytes",
-                usize::MAX
-            ))
-        })?;
-    let largest = triangles.saturating_mul(3 * 24);
+    let too_large = || {
+        invalid(format!(
+            "foliage impostor bake of {triangles} triangle(s) needs more than {} bytes",
+            usize::MAX
+        ))
+    };
+    let largest = triangles
+        .checked_mul(3)
+        .and_then(crate::foliage_hull::hull_set_bytes)
+        .ok_or_else(too_large)?;
+    let bytes = hull_worst_bytes(triangles)
+        .zip(triangles.checked_mul(SAMPLING_BYTES_PER_TRIANGLE))
+        .and_then(|(hull, sampling)| hull.checked_add(sampling))
+        .ok_or_else(too_large)?;
     let mut probe: Vec<u8> = Vec::new();
     probe.try_reserve_exact(largest).map_err(|_| {
         invalid(format!(
@@ -213,6 +235,45 @@ pub fn check_impostor_allocation(triangles: usize) -> Result<usize, RaaError> {
     })?;
     Ok(bytes)
 }
+
+/// One stage boundary of the foliage preparation path (`foliage:tree:prepare`), reported
+/// before the stage allocates: its name, the host bytes it is about to request (computed
+/// from the sizes the stage reserves; 0 for a GPU-only stage) and the source triangle
+/// count it works on.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct FoliageStage {
+    pub stage: &'static str,
+    pub requested_bytes: usize,
+    pub source_triangles: usize,
+}
+
+static STAGE_REPORTER: std::sync::OnceLock<fn(&FoliageStage)> = std::sync::OnceLock::new();
+
+/// Installs the receiver of every [`report_foliage_stage`] call; the first call wins and
+/// later calls return `false`. raa-js installs one at module start that adds the live
+/// allocated bytes and the wasm memory size and writes the line to `console.error`.
+/// Without a receiver (native tests) reports are dropped.
+pub fn set_foliage_stage_reporter(reporter: fn(&FoliageStage)) -> bool {
+    STAGE_REPORTER.set(reporter).is_ok()
+}
+
+/// Reports one stage boundary to the installed receiver, if any; never allocates itself.
+pub fn report_foliage_stage(stage: &'static str, requested_bytes: usize, source_triangles: usize) {
+    if let Some(reporter) = STAGE_REPORTER.get() {
+        reporter(&FoliageStage {
+            stage,
+            requested_bytes,
+            source_triangles,
+        });
+    }
+}
+
+/// Host bytes the reference views request: the vertex stream windows of
+/// `encode_reference_streams` (stream 0 and stream 1 of one window).
+const REFERENCE_WINDOW_BYTES: usize = crate::foliage_reference::REFERENCE_STREAM_CHUNK_TRIANGLES
+    * 3
+    * (crate::foliage_reference::REFERENCE_STREAM0_CORNER_BYTES
+        + crate::foliage_reference::REFERENCE_STREAM1_CORNER_BYTES);
 
 /// Shared between the renderer and its pending preparations: the latest requested
 /// generation per material and the proxy meshes published since the last frame.
@@ -335,16 +396,95 @@ pub(crate) struct CompletedFoliage {
     pub(crate) mesh: MeshData,
 }
 
-/// The native source-albedo/occlusion volume (and stochastic mesh) of `source`.
+/// The samples of `source` and their unlit source albedo, reporting both stages.
+async fn sampled_appearance(
+    gpu: &GpuContext,
+    lit: &LitHandle,
+    source: &FoliageSource,
+    settings: &FoliageBakeSettings,
+) -> Result<(Vec<FoliageSample>, Vec<[f32; 3]>), RaaError> {
+    let triangles = source.triangles.len();
+    let count = settings.count as usize;
+    report_foliage_stage(
+        "sampling",
+        triangles
+            .saturating_mul(SAMPLING_BYTES_PER_TRIANGLE)
+            .saturating_add(count.saturating_mul(std::mem::size_of::<FoliageSample>())),
+        triangles,
+    );
+    let samples = sample_foliage(source, settings.count, settings.seed)?;
+    report_foliage_stage(
+        "source appearance",
+        samples
+            .len()
+            .saturating_mul(crate::foliage_appearance::SAMPLE_INPUT_STRIDE),
+        triangles,
+    );
+    let albedo = sample_foliage_albedo(gpu, lit, source, &samples).await?;
+    Ok((samples, albedo))
+}
+
+/// Host bytes of the volume accumulator (`FoliageVolumeAccumulator`: one `f64` area and
+/// three `f64` weighted albedo channels per cell) and its finished 4-byte cells.
+fn volume_bytes(resolution: u32) -> usize {
+    (resolution as usize)
+        .saturating_pow(3)
+        .saturating_mul(4 * 8 + 4)
+}
+
+/// The native source-albedo/occlusion volume and stochastic mesh of `source`.
 async fn stochastic_bake(
     gpu: &GpuContext,
     lit: &LitHandle,
     source: &FoliageSource,
     settings: &FoliageBakeSettings,
 ) -> Result<crate::foliage_stochastic::FoliageMeshBake, RaaError> {
-    let samples = sample_foliage(source, settings.count, settings.seed)?;
-    let albedo = sample_foliage_albedo(gpu, lit, source, &samples).await?;
+    let (samples, albedo) = sampled_appearance(gpu, lit, source, settings).await?;
+    let wood = source.triangles.iter().filter(|t| !t.foliage).count();
+    // `build_stochastic_foliage` reserves three corners (position 12 B, normal 12 B,
+    // index 4 B) per wood triangle and per sample.
+    report_foliage_stage(
+        "stochastic assembly",
+        wood.saturating_add(samples.len())
+            .saturating_mul(3 * (12 + 12 + 4))
+            .saturating_add(volume_bytes(settings.params.resolution)),
+        source.triangles.len(),
+    );
     build_stochastic_foliage(source, &samples, &albedo, settings.params.resolution)
+}
+
+/// The native source-albedo/occlusion volume alone, for the impostor routes: the same
+/// samples, source albedo and volume accumulation as [`stochastic_bake`] (identical bytes),
+/// without the distilled mesh `build_stochastic_foliage` also builds. That mesh copies
+/// every wood triangle (three corners of 28 B, 84 B per triangle) and the impostor route
+/// dropped it unused: 174 251 616 B if the sample tree's wood is its 2 074 424 non-leaf
+/// triangles (2 609 340 in all, 534 916 leaf triangles per the procgen evaluation quoted
+/// in `tests/foliage_memory.rs`).
+async fn impostor_volume(
+    gpu: &GpuContext,
+    lit: &LitHandle,
+    source: &FoliageSource,
+    settings: &FoliageBakeSettings,
+) -> Result<Vec<u8>, RaaError> {
+    let (samples, albedo) = sampled_appearance(gpu, lit, source, settings).await?;
+    report_foliage_stage(
+        "impostor volume",
+        volume_bytes(settings.params.resolution),
+        source.triangles.len(),
+    );
+    if samples.len() != albedo.len() {
+        return Err(invalid(format!(
+            "foliage albedo length {} does not match sample count {}",
+            albedo.len(),
+            samples.len()
+        )));
+    }
+    let mut volume =
+        FoliageVolumeAccumulator::new(source.min, source.max, settings.params.resolution)?;
+    for (sample, albedo) in samples.iter().zip(&albedo) {
+        volume.add(sample.position, *albedo, sample.represented_area)?;
+    }
+    Ok(volume.finish())
 }
 
 /// Produces, initializes and awaits one generation for an already validated request. Holds
@@ -357,10 +497,22 @@ pub(crate) async fn bake_foliage(
     route: FoliageRoute,
 ) -> Result<CompletedFoliage, RaaError> {
     let params = settings.params;
+    let triangles = source.triangles.len();
     let (mesh, volume, references, layers) = match route {
         FoliageRoute::Impostor => {
-            check_impostor_allocation(source.triangles.len())?;
+            let probe = triangles
+                .checked_mul(3)
+                .and_then(crate::foliage_hull::hull_set_bytes)
+                .unwrap_or(usize::MAX);
+            report_foliage_stage("impostor pre-check", probe, triangles);
+            check_impostor_allocation(triangles)?;
+            report_foliage_stage(
+                "hull",
+                hull_worst_bytes(triangles).unwrap_or(usize::MAX),
+                triangles,
+            );
             let hull = build_foliage_hull(&source)?;
+            report_foliage_stage("reference views", REFERENCE_WINDOW_BYTES, triangles);
             let references = render_foliage_references(
                 &gpu,
                 &lit,
@@ -368,10 +520,9 @@ pub(crate) async fn bake_foliage(
                 params.view_count,
                 params.texture_resolution,
             )?;
+            report_foliage_stage("pack layers", 0, triangles);
             let layers = pack_foliage_layers(&gpu, &source, &references)?;
-            let volume = stochastic_bake(&gpu, &lit, &source, &settings)
-                .await?
-                .volume;
+            let volume = impostor_volume(&gpu, &lit, &source, &settings).await?;
             (hull, volume, Some(references), Some(layers))
         }
         FoliageRoute::Stochastic => {
@@ -379,6 +530,7 @@ pub(crate) async fn bake_foliage(
             (bake.mesh, bake.volume, None, None)
         }
         FoliageRoute::Differentiable => {
+            report_foliage_stage("reference views", REFERENCE_WINDOW_BYTES, triangles);
             let references = render_foliage_references(
                 &gpu,
                 &lit,
@@ -386,17 +538,20 @@ pub(crate) async fn bake_foliage(
                 params.view_count,
                 params.texture_resolution,
             )?;
+            report_foliage_stage("optimization", 0, triangles);
             let bake =
                 optimize_foliage(&gpu, &lit, source, references, settings.optimize_settings())
                     .await?;
             (bake.mesh, bake.volume, None, None)
         }
     };
+    report_foliage_stage("resources", volume.len(), triangles);
     let mut resources = FoliageResources::new(&gpu, params)?;
     resources.initialize(&gpu, layers.as_ref(), &volume)?;
     // The packing and initialization submissions precede this marker.
     submissions_done(&gpu).await;
     drop((references, layers));
+    report_foliage_stage("bake complete", 0, triangles);
     Ok(CompletedFoliage { resources, mesh })
 }
 

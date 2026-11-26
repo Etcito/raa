@@ -939,13 +939,25 @@ mod web {
                     let _ = st.foliage_state().assets.remove(id);
                     return Err(error_to_js(&error));
                 }
+                let triangles = source.triangles.len();
                 let completion = st.lit.prepare_foliage(&gpu, source, settings);
                 drop(guard);
-                Ok::<_, JsValue>((gpu, rc, ledger, id, spec, root, completion))
+                Ok::<_, JsValue>((gpu, rc, ledger, id, spec, root, completion, triangles))
             })();
             wasm_bindgen_futures::future_to_promise(async move {
-                let (gpu, rc, ledger, id, spec, root, completion) = submission?;
+                let (gpu, rc, ledger, id, spec, root, completion, triangles) = submission?;
                 let result = completion.await;
+                // The stage lines of `raa_lit::foliage_bake::report_foliage_stage` end here;
+                // `crate::alloc_log::report_stage` writes them to `console.error`.
+                raa_lit::foliage_bake::report_foliage_stage(
+                    if result.is_ok() {
+                        "preparation finished"
+                    } else {
+                        "preparation failed"
+                    },
+                    0,
+                    triangles,
+                );
                 let mut guard = rc.borrow_mut();
                 let Some(st) = guard.as_mut() else {
                     return Err(disposed());

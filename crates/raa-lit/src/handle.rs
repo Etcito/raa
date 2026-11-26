@@ -1778,6 +1778,12 @@ impl LitHandle {
             let count = s.meshes.source(draw.0).map_or(0, |(_, _, count)| count);
             sum.saturating_add(count as usize / 3)
         });
+        // 108 B per `SourceTriangle`: 281 808 720 B for the 2 609 340-triangle sample tree.
+        crate::foliage_bake::report_foliage_stage(
+            "source snapshot",
+            total.saturating_mul(std::mem::size_of::<SourceTriangle>()),
+            total,
+        );
         let mut triangles: Vec<SourceTriangle> = Vec::new();
         triangles.try_reserve_exact(total).map_err(|_| {
             foliage_invalid(format!(
