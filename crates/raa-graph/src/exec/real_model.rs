@@ -1023,11 +1023,11 @@ impl Kernels {
             gpu,
             "neural.weights",
             WEIGHT_BYTES as u64,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         );
         gpu.queue().write_buffer(&weights, 0, &package.bytes);
         let recurrent_bindings = [
-            (0, uniform), (1, read), (7, write), (11, image),
+            (0, uniform), (1, uniform), (7, write), (11, image),
             (12, image), (13, image), (14, write),
         ];
         Self {
@@ -1048,7 +1048,7 @@ impl Kernels {
                 "encode_stem",
                 &[
                     (0, uniform),
-                    (1, read),
+                    (1, uniform),
                     (2, uniform),
                     (3, sampled(S::Depth, D::D2)),
                     (4, image),
@@ -1060,14 +1060,14 @@ impl Kernels {
             ),
             spatial: kernel(
                 "encode_spatial",
-                &[(0, uniform), (1, read), (7, write), (8, write)],
+                &[(0, uniform), (1, uniform), (7, write), (8, write)],
             ),
             area: heads.area.then(|| {
                 kernel(
                     "reconstruct_area",
                     &[
                         (0, uniform),
-                        (1, read),
+                        (1, uniform),
                         (7, write),
                         (9, sampled(float, D::D2Array)),
                         (10, storage(HDR_FORMAT, D::D2Array)),
@@ -1084,7 +1084,7 @@ impl Kernels {
                     "reconstruct_reflection",
                     &[
                         (0, uniform),
-                        (1, read),
+                        (1, uniform),
                         (12, image),
                         (13, image),
                         (14, write),
@@ -1095,7 +1095,7 @@ impl Kernels {
             sr_head: heads.sr.then(|| {
                 kernel(
                     "sr_head",
-                    &[(0, uniform), (1, read), (14, write), (16, write)],
+                    &[(0, uniform), (1, uniform), (14, write), (16, write)],
                 )
             }),
             sr_resolve: heads.sr.then(|| {

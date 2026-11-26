@@ -19,7 +19,10 @@ struct State {
     geometry: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> control: ModelParams;
-@group(0) @binding(1) var<storage, read> weights: array<f32>;
+// The 6560-byte package as 410 vec4 in a uniform buffer: every invocation reads the same weight at the same time, which
+// the constant cache broadcasts (a storage read per lane and per MAC dominated the pass cost).
+@group(0) @binding(1) var<uniform> weights: array<vec4<f32>, 410>;
+fn wt(i: u32) -> f32 { return weights[i >> 2u][i & 3u]; }
 @group(0) @binding(2) var<uniform> frame: RaaTemporalFrame;
 @group(0) @binding(3) var depth: texture_depth_2d;
 @group(0) @binding(4) var normal: texture_2d<f32>;
@@ -110,9 +113,9 @@ fn pack_guide(
 }
 fn stem_at(i: u32, input: array<f32, 12>) {
     for (var out = 0u; out < 12u; out++) {
-        var sum = weights[STEM_B + out];
+        var sum = wt(STEM_B + out);
         for (var c = 0u; c < 12u; c++) {
-            sum = fma(weights[STEM_W + out * 12u + c], input[c], sum);
+            sum = fma(wt(STEM_W + out * 12u + c), input[c], sum);
         }
         stem[i][out] = max(0.0, sum);
     }
@@ -133,18 +136,18 @@ fn encode_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
     let p = vec2<i32>(id.xy);
     let i = index(p);
     var dw: array<f32, 12>;
-    for (var c = 0u; c < 12u; c++) { dw[c] = weights[SPATIAL_B + c]; }
+    for (var c = 0u; c < 12u; c++) { dw[c] = wt(SPATIAL_B + c); }
     for (var tap = 0u; tap < 9u; tap++) {
         let q = p + vec2<i32>(i32(tap % 3u), i32(tap / 3u)) - 1;
         let source = stem[index(q)];
         for (var c = 0u; c < 12u; c++) {
-            dw[c] = fma(weights[SPATIAL_W + c * 9u + tap], source[c], dw[c]);
+            dw[c] = fma(wt(SPATIAL_W + c * 9u + tap), source[c], dw[c]);
         }
     }
     for (var out = 0u; out < 12u; out++) {
-        var sum = weights[MIX_B + out];
+        var sum = wt(MIX_B + out);
         for (var c = 0u; c < 12u; c++) {
-            sum = fma(weights[MIX_W + out * 12u + c], dw[c], sum);
+            sum = fma(wt(MIX_W + out * 12u + c), dw[c], sum);
         }
         guides[i].encoded[out] = max(0.0, stem[i][out] + sum);
     }
@@ -174,15 +177,15 @@ fn reconstruct_area(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var tap = 0u; tap < 9u; tap++) {
         let row = AREA_W + tap * 26u;
         // Both packed slots use the same guide. Only the last two inputs differ.
-        var sum = weights[AREA_B + tap];
+        var sum = wt(AREA_B + tap);
         for (var c = 0u; c < 12u; c++) {
-            sum = fma(weights[row + c], guide.encoded[c], sum);
+            sum = fma(wt(row + c), guide.encoded[c], sum);
         }
         for (var c = 0u; c < 12u; c++) {
-            sum = fma(weights[row + 12u + c], warped[c], sum);
+            sum = fma(wt(row + 12u + c), warped[c], sum);
         }
-        let pair_sum = fma(vec2<f32>(weights[row + 24u]), ratio, vec2<f32>(sum));
-        logits[tap] = fma(vec2<f32>(weights[row + 25u]), log_weight, pair_sum);
+        let pair_sum = fma(vec2<f32>(wt(row + 24u)), ratio, vec2<f32>(sum));
+        logits[tap] = fma(vec2<f32>(wt(row + 25u)), log_weight, pair_sum);
         largest = max(largest, logits[tap]);
     }
     var result = vec4<f32>(0.0);
@@ -200,15 +203,15 @@ fn reconstruct_area(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 fn recur_dot(row: u32, guide: Guide, late: array<f32, 9>) -> f32 {
     let offset = RECURRENT_W + row * 33u;
-    var sum = weights[RECURRENT_B + row];
+    var sum = wt(RECURRENT_B + row);
     for (var c = 0u; c < 12u; c++) {
-        sum = fma(weights[offset + c], guide.encoded[c], sum);
+        sum = fma(wt(offset + c), guide.encoded[c], sum);
     }
     for (var c = 0u; c < 12u; c++) {
-        sum = fma(weights[offset + 12u + c], guide.warped[c] * guide.gate, sum);
+        sum = fma(wt(offset + 12u + c), guide.warped[c] * guide.gate, sum);
     }
     for (var c = 0u; c < 9u; c++) {
-        sum = fma(weights[offset + 24u + c], late[c], sum);
+        sum = fma(wt(offset + 24u + c), late[c], sum);
     }
     return sum;
 }
@@ -248,9 +251,9 @@ fn recurrent(@builtin(global_invocation_id) id: vec3<u32>) {
     _ = update_state(p, r, hit_info);
 }
 fn project(hidden: array<f32, 12>, start: u32, bias: u32, row: u32) -> f32 {
-    var sum = weights[bias + row];
+    var sum = wt(bias + row);
     for (var c = 0u; c < 12u; c++) {
-        sum = fma(weights[start + row * 12u + c], hidden[c], sum);
+        sum = fma(wt(start + row * 12u + c), hidden[c], sum);
     }
     return sum;
 }
