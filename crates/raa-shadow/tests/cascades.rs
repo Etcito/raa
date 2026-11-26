@@ -194,3 +194,133 @@ fn degenerate_inputs_do_not_panic() {
     assert_eq!(s[3], 60.0);
     assert!(s.iter().all(|v| v.is_finite()), "{s:?}");
 }
+
+// ---- Scene cover (no sun without shadow inside the scene) ----
+
+use raa_math::Aabb;
+use raa_shadow::{CascadeFit, cascade_frame, cascade_frame_covered, cover_distance};
+
+/// An atrium-like scene: 40 x 16 x 18 m.
+fn atrium() -> Aabb {
+    Aabb {
+        min: Vec3::new(-20.0, -1.0, -9.0),
+        max: Vec3::new(20.0, 15.0, 9.0),
+    }
+}
+
+fn corners(b: &Aabb) -> [Vec3; 8] {
+    let mut out = [Vec3::ZERO; 8];
+    for (k, p) in out.iter_mut().enumerate() {
+        *p = Vec3::new(
+            if k & 1 == 0 { b.min.x } else { b.max.x },
+            if k & 2 == 0 { b.min.y } else { b.max.y },
+            if k & 4 == 0 { b.min.z } else { b.max.z },
+        );
+    }
+    out
+}
+
+#[test]
+fn covered_frame_without_scene_is_the_plain_frame() {
+    let view = camera(Vec3::new(-9.0, 1.6, -0.9), -1.5);
+    let (m, s) = cascade_frame(&view, FOV, ASPECT, 0.1, 37.2, 20.0, sun(), RES);
+    let c = cascade_frame_covered(&view, FOV, ASPECT, 0.1, 37.2, 20.0, sun(), RES, None);
+    assert_eq!(c.splits, s);
+    assert_eq!(c.matrices, m);
+    assert_eq!(c.fits, [CascadeFit::Slice; 4]);
+    assert_eq!(c.cover_m, None);
+}
+
+#[test]
+fn covered_frame_keeps_the_near_cascades_and_reaches_every_scene_corner() {
+    let scene = atrium();
+    for (eye, yaw, far) in [
+        (Vec3::new(-9.0, 1.6, -0.9), -1.5, 37.2),
+        (Vec3::new(12.5, 1.8, -0.6), 1.5, 60.0),
+        (Vec3::new(0.0, 7.0, 5.0), 0.7, 1000.0),
+    ] {
+        let view = camera(eye, yaw);
+        let (m, s) = cascade_frame(&view, FOV, ASPECT, 0.1, far, 20.0, sun(), RES);
+        let c = cascade_frame_covered(&view, FOV, ASPECT, 0.1, far, 20.0, sun(), RES, Some(&scene));
+        // Near quality: the first three cascades are the plain ones.
+        assert_eq!(&c.splits[..3], &s[..3]);
+        assert_eq!(&c.matrices[..3], &m[..3]);
+        // The last split reaches the farthest scene corner (capped by far).
+        let farthest = corners(&scene)
+            .iter()
+            .map(|p| (*p - eye).length())
+            .fold(0.0f32, f32::max);
+        assert!(c.splits[3] >= farthest.min(far) - 1e-3, "{c:?} {farthest}");
+        // Every scene point the camera can see past split 2 is inside the last cascade box.
+        let last = c.matrices[3];
+        for p in corners(&scene) {
+            let q = last.mul_vec4(Vec4::new(p.x, p.y, p.z, 1.0));
+            assert!(q.x.abs() <= 1.0 && q.y.abs() <= 1.0, "{p:?} -> {q:?}");
+            assert!(q.z > 0.0 && q.z < 1.0, "{p:?} -> {q:?}");
+        }
+        assert_eq!(c.fits[3], CascadeFit::Scene, "{c:?}");
+    }
+}
+
+#[test]
+fn scene_fitted_cascade_does_not_move_with_the_camera() {
+    let scene = atrium();
+    let a = cascade_frame_covered(
+        &camera(Vec3::new(-9.0, 1.6, -0.9), -1.5),
+        FOV,
+        ASPECT,
+        0.1,
+        60.0,
+        20.0,
+        sun(),
+        RES,
+        Some(&scene),
+    );
+    let b = cascade_frame_covered(
+        &camera(Vec3::new(-7.3, 1.9, 0.4), -1.1),
+        FOV,
+        ASPECT,
+        0.1,
+        60.0,
+        20.0,
+        sun(),
+        RES,
+        Some(&scene),
+    );
+    assert_eq!(a.fits[3], CascadeFit::Scene);
+    assert_eq!(a.matrices[3], b.matrices[3]);
+}
+
+#[test]
+fn huge_scene_keeps_the_slice_sphere() {
+    let scene = Aabb {
+        min: Vec3::splat(-5000.0),
+        max: Vec3::splat(5000.0),
+    };
+    let view = camera(Vec3::new(0.0, 2.0, 0.0), 0.3);
+    let c = cascade_frame_covered(
+        &view,
+        FOV,
+        ASPECT,
+        0.1,
+        300.0,
+        20.0,
+        sun(),
+        RES,
+        Some(&scene),
+    );
+    assert_eq!(c.fits, [CascadeFit::Slice; 4]);
+    assert_eq!(c.splits[3], 300.0);
+    assert!(c.texels_m[3] > c.texels_m[2]);
+}
+
+#[test]
+fn cover_distance_is_laddered() {
+    let view = camera(Vec3::new(-9.0, 1.6, -0.9), -1.5);
+    let d = cover_distance(&view, &atrium()).unwrap();
+    let k = (d.log2() * 4.0).round();
+    assert!((d.log2() * 4.0 - k).abs() < 1e-4, "{d}");
+    // A small move keeps the same value.
+    let e = cover_distance(&camera(Vec3::new(-9.1, 1.6, -0.9), -1.5), &atrium()).unwrap();
+    assert_eq!(d, e);
+}

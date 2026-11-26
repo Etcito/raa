@@ -11,6 +11,12 @@ pub struct ShadowDesc {
     pub distance_m: f32,
     /// Cascade resolution: 1024, 2048 or 4096.
     pub resolution: u32,
+    /// Keep the sun shadowed in the whole scene: the last cascade reaches the farthest corner
+    /// of the scene bounds (capped by the camera far plane) when that is past `distance_m`,
+    /// and a cascade is fitted to the scene's light-space bounds when they are smaller than
+    /// its slice. `false` restores the plain range `min(far, distance_m)`, past which the
+    /// sun is unshadowed.
+    pub cover: bool,
 }
 
 impl Default for ShadowDesc {
@@ -19,6 +25,7 @@ impl Default for ShadowDesc {
             softness: 1.0,
             distance_m: 60.0,
             resolution: 2048,
+            cover: true,
         }
     }
 }

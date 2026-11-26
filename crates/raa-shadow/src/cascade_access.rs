@@ -6,7 +6,9 @@
 //! shares what the pass already computes so another pass (the virtualized-geometry seam) can
 //! draw into the same layers with the same view-projections.
 
-use raa_math::{Mat4, Vec3};
+use raa_math::{Aabb, Mat4, Vec3};
+
+use crate::cascades::{CascadeFit, cascade_fit, ladder_up};
 
 /// Number of cascades (CSM).
 const CASCADES: usize = 4;
@@ -66,4 +68,94 @@ pub fn cascade_frame(
         previous = splits[i];
     }
     (matrices, splits)
+}
+
+/// The cover distance is rounded up on a ladder of 2^(1/4) steps (about 19 %), so it changes
+/// only at a few camera positions and the last cascade does not resize every frame.
+const COVER_LADDER: f32 = 4.0;
+
+/// Distance from the camera of `view` to the farthest corner of `scene`, rounded up to the
+/// next 2^(k/4). `None` for a non-invertible view or non-finite bounds.
+pub fn cover_distance(view: &Mat4, scene: &Aabb) -> Option<f32> {
+    let eye = view.inverse()?.transform_point(Vec3::ZERO);
+    if !(eye.is_finite() && scene.min.is_finite() && scene.max.is_finite()) {
+        return None;
+    }
+    let mut far = 0.0f32;
+    for k in 0..8 {
+        let p = Vec3::new(
+            if k & 1 == 0 { scene.min.x } else { scene.max.x },
+            if k & 2 == 0 { scene.min.y } else { scene.max.y },
+            if k & 4 == 0 { scene.min.z } else { scene.max.z },
+        );
+        far = far.max((p - eye).length());
+    }
+    (far > 0.0).then(|| ladder_up(far, COVER_LADDER))
+}
+
+/// The cascades of one frame when the shadow covers the scene.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct CoveredFrame {
+    pub matrices: [Mat4; CASCADES],
+    pub splits: [f32; CASCADES],
+    pub fits: [CascadeFit; CASCADES],
+    pub texels_m: [f32; CASCADES],
+    /// The cover distance of the scene (`None` without scene bounds).
+    pub cover_m: Option<f32>,
+}
+
+/// [`cascade_frame`] that keeps the sun shadowed everywhere in the scene. The first three
+/// cascades are unchanged (practical splits of `[near, far.min(distance_m)]`, so the near
+/// shadow quality is the same); the last one reaches `cover_distance(view, scene)` (capped by
+/// the camera far plane) when that is farther than the shadow distance, so no surface of the
+/// scene the camera can see lies past the last cascade (where the lighting would leave the
+/// sun unshadowed). Each cascade is then fitted to the smaller of its slice sphere and the
+/// scene's light-space bounds ([`cascade_fit`]). Without `scene` it equals [`cascade_frame`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the contract signature mirrors the pass's inputs"
+)]
+pub fn cascade_frame_covered(
+    view: &Mat4,
+    fov_y_rad: f32,
+    aspect: f32,
+    near: f32,
+    far: f32,
+    distance_m: f32,
+    sun_dir: Vec3,
+    resolution: u32,
+    scene: Option<&Aabb>,
+) -> CoveredFrame {
+    let mut splits = crate::cascade_splits(near, far.min(distance_m), SPLIT_LAMBDA, CASCADES);
+    let cover_m = scene.and_then(|b| cover_distance(view, b));
+    if let Some(cover) = cover_m {
+        let reach = cover.min(far);
+        if reach > splits[CASCADES - 1] {
+            splits[CASCADES - 1] = reach;
+        }
+    }
+    let mut out = CoveredFrame {
+        matrices: [Mat4::IDENTITY; CASCADES],
+        splits,
+        fits: [CascadeFit::Slice; CASCADES],
+        texels_m: [0.0; CASCADES],
+        cover_m,
+    };
+    let mut previous = near;
+    for (i, &split) in splits.iter().enumerate() {
+        let fitted = cascade_fit(
+            view,
+            fov_y_rad,
+            aspect,
+            (previous, split),
+            sun_dir,
+            resolution,
+            scene,
+        );
+        out.matrices[i] = fitted.matrix;
+        out.fits[i] = fitted.fit;
+        out.texels_m[i] = fitted.texel_m;
+        previous = split;
+    }
+    out
 }

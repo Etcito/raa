@@ -1146,6 +1146,16 @@ fn shadow_gi_types() -> Vec<NodeTypeSpec> {
                     &[],
                     "raa-shadow/src/desc.rs:20",
                 ),
+                value(
+                    Fid::Shadow,
+                    "cover",
+                    "Cover scene",
+                    "Shadows",
+                    ParamValue::Bool(shadow.cover),
+                    OPEN,
+                    &[],
+                    "raa-shadow/src/desc.rs:22",
+                ),
                 rebuilds(
                     value(
                         Fid::Shadow,

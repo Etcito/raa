@@ -20,9 +20,33 @@ export interface ShadowSettings {
    */
   distance?: number;
   /**
+   * Keep the sun shadowed in the whole scene. The first three cascades keep the practical
+   * splits of `distance`; the last one reaches the farthest corner of the scene bounds (capped
+   * by the camera far plane) when that is farther, and a cascade is fitted to the scene's
+   * light-space bounds when they are smaller than its view slice. `false` restores the plain
+   * range `min(far, distance)`, past which the sun is unshadowed. Default true.
+   */
+  cover?: boolean;
+  /**
    * Edge length of one cascade's shadow map in texels; 1024, 2048 or 4096. Default 2048.
    */
   resolution?: 1024 | 2048 | 4096;
+}
+
+/** What the last `shadow.csm` frame computed, from {@link Engine.shadowStats}. */
+export interface ShadowStats {
+  /** The `cover` setting. */
+  cover: boolean;
+  /** View-space far distance of each of the 4 cascades, metres. */
+  splits: number[];
+  /** How each cascade box was fitted: `slice` (sphere of its view slice) or `scene` (scene bounds). */
+  fits: ('slice' | 'scene')[];
+  /** World size of one shadow-map texel of each cascade, metres. */
+  texels: number[];
+  /** Farthest scene-bounds corner from the camera (rounded up to 2^(k/4)), metres, or null. */
+  coverDistance: number | null;
+  /** The scene bounds used, `[minX, minY, minZ, maxX, maxY, maxZ]`, or null. */
+  scene: number[] | null;
 }
 
 /**
@@ -89,6 +113,12 @@ export interface Engine {
    *   `api.feature_missing` (no shadow feature is installed).
    */
   setShadows(settings: ShadowSettings): void;
+
+  /**
+   * The cascades of the last frame the `shadow.csm` pass prepared (diagnostics).
+   * @throws RaaError `api.feature_missing` (no shadow feature is installed).
+   */
+  shadowStats(): ShadowStats;
 
   /**
    * Validates and applies horizon-based ambient occlusion (GTAO). Merges `settings` over the

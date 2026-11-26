@@ -180,6 +180,16 @@ impl InstanceIndex {
         }
     }
 
+    /// Bounds of every bounded slot (the root node's bounds, refitted on every change);
+    /// `None` when no slot has bounds. Unbounded slots are not included.
+    pub fn root_bounds(&self) -> Option<Aabb> {
+        if self.count == self.unbounded.len() {
+            return None;
+        }
+        let b = self.nodes.first()?.bounds;
+        (b.min.x <= b.max.x && b.min.y <= b.max.y && b.min.z <= b.max.z).then_some(b)
+    }
+
     /// Number of live BVH nodes.
     pub fn node_count(&self) -> usize {
         self.nodes
@@ -768,5 +778,39 @@ impl InstanceIndex {
         if rebuild {
             self.rebuild();
         }
+    }
+}
+
+#[cfg(test)]
+mod root_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn root_bounds_hold_every_bounded_slot() {
+        let mut index = InstanceIndex::new();
+        assert_eq!(index.root_bounds(), None);
+        index.insert(7, None);
+        assert_eq!(index.root_bounds(), None);
+        for i in 0..20u32 {
+            let x = i as f32;
+            index.insert(
+                i,
+                Some(Aabb {
+                    min: Vec3::new(x, -1.0, 0.0),
+                    max: Vec3::new(x + 0.5, 2.0, 1.0),
+                }),
+            );
+        }
+        let b = index.root_bounds().unwrap();
+        assert_eq!(b.min, Vec3::new(0.0, -1.0, 0.0));
+        assert_eq!(b.max, Vec3::new(19.5, 2.0, 1.0));
+        index.update(
+            3,
+            Some(Aabb {
+                min: Vec3::new(3.0, -9.0, 0.0),
+                max: Vec3::new(3.5, 2.0, 1.0),
+            }),
+        );
+        assert_eq!(index.root_bounds().unwrap().min.y, -9.0);
     }
 }

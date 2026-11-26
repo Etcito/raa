@@ -1330,6 +1330,13 @@ impl LitHandle {
             .map_or([None; MAX_HERO_LIGHTS], |s| s.area_heroes)
     }
 
+    /// World bounds of every bounded instance of the scene the last prepare snapshotted
+    /// (the instance index's root); `None` without bounded instances or while the shared
+    /// state is busy. The sun shadow uses it to cover the whole scene.
+    pub fn scene_bounds(&self) -> Option<raa_math::Aabb> {
+        self.shared.try_borrow().ok()?.index.root_bounds()
+    }
+
     /// The number of hero shadow-map layers the renderer's prepare selected; 0 while the
     /// shared state is busy or before any prepare.
     pub fn area_hero_capacity(&self) -> u32 {

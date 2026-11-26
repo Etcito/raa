@@ -133,6 +133,11 @@ impl Engine {
             let mut d = shadow.get();
             read_f32(&settings, "softness", &mut d.softness)?;
             read_f32(&settings, "distance", &mut d.distance_m)?;
+            if let Some(v) = get(&settings, "cover")? {
+                d.cover = v
+                    .as_bool()
+                    .ok_or_else(|| api_error("shadow.invalid", "cover must be a boolean"))?;
+            }
             if let Some(r) = optional_f64(&settings, "resolution")? {
                 if !(r.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&r)) {
                     return Err(api_error(
@@ -144,6 +149,50 @@ impl Engine {
             }
             shadow.set(d)
         })
+    }
+
+    /// The cascades of the last `shadow.csm` prepare: `{cover, splits, fits, texels,
+    /// coverDistance, scene}` (diagnostics).
+    #[wasm_bindgen(js_name = shadowStats)]
+    pub fn shadow_stats(&mut self) -> Result<JsValue, JsValue> {
+        let stats = self.with_state(|_, st| {
+            Ok(st.features.require_mut::<ShadowHandle>("shadows")?.stats())
+        })?;
+        let numbers = |v: &[f32]| {
+            let a = js_sys::Array::new();
+            for x in v {
+                a.push(&JsValue::from_f64(f64::from(*x)));
+            }
+            JsValue::from(a)
+        };
+        let out = js_sys::Object::new();
+        let put = |k: &str, v: JsValue| {
+            let _ = Reflect::set(&out, &JsValue::from_str(k), &v);
+        };
+        put("cover", JsValue::from_bool(stats.cover));
+        put("splits", numbers(&stats.splits));
+        let fits = js_sys::Array::new();
+        for f in stats.fits {
+            fits.push(&JsValue::from_str(match f {
+                raa_shadow::CascadeFit::Slice => "slice",
+                raa_shadow::CascadeFit::Scene => "scene",
+            }));
+        }
+        put("fits", fits.into());
+        put("texels", numbers(&stats.texels_m));
+        put(
+            "coverDistance",
+            stats
+                .cover_m
+                .map_or(JsValue::NULL, |c| JsValue::from_f64(f64::from(c))),
+        );
+        put(
+            "scene",
+            stats.scene.map_or(JsValue::NULL, |b| {
+                numbers(&[b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z])
+            }),
+        );
+        Ok(out.into())
     }
 
     /// Sets ambient occlusion, merging the supplied fields over the current settings.

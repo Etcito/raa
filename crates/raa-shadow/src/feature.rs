@@ -106,6 +106,38 @@ struct ShadowState {
     resolution: u32,
     /// Preallocated `ShadowGpu` bytes, rewritten every prepare.
     uniform: [u8; SHADOW_GPU_SIZE],
+    /// What the last prepare computed (diagnostics).
+    stats: ShadowStats,
+}
+
+/// The cascades the last `shadow.csm` prepare computed (diagnostics, `shadowStats` in JS).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ShadowStats {
+    /// The description's `cover` flag.
+    pub cover: bool,
+    /// View-space far distance of each cascade.
+    pub splits: [f32; CASCADES],
+    /// How each cascade box was fitted.
+    pub fits: [crate::CascadeFit; CASCADES],
+    /// World size of one texel of each cascade, metres.
+    pub texels_m: [f32; CASCADES],
+    /// Cover distance of the scene (farthest bounds corner, laddered), `None` without bounds.
+    pub cover_m: Option<f32>,
+    /// The scene bounds used (`None` when `cover` is off or the scene has no bounds).
+    pub scene: Option<raa_math::Aabb>,
+}
+
+impl Default for ShadowStats {
+    fn default() -> Self {
+        ShadowStats {
+            cover: false,
+            splits: [0.0; CASCADES],
+            fits: [crate::CascadeFit::Slice; CASCADES],
+            texels_m: [0.0; CASCADES],
+            cover_m: None,
+            scene: None,
+        }
+    }
 }
 
 type SharedShadow = Rc<RefCell<ShadowState>>;
@@ -199,7 +231,14 @@ impl FeaturePass for ShadowPass {
         {
             st.casters = Some(Casters::new(ctx.gpu, desc.resolution, hero_capacity));
         }
-        let (matrices, splits) = crate::cascade_frame(
+        // `cover`: the scene bounds keep the last cascade over the whole scene (no sun without
+        // shadow inside it); otherwise the plain range min(far, distance).
+        let scene = if desc.cover {
+            self.lit.scene_bounds()
+        } else {
+            None
+        };
+        let frame = crate::cascade_frame_covered(
             &view.view,
             view.fov_y_rad,
             view.aspect,
@@ -208,7 +247,17 @@ impl FeaturePass for ShadowPass {
             desc.distance_m,
             view.sun_dir,
             desc.resolution,
+            scene.as_ref(),
         );
+        let (matrices, splits) = (frame.matrices, frame.splits);
+        st.stats = ShadowStats {
+            cover: desc.cover,
+            splits,
+            fits: frame.fits,
+            texels_m: frame.texels_m,
+            cover_m: frame.cover_m,
+            scene,
+        };
         // Caster list `i` uses `all[i]`: the four cascades, then each hero target of a slot
         // below the capacity (identity for an empty slot).
         let mut all = [Mat4::IDENTITY; CASCADES + MAX_HERO_LIGHTS];
@@ -307,6 +356,7 @@ impl ShadowFeature {
             sun_dir: Vec3::ZERO,
             resolution: 0,
             uniform: [0; SHADOW_GPU_SIZE],
+            stats: ShadowStats::default(),
         }));
         let pass = ShadowPass {
             state: state.clone(),
@@ -358,6 +408,14 @@ impl ShadowHandle {
             layer_views: casters.layer_views().clone(),
             sun_dir: st.sun_dir,
         })
+    }
+
+    /// What the last prepare computed (defaults before any prepare or on a re-entrant borrow).
+    pub fn stats(&self) -> ShadowStats {
+        self.state
+            .try_borrow()
+            .map(|st| st.stats)
+            .unwrap_or_default()
     }
 
     /// Number of hero shadow-map layers the last prepare renders: the occupied hero slots
@@ -416,6 +474,7 @@ mod tests {
             softness: 2.0,
             distance_m: 60.0,
             resolution: 1024,
+            cover: true,
         };
         let mut out = [0u8; SHADOW_GPU_SIZE];
         pack_shadow(&mut out, &matrices, &splits, &desc);
