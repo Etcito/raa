@@ -12,6 +12,9 @@ use raa_math::{Mat4, Vec3};
 
 use crate::light_cutoff::{LightCutoff, budgeted};
 use std::cell::RefCell;
+
+/// Cached effective lights: registry generation, descriptors, forward radii.
+type Effective = (u64, Vec<LocalLight>, Vec<f32>);
 use crate::local_light::{LightHandle, LocalLight, MAX_LIGHT_HANDLE};
 
 use raa_shader::LIGHT_GPU_SIZE;
@@ -46,7 +49,7 @@ pub struct LocalLights {
     dirty: bool,
     cutoff: LightCutoff,
     generation: u64,
-    effective: RefCell<(u64, Vec<LocalLight>)>,
+    effective: RefCell<Effective>,
 }
 
 impl Default for LocalLights {
@@ -65,7 +68,7 @@ impl LocalLights {
             dirty: false,
             cutoff: LightCutoff::default(),
             generation: 1,
-            effective: RefCell::new((0, Vec::new())),
+            effective: RefCell::new((0, Vec::new(), Vec::new())),
         }
     }
 
@@ -274,8 +277,9 @@ impl LocalLights {
     pub fn write_gpu(&self, out: &mut [u8; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE]) {
         out.fill(0);
         let eff = self.effective();
-        for (light, record) in eff.1.iter().zip(out.chunks_exact_mut(LIGHT_GPU_SIZE)) {
-            light.write_gpu(record.try_into().expect("one light record"));
+        let records = out.chunks_exact_mut(LIGHT_GPU_SIZE);
+        for ((light, forward), record) in eff.1.iter().zip(&eff.2).zip(records) {
+            light.write_gpu_tiered(*forward, record.try_into().expect("one light record"));
         }
     }
 
@@ -316,7 +320,7 @@ impl LocalLights {
     }
 
     /// World descriptors under the overlap-budgeted cutoff, cached per registry change.
-    fn effective(&self) -> std::cell::Ref<'_, (u64, Vec<LocalLight>)> {
+    fn effective(&self) -> std::cell::Ref<'_, Effective> {
         {
             let mut cache = self.effective.borrow_mut();
             if cache.0 != self.generation {
@@ -325,7 +329,8 @@ impl LocalLights {
                     .flatten()
                     .map(world_desc)
                     .collect();
-                *cache = (self.generation, budgeted(&worlds, self.cutoff));
+                let (lights, forward) = budgeted(&worlds, self.cutoff);
+                *cache = (self.generation, lights, forward);
             }
         }
         self.effective.borrow()
@@ -436,11 +441,12 @@ mod tests {
                 (32, 0.0),
                 (36, 0.0),
                 (40, -1.0),
-                (56, 2.0),
                 (60, 3.0),
             ] {
                 assert_eq!(gpu_float(record, offset), expected, "offset {offset}");
             }
+            // point and spot carry the forward radius (0: forward everywhere), the others the width
+            assert_eq!(gpu_float(record, 56), if rank < 2 { 0.0 } else { 2.0 });
             assert!((gpu_float(record, 44) - 17.5_f32.to_radians().cos()).abs() < 1e-6);
             assert!((gpu_float(record, 48) - 14.0_f32.to_radians().cos()).abs() < 1e-6);
             assert_eq!(
@@ -736,5 +742,19 @@ mod tests {
         lights.write_gpu(&mut out);
         assert_eq!(gpu_float(&out[..LIGHT_GPU_SIZE], 12), 50.0);
         assert_eq!(lights.gpu_count(), 3, "without the cutoff the tiny light is live again");
+    }
+
+    #[test]
+    fn faint_lights_write_their_forward_radius_into_the_width_lane() {
+        let mut lights = LocalLights::new();
+        lights.add(LocalLight { intensity: 0.3, range: 25.0, ..LocalLight::default() }).unwrap();
+        lights.add(LocalLight { intensity: 8.0, range: 6.0, ..LocalLight::default() }).unwrap();
+        lights.add(LocalLight { intensity: 0.3, range: 25.0, shadows: true, ..LocalLight::default() }).unwrap();
+        let mut out = [0u8; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE];
+        lights.write_gpu(&mut out);
+        let lane = |i: usize| gpu_float(&out[i * LIGHT_GPU_SIZE..(i + 1) * LIGHT_GPU_SIZE], 56);
+        let expected = (0.3 / lights.cutoff().forward_radiance).sqrt();
+        assert!((lane(0) - expected).abs() < 1e-3 && lane(0) > 1.0 && lane(0) < 25.0, "{}", lane(0));
+        assert_eq!((lane(1), lane(2)), (0.0, 0.0), "strong and shadowed lights stay forward");
     }
 }

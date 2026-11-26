@@ -273,13 +273,23 @@ pub(crate) fn parse_area_shading(source: &impl Properties) -> Result<AreaLightSh
 pub(crate) fn light_cutoff_for(
     tonemap: &raa_tonemap::ToneMapping,
     threshold: f32,
+    forward_threshold: f32,
 ) -> raa_lit::LightCutoff {
     if threshold <= 0.0 {
         return raa_lit::LightCutoff::OFF;
     }
+    let radiance = |code: f32| {
+        if code > 0.0 {
+            raa_tonemap::curves::visible_radiance(tonemap, code)
+        } else {
+            0.0
+        }
+    };
     raa_lit::LightCutoff {
         threshold,
-        min_radiance: raa_tonemap::curves::visible_radiance(tonemap, threshold),
+        min_radiance: radiance(threshold),
+        forward_threshold,
+        forward_radiance: radiance(forward_threshold),
     }
 }
 
@@ -492,8 +502,8 @@ pub(crate) mod web {
 
     /// Re-derives the registry's cutoff after the tone mapping changed.
     pub(crate) fn sync_light_cutoff(st: &mut crate::state::EngineState) {
-        let threshold = st.lit.local_lights().cutoff().threshold;
-        let cutoff = light_cutoff_for(&st.tonemap.get(), threshold);
+        let current = st.lit.local_lights().cutoff();
+        let cutoff = light_cutoff_for(&st.tonemap.get(), current.threshold, current.forward_threshold);
         st.lit.local_lights_mut().set_cutoff(cutoff);
     }
 
@@ -801,9 +811,14 @@ pub(crate) mod web {
         /// below `threshold` (a fraction of display white, default 2/255, 0 disables) after the
         /// scene's fixed exposure and tone mapping is shortened to its influence radius or
         /// switched off for every consumer. Throws `light.invalid_cutoff` when `threshold` is
-        /// not a finite number in [0, 1].
+        /// not a finite number in [0, 1]. The optional second argument is the forward-tier threshold
+        /// (default 16/255, 0 disables): fainter or farther lights are probe-only.
         #[wasm_bindgen(js_name = setLightCutoff)]
-        pub fn set_light_cutoff(&mut self, threshold: f64) -> Result<(), JsValue> {
+        pub fn set_light_cutoff(
+            &mut self,
+            threshold: f64,
+            forward_threshold: Option<f64>,
+        ) -> Result<(), JsValue> {
             self.with_state(|_, st| {
                 if !(threshold.is_finite() && (0.0..=1.0).contains(&threshold)) {
                     return Err(RaaError::FrameGraph {
@@ -811,7 +826,14 @@ pub(crate) mod web {
                         message: format!("threshold must be in [0, 1], got {threshold}"),
                     });
                 }
-                let cutoff = light_cutoff_for(&st.tonemap.get(), threshold as f32);
+                let forward = forward_threshold.unwrap_or(f64::from(raa_lit::DEFAULT_FORWARD_THRESHOLD));
+                if !(forward.is_finite() && (0.0..=1.0).contains(&forward)) {
+                    return Err(RaaError::FrameGraph {
+                        code: "light.invalid_cutoff",
+                        message: format!("forward threshold must be in [0, 1], got {forward}"),
+                    });
+                }
+                let cutoff = light_cutoff_for(&st.tonemap.get(), threshold as f32, forward as f32);
                 st.lit.local_lights_mut().set_cutoff(cutoff);
                 Ok(())
             })

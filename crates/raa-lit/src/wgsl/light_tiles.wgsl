@@ -67,6 +67,8 @@ fn tile_reaches(light: LightGpu, lo: vec2<f32>, hi: vec2<f32>, near: vec3<f32>, 
     if light.kind == 2u { return true; }
     var radius = light.position_range.w;
     if light.kind == 3u { radius += length(vec2<f32>(light.width, light.height) * 0.5); }
+    // Tiered point/spot light: width is its forward radius (0 = the whole range).
+    if light.kind < 2u && light.width > 0.0 { radius = min(radius, light.width); }
     let position = light.position_range.xyz;
     let forward = -vec3<f32>(raa_frame.view[0].z, raa_frame.view[1].z, raa_frame.view[2].z);
     if dot(position - near, forward) < -radius || dot(position - far, forward) > radius { return false; }

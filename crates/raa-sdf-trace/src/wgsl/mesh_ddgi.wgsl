@@ -88,6 +88,11 @@ var<private> ddgi_light_base: u32;
 var<workgroup> ddgi_job_groups: array<vec4<u32>, 8>;
 var<workgroup> ddgi_origin: array<vec4<f32>, 8>;
 var<workgroup> ddgi_light_bits: array<atomic<u32>, 64>;
+// Probe-only lights of the probe being blended (light_cutoff.rs 'Tier'): up to DDGI_INJECT_MAX
+// entries of (radiance * weight, direction to the light), filled by `ddgi_inject_probe`.
+const DDGI_INJECT_MAX: u32 = 16u;
+var<workgroup> ddgi_inj: array<vec4<f32>, 32>;
+var<workgroup> ddgi_inj_n: atomic<u32>;
 // Guided rays: per probe, the cumulative distribution of the 64 octahedral cells (row-major).
 var<workgroup> ddgi_cdf: array<array<f32, 64>, 8>;
 var<workgroup> ddgi_sky_partial: array<array<vec3<f32>, 9>, 64>;
@@ -840,6 +845,50 @@ fn ddgi_job_setup(p: u32, j: u32) {
     ddgi_origin[p] = vec4<f32>((vec3<f32>(g) + cell_centre) * v.spacing + offset, guided);
 }
 
+// Probe-only lights of workgroup probe `p`: every tiered point or spot light (width lane = forward
+// radius) in range of the probe, with its shadow ray from the probe. The injected weight is the
+// complement of the forward fade at the probe's distance, so forward and probe add to one light.
+// Called by all threads, in uniform control flow.
+fn ddgi_inject_probe(p: u32, lid: u32) {
+    if lid == 0u { atomicStore(&ddgi_inj_n, 0u); }
+    workgroupBarrier();
+    let origin = ddgi_origin[p].xyz;
+    let count = min(256u, frame.light_info.x);
+    for (var i = lid; i < count; i += DDGI_THREADS) {
+        let light = lights[i];
+        if light.kind > 1u || light.width <= 0.0 { continue; }
+        if !any(light.radiance.rgb > vec3<f32>(0.0)) { continue; }
+        let delta = light.position_range.xyz - origin;
+        let distance = length(delta);
+        if distance >= light.position_range.w || distance < EPS { continue; }
+        let blend = smoothstep(0.75 * light.width, light.width, distance);
+        if blend <= 0.0 { continue; }
+        let l = delta / distance;
+        let window = saturate(1.0 - pow(distance / light.position_range.w, 4.0));
+        var weight = window * window / max(distance * distance, 0.04);
+        if light.kind == 1u { weight *= smoothstep(light.direction_outer.w, light.inner, dot(light.direction_outer.xyz, -l)); }
+        let c = light.radiance.rgb * (weight * blend);
+        if ddgi_max3(c) <= 0.0 { continue; }
+        if closest(Ray(origin + l * (2.0 * EPS), l), distance - 4.0 * EPS, true).object != MISS { continue; }
+        let slot = atomicAdd(&ddgi_inj_n, 1u);
+        if slot < DDGI_INJECT_MAX {
+            ddgi_inj[2u * slot] = vec4<f32>(c, 0.0);
+            ddgi_inj[2u * slot + 1u] = vec4<f32>(l, 0.0);
+        }
+    }
+    workgroupBarrier();
+}
+
+// Irradiance / pi of the injected lights for a texel looking along `dir`.
+fn ddgi_inject_texel(dir: vec3<f32>) -> vec3<f32> {
+    var e = vec3<f32>(0.0);
+    let n = min(atomicLoad(&ddgi_inj_n), DDGI_INJECT_MAX);
+    for (var k = 0u; k < n; k++) {
+        e += ddgi_inj[2u * k].xyz * max(0.0, dot(dir, ddgi_inj[2u * k + 1u].xyz));
+    }
+    return e * 0.31830988;
+}
+
 // Relocation, classification and light mask of workgroup probe `p` (one thread).
 fn ddgi_probe_record(p: u32, rays: u32) {
     let job = ddgi_job[p];
@@ -1034,7 +1083,7 @@ fn ddgi_probe_gather(p: u32, lid: u32, rays: u32, scratch_first: u32) -> DdgiGat
                 out.raw.direct.sun = sum.direct.sun * inv;
                 out.raw.direct.residual = sum.direct.residual * inv;
             }
-            if (groups & DDGI_OTHER) != 0u { out.raw.direct.other = sum.direct.other * inv; }
+            if (groups & DDGI_OTHER) != 0u { out.raw.direct.other = sum.direct.other * inv + ddgi_inject_texel(dir); }
             if geometry {
                 for (var e = 0u; e < 27u; e++) { sum.transfer[e >> 1u][e & 1u] += escaped[e / 3u]; }
                 for (var j = 0u; j < 14u; j++) { out.raw.transfer[j] = sum.transfer[j] * inv; }
@@ -1262,6 +1311,7 @@ fn ddgi_update(@builtin(local_invocation_index) lid: u32,
     for (var p = 0u; p < probes_here; p++) {
         let live = ddgi_job[p].y != 0u;
         var gathered: DdgiGathered;
+        if live { ddgi_inject_probe(p, lid); }
         if live {
             gathered = ddgi_probe_gather(p, lid, rays, ddgi_scratch_row() + (group.x * probes_here + p) * rays * DDGI_SCRATCH_ROWS);
         }

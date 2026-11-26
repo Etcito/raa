@@ -143,6 +143,12 @@ impl LocalLight {
     /// `LocalLights::write_gpu` attaches this to its ascending `LightHandle` registry;
     /// handles, radius and shadows stay outside the S10 record.
     pub(crate) fn write_gpu(self, out: &mut [u8; raa_shader::LIGHT_GPU_SIZE]) {
+        self.write_gpu_tiered(0.0, out);
+    }
+
+    /// As [`LocalLight::write_gpu`] with the forward radius of a tiered point or spot light in
+    /// the width lane (those kinds have no rectangle; 0 = forward everywhere, light_cutoff.rs).
+    pub(crate) fn write_gpu_tiered(self, forward_radius: f32, out: &mut [u8; raa_shader::LIGHT_GPU_SIZE]) {
         // Compute in f64 to avoid intermediate overflow; extremely small positive
         // ranges saturate at the largest finite GPU value instead of emitting infinity.
         let inverse_range_squared =
@@ -169,6 +175,9 @@ impl LocalLight {
             bytes.copy_from_slice(&value.to_le_bytes());
         }
         out[52..56].copy_from_slice(&self.kind.rank().to_le_bytes());
+        if self.kind.rank() < 2 {
+            out[56..60].copy_from_slice(&forward_radius.to_le_bytes());
+        }
     }
 
     /// Effective full inner cone angle: the authored value, or 80 percent of `angle_deg`.

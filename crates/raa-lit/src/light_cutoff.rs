@@ -17,6 +17,15 @@
 //! the light is off (intensity 0) and every consumer skips it. A directional light has no range:
 //! it is off when `L < T`.
 //!
+//! Tier. A point or spot light without shadows whose inverse-square radiance `L / d^2` falls
+//! below the forward threshold `T2` (16/255 of white, same derivation as `T`) at
+//! `r_f = sqrt(L / T2)` is shaded in forward and in the tile lists only inside `r_f`, with a
+//! smoothstep fade over `[0.75 r_f, r_f]` (the GPU record's width lane carries `r_f`, 0 = forward
+//! everywhere). Beyond it the light is probe-only: DDGI injects its shadowed analytic direct
+//! light into the probe irradiance with the complementary weight (so the two add to 1 across the
+//! band, no pop). Area and directional lights, lights with `shadows` and lights with
+//! `r_f >= range` are never tiered.
+//!
 //! Budget. The bar is the *total* error below the threshold, not each light's. Each light
 //! therefore uses `T / k` where `k` is one plus the number of other authored-on lights whose
 //! first-pass influence sphere (centre, `min(range, sqrt(2 L / T))`) overlaps its own (a
@@ -30,6 +39,12 @@ use raa_math::Vec3;
 /// Default display threshold: two codes of an 8 bit display.
 pub const DEFAULT_DISPLAY_THRESHOLD: f32 = 2.0 / 255.0;
 
+/// Default forward-tier threshold: 16 codes of an 8 bit display.
+pub const DEFAULT_FORWARD_THRESHOLD: f32 = 16.0 / 255.0;
+
+/// Smallest forward radius of a tiered light, metres.
+const MIN_FORWARD_RADIUS: f32 = 1.0;
+
 /// Peak of `windowed_falloff` (distance clamped to 0.2 m).
 const FALLOFF_PEAK: f32 = 25.0;
 
@@ -40,6 +55,12 @@ pub struct LightCutoff {
     pub threshold: f32,
     /// Scene-linear radiance (before exposure) at which a grey reaches `threshold` on screen.
     pub min_radiance: f32,
+    /// Second threshold (default 16/255): a point or spot light is shaded in forward only
+    /// where its inverse-square radiance stays above it; farther out it is probe-only (DDGI
+    /// injects its shadowed direct light). 0 disables the tier.
+    pub forward_threshold: f32,
+    /// Scene-linear radiance (before exposure) at which a grey reaches `forward_threshold`.
+    pub forward_radiance: f32,
 }
 
 impl Default for LightCutoff {
@@ -48,6 +69,8 @@ impl Default for LightCutoff {
         LightCutoff {
             threshold: DEFAULT_DISPLAY_THRESHOLD,
             min_radiance: 6.07e-4,
+            forward_threshold: DEFAULT_FORWARD_THRESHOLD,
+            forward_radiance: 5.18e-3,
         }
     }
 }
@@ -57,6 +80,8 @@ impl LightCutoff {
     pub const OFF: LightCutoff = LightCutoff {
         threshold: 0.0,
         min_radiance: 0.0,
+        forward_threshold: 0.0,
+        forward_radiance: 0.0,
     };
 
     /// Whether the cutoff changes lights at all.
@@ -78,10 +103,14 @@ impl LightCutoff {
 }
 
 /// Every light as the consumers must see it: [`LocalLight::with_cutoff`] with the threshold
-/// divided by each light's overlap count (module docs, "Budget"). Order is preserved.
-pub(crate) fn budgeted(lights: &[LocalLight], cutoff: LightCutoff) -> Vec<LocalLight> {
+/// divided by each light's overlap count (module docs, "Budget"), and the forward radius of
+/// each light (0 = forward everywhere, see "Tier"). Order is preserved.
+pub(crate) fn budgeted(lights: &[LocalLight], cutoff: LightCutoff) -> (Vec<LocalLight>, Vec<f32>) {
     if !cutoff.enabled() {
-        return lights.iter().map(|l| l.with_cutoff(cutoff)).collect();
+        return (
+            lights.iter().map(|l| l.with_cutoff(cutoff)).collect(),
+            vec![0.0; lights.len()],
+        );
     }
     let reach = |l: &LocalLight| match l.kind {
         LocalLightKind::Directional => f32::INFINITY,
@@ -95,7 +124,11 @@ pub(crate) fn budgeted(lights: &[LocalLight], cutoff: LightCutoff) -> Vec<LocalL
         .filter(|(_, l)| !l.is_off())
         .map(|(i, l)| (i, reach(l)))
         .collect();
-    let mut out: Vec<LocalLight> = lights.iter().map(|l| l.with_cutoff(LightCutoff::OFF)).collect();
+    let mut out: Vec<LocalLight> = lights
+        .iter()
+        .map(|l| l.with_cutoff(LightCutoff::OFF))
+        .collect();
+    let mut forward = vec![0.0; lights.len()];
     for &(i, ri) in &on {
         let a = Vec3::from_array(lights[i].position);
         let mut k = 1;
@@ -109,8 +142,21 @@ pub(crate) fn budgeted(lights: &[LocalLight], cutoff: LightCutoff) -> Vec<LocalL
             }
         }
         out[i] = lights[i].with_cutoff(cutoff.shared(k));
+        forward[i] = forward_radius(&out[i], cutoff);
     }
-    out
+    (out, forward)
+}
+
+/// Forward radius of an effective light (0 when it is not tiered).
+pub(crate) fn forward_radius(light: &LocalLight, cutoff: LightCutoff) -> f32 {
+    let tiered = matches!(light.kind, LocalLightKind::Point | LocalLightKind::Spot);
+    if !tiered || light.shadows || light.is_off() || cutoff.forward_radiance <= 0.0 {
+        return 0.0;
+    }
+    let radius = (light.peak_radiance() / cutoff.forward_radiance)
+        .sqrt()
+        .max(MIN_FORWARD_RADIUS);
+    if radius >= light.range { 0.0 } else { radius }
 }
 
 impl LocalLight {
@@ -256,10 +302,10 @@ mod tests {
             position: [x, 0.0, 0.0],
             ..lit(0.02, 25.0)
         };
-        let alone = budgeted(&[at(0.0)], cutoff())[0];
-        let far = budgeted(&[at(0.0), at(1000.0)], cutoff());
+        let alone = budgeted(&[at(0.0)], cutoff()).0[0];
+        let far = budgeted(&[at(0.0), at(1000.0)], cutoff()).0;
         assert_eq!(far[0].range, alone.range, "disjoint spheres do not share");
-        let near = budgeted(&[at(0.0), at(1.0), at(2.0), at(3.0)], cutoff());
+        let near = budgeted(&[at(0.0), at(1.0), at(2.0), at(3.0)], cutoff()).0;
         assert!((near[0].range - (alone.range * 2.0).min(25.0)).abs() < 1e-3, "k = 4 doubles the radius");
         // the summed cut error of the four stays under the threshold
         let t = cutoff().min_radiance;
@@ -273,6 +319,20 @@ mod tests {
                 .sum();
             assert!(err <= t * 1.001, "d={d}: {err}");
         }
-        assert!(budgeted(&[lit(0.0, 6.0), at(0.0)], cutoff())[0].is_off());
+        assert!(budgeted(&[lit(0.0, 6.0), at(0.0)], cutoff()).0[0].is_off());
+    }
+
+    #[test]
+    fn faint_far_lights_become_probe_only_and_strong_ones_stay_forward() {
+        let c = cutoff();
+        let faint = lit(0.3, 25.0);
+        let rf = budgeted(&[faint], c).1[0];
+        assert!((rf - (0.3 / c.forward_radiance).sqrt()).abs() < 1e-3 && rf > 1.0 && rf < 25.0, "{rf}");
+        assert_eq!(budgeted(&[lit(8.0, 6.0)], c).1[0], 0.0, "radius beyond range: forward");
+        assert_eq!(budgeted(&[LocalLight { shadows: true, ..faint }], c).1[0], 0.0);
+        let area = LocalLight { kind: LocalLightKind::Area, ..faint };
+        assert_eq!(budgeted(&[area], c).1[0], 0.0);
+        let no_tier = LightCutoff { forward_threshold: 0.0, forward_radiance: 0.0, ..c };
+        assert_eq!(budgeted(&[faint], no_tier).1[0], 0.0);
     }
 }

@@ -207,6 +207,11 @@ impl WebApp for EngineApp {
                 &initial_tonemap,
                 raa_lit::DEFAULT_DISPLAY_THRESHOLD,
             ),
+            forward_threshold: raa_lit::DEFAULT_FORWARD_THRESHOLD,
+            forward_radiance: raa_tonemap::curves::visible_radiance(
+                &initial_tonemap,
+                raa_lit::DEFAULT_FORWARD_THRESHOLD,
+            ),
         });
         pipeline
             .try_borrow_mut()

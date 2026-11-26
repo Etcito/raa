@@ -158,6 +158,12 @@ fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f3
         if distance == 0.0 || distance >= light.position_range.w { return vec3<f32>(0.0); }
         direction = to_light / distance;
         falloff = raa_local_falloff(distance, light.position_range.w);
+        // Forward tier (light_cutoff.rs): width > 0 is the forward radius of a point or spot light;
+        // beyond it the light is probe-only, faded over [0.75, 1] of the radius.
+        if light.width > 0.0 {
+            falloff *= 1.0 - smoothstep(0.75 * light.width, light.width, distance);
+            if falloff <= 0.0 { return vec3<f32>(0.0); }
+        }
         if light.kind == 1u {
             falloff *= raa_local_spot(dot(light.direction_cos_outer.xyz, -direction),
                 light.direction_cos_outer.w, light.cos_inner);
