@@ -328,6 +328,19 @@ fn raa_spherical_blend_diffuse(legacy: vec3<f32>, s: MaterialOutput, c: ShadeCtx
     return mix(legacy, spherical, c.spherical_diffuse.w);
 }
 
+// Environment specular under DDGI: the sky cube is unoccluded, so inside a room every surface
+// would reflect the sky (a closed room lit only through its door reflected more sky than it
+// received light). The probes know how much of the environment reaches the point: the ratio of
+// their irradiance to the unoccluded sky irradiance (`sky_diffuse`, the ambient diffuse factor
+// that the probe term replaces, same units as `spherical_diffuse.rgb`), at most 1, scales the
+// environment term. Outdoors the probes (sky plus bounced sun) exceed the sky and nothing changes.
+fn raa_probe_sky_specular(env: vec3<f32>, sky_diffuse: vec3<f32>, c: ShadeCtx) -> vec3<f32> {
+    if !raa_feature_enabled(RAA_DDGI_GI_FEATURE) || c.spherical_diffuse.w <= 0.0 { return env; }
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let visible = clamp(dot(c.spherical_diffuse.rgb, luma) / max(dot(sky_diffuse, luma), 1e-6), 0.0, 1.0);
+    return env * mix(1.0, visible, c.spherical_diffuse.w);
+}
+
 fn raa_default_output(in: MaterialInput) -> MaterialOutput {
     let r = in.record;
     var o: MaterialOutput;

@@ -112,7 +112,9 @@ fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
         w_gi = clamp(raa_env_sh.gi.x, 0.0, 1.0);
     }
     let gi_specular = raa_layered_ambient_gi_irradiance(c.frag) / RAA_LAYERED_AMBIENT_PI;
-    let incoming = mix(raa_ibl_specular(r, roughness) * raa_env_sh.info.x, gi_specular, w_gi);
+    let sky = raa_probe_sky_specular(raa_ibl_specular(r, roughness) * raa_env_sh.info.x,
+        irradiance * raa_env_sh.info.y, c);
+    let incoming = mix(sky, gi_specular, w_gi);
     let specular = incoming * (f0 * dfg.x + vec3<f32>(dfg.y)) * energy
         * raa_specular_occlusion(c.n_dot_v, c.ao, roughness);
 
@@ -129,7 +131,8 @@ fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let atten = 1.0 - k * raa_layered_ambient_schlick(RAA_LAYERED_AMBIENT_CLEARCOAT_F0, n_dot_v_c);
     let dfg_c = raa_ibl_dfg(n_dot_v_c, cr);
     let r_c = raa_layered_ambient_dominant_dir(n_c, reflect(-v, n_c), cr);
-    let incoming_c = mix(raa_ibl_specular(r_c, cr) * raa_env_sh.info.x, gi_specular, w_gi);
+    let incoming_c = mix(raa_probe_sky_specular(raa_ibl_specular(r_c, cr) * raa_env_sh.info.x,
+        irradiance * raa_env_sh.info.y, c), gi_specular, w_gi);
     let coat = k * incoming_c * (RAA_LAYERED_AMBIENT_CLEARCOAT_F0 * dfg_c.x + dfg_c.y)
         * raa_specular_occlusion(n_dot_v_c, c.ao, cr);
     let base_diffuse = raa_spherical_blend_diffuse(diffuse, s, c);
