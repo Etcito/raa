@@ -49,9 +49,13 @@ mod foliage_volume;
 
 use foliage_optimize::{
     FOLIAGE_OPTIMIZE_PARAMS_SIZE, FoliageBinOutcome, FoliageOptimizeCoordinator,
-    FoliageOptimizeParams, FoliageOptimizeSettings, FoliageOptimizeState, INITIAL_BIN_CAPACITY,
-    assemble_optimized_foliage, initial_bin_capacity, validate_reference_count,
+    FoliageOptimizeParams, FoliageOptimizeProgressTicket, FoliageOptimizeSettings,
+    FoliageOptimizeState, FoliageOptimizeSteps, INITIAL_BIN_CAPACITY, STAGE_BIN_GROWTH,
+    STAGE_BIN_READBACK, STAGE_BINS, STAGE_ITERATION, STAGE_PUBLICATION, STAGE_TERMINAL_READBACK,
+    assemble_optimized_foliage, drive_foliage_optimizer, foliage_optimize_progress,
+    initial_bin_capacity, validate_reference_count,
 };
+use foliage_poisson::initialize_foliage;
 use foliage_resources::{FoliageSource, MicroTriangle, SourceTriangle};
 use foliage_sampling::sample_foliage;
 
@@ -440,4 +444,206 @@ fn empty_eligible_foliage_keeps_the_wood_and_a_zero_volume() {
             .code(),
         invalid_code()
     );
+}
+
+/// Polls a future whose steps are all immediately ready (the CPU fake below) to its end.
+fn run_now<F: std::future::Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..1_000_000 {
+        if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+    }
+    panic!("the optimizer driver never settled");
+}
+
+/// A CPU stand-in of the GPU stages: it serves bin counts (the first read of iteration 0
+/// overflows), returns the seeded triangles of a small foliage source as the terminal
+/// generation, records the live progress it sees at every step and can fail one stage.
+struct CpuSteps {
+    generation: u32,
+    seeded: Vec<MicroTriangle>,
+    terminal_opacity: f32,
+    fail_bin_read_at: Option<u32>,
+    bin_reads: u32,
+    grown: Vec<u32>,
+    seen: Vec<(&'static str, u32)>,
+}
+
+impl CpuSteps {
+    fn new(generation: u32) -> Self {
+        let seeded = initialize_foliage(&source(), 8, 3).unwrap();
+        assert!(!seeded.is_empty());
+        Self {
+            generation,
+            seeded,
+            terminal_opacity: 1.0,
+            fail_bin_read_at: None,
+            bin_reads: 0,
+            grown: Vec::new(),
+            seen: Vec::new(),
+        }
+    }
+
+    fn observe(&mut self) {
+        let progress = foliage_optimize_progress(self.generation).expect("a live run");
+        self.seen.push((progress.stage, progress.iteration));
+    }
+}
+
+impl FoliageOptimizeSteps for CpuSteps {
+    fn submit_bins(&mut self, _iteration: u32, _capacity: u32) -> Result<(), RaaError> {
+        self.observe();
+        Ok(())
+    }
+
+    fn bin_counts(
+        &mut self,
+        capacity: u32,
+    ) -> impl std::future::Future<Output = Result<Vec<u32>, RaaError>> {
+        self.observe();
+        let read = self.bin_reads;
+        self.bin_reads += 1;
+        let result = if self.fail_bin_read_at == Some(read) {
+            Err(RaaError::Gpu("map_async rejected the bin counts".into()))
+        } else if read == 0 {
+            Ok(vec![1, capacity + 3, 2])
+        } else {
+            Ok(vec![1, capacity, 2])
+        };
+        std::future::ready(result)
+    }
+
+    fn grow_bins(&mut self, capacity: u32) -> Result<(), RaaError> {
+        self.observe();
+        self.grown.push(capacity);
+        Ok(())
+    }
+
+    fn submit_iteration(
+        &mut self,
+        coordinator: &mut FoliageOptimizeCoordinator,
+    ) -> Result<(), RaaError> {
+        self.observe();
+        coordinator.raster_encoded()?;
+        coordinator.gradients_encoded()?;
+        coordinator.update_encoded()
+    }
+
+    fn terminal(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<Vec<MicroTriangle>, RaaError>> {
+        self.observe();
+        let opacity = self.terminal_opacity;
+        let terminal = self
+            .seeded
+            .iter()
+            .map(|triangle| MicroTriangle {
+                normal: [0.0, 0.0, 1.0],
+                opacity,
+                ..*triangle
+            })
+            .collect();
+        std::future::ready(Ok(terminal))
+    }
+
+    fn settle(&mut self) -> impl std::future::Future<Output = ()> {
+        std::future::ready(())
+    }
+}
+
+#[test]
+fn the_driver_finishes_a_small_foliage_run_and_reports_every_stage() {
+    let generation = 9_101;
+    let ticket = FoliageOptimizeProgressTicket::register(generation, 3);
+    let mut steps = CpuSteps::new(generation);
+    let mut coordinator = FoliageOptimizeCoordinator::new(3, 4).unwrap();
+    let triangles = run_now(drive_foliage_optimizer(
+        &mut steps,
+        &mut coordinator,
+        &ticket,
+    ))
+    .unwrap();
+    assert_eq!(coordinator.state(), FoliageOptimizeState::Published);
+    assert_eq!(triangles.len(), steps.seeded.len());
+    // The overflowing first read grows the bins once (4 -> 8) and re-runs them.
+    assert_eq!(steps.grown, vec![8]);
+    assert_eq!(steps.bin_reads, 4);
+    assert_eq!(
+        steps.seen,
+        vec![
+            (STAGE_BINS, 0),
+            (STAGE_BIN_READBACK, 0),
+            (STAGE_BIN_GROWTH, 0),
+            (STAGE_BINS, 0),
+            (STAGE_BIN_READBACK, 0),
+            (STAGE_ITERATION, 0),
+            (STAGE_BINS, 1),
+            (STAGE_BIN_READBACK, 1),
+            (STAGE_ITERATION, 1),
+            (STAGE_BINS, 2),
+            (STAGE_BIN_READBACK, 2),
+            (STAGE_ITERATION, 2),
+            (STAGE_TERMINAL_READBACK, 2),
+        ]
+    );
+    assert_eq!(
+        foliage_optimize_progress(generation).unwrap().stage,
+        STAGE_PUBLICATION
+    );
+    drop(ticket);
+    assert_eq!(foliage_optimize_progress(generation), None);
+}
+
+#[test]
+fn a_failed_readback_or_publication_returns_an_error_naming_its_stage() {
+    let generation = 9_102;
+    let ticket = FoliageOptimizeProgressTicket::register(generation, 4);
+    let mut steps = CpuSteps::new(generation);
+    steps.fail_bin_read_at = Some(2);
+    let mut coordinator = FoliageOptimizeCoordinator::new(4, 4).unwrap();
+    let error = run_now(drive_foliage_optimizer(
+        &mut steps,
+        &mut coordinator,
+        &ticket,
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), bake_failed_code());
+    assert!(
+        error
+            .message()
+            .contains("failed at stage 'bin readback' (iteration 1 of 4)"),
+        "{}",
+        error.message()
+    );
+    assert!(
+        error
+            .message()
+            .contains("map_async rejected the bin counts")
+    );
+    assert_ne!(coordinator.state(), FoliageOptimizeState::Published);
+    drop(ticket);
+    assert_eq!(foliage_optimize_progress(generation), None);
+
+    let generation = 9_103;
+    let ticket = FoliageOptimizeProgressTicket::register(generation, 1);
+    let mut steps = CpuSteps::new(generation);
+    steps.terminal_opacity = 0.5;
+    let mut coordinator = FoliageOptimizeCoordinator::new(1, 4).unwrap();
+    let error = run_now(drive_foliage_optimizer(
+        &mut steps,
+        &mut coordinator,
+        &ticket,
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), bake_failed_code());
+    assert!(
+        error
+            .message()
+            .contains("failed at stage 'publication' (iteration 0 of 1)"),
+        "{}",
+        error.message()
+    );
+    assert_eq!(coordinator.state(), FoliageOptimizeState::Finalizing);
 }

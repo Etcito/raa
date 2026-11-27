@@ -266,6 +266,11 @@ impl FoliageOptimizeCoordinator {
         self.iteration
     }
 
+    /// The positive iteration budget of the run.
+    pub fn iterations(&self) -> u32 {
+        self.iterations
+    }
+
     /// The counted-bin triangle capacity the next bins stage writes.
     pub fn capacity(&self) -> u32 {
         self.capacity
@@ -1084,61 +1089,336 @@ enum Prepared {
     Job(Box<OptimizeJob>),
 }
 
+/// Stage of an optimizer run: settings, references, seeding, sampling and allocation.
+pub const STAGE_PREPARE: &str = "preparation";
+/// Stage of an optimizer run: the unlit source albedo of the volume samples.
+pub const STAGE_ALBEDO: &str = "albedo sampling";
+/// Stage of an optimizer run: the counted-bin submission of one iteration.
+pub const STAGE_BINS: &str = "bins";
+/// Stage of an optimizer run: the readback of the counted-bin tile counts.
+pub const STAGE_BIN_READBACK: &str = "bin readback";
+/// Stage of an optimizer run: the counted-bin overflow check and regrowth.
+pub const STAGE_BIN_GROWTH: &str = "bin growth";
+/// Stage of an optimizer run: the raster, gradient and update submission of one iteration.
+pub const STAGE_ITERATION: &str = "raster, gradients and update";
+/// Stage of an optimizer run: the single readback of the terminal triangles.
+pub const STAGE_TERMINAL_READBACK: &str = "terminal readback";
+/// Stage of an optimizer run: the opaque publication check of the terminal triangles.
+pub const STAGE_PUBLICATION: &str = "publication";
+/// Stage of an optimizer run: the wood-preserving proxy mesh and the native volume.
+pub const STAGE_ASSEMBLY: &str = "assembly";
+
+/// The live progress of one optimizer run: its source generation, the stage it is in and
+/// the zero-based iteration of its `iterations` budget.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct FoliageOptimizeProgress {
+    pub generation: u32,
+    pub stage: &'static str,
+    pub iteration: u32,
+    pub iterations: u32,
+}
+
+struct ProgressSlot {
+    ticket: u64,
+    progress: FoliageOptimizeProgress,
+}
+
+static PROGRESS: Mutex<Vec<ProgressSlot>> = Mutex::new(Vec::new());
+static NEXT_TICKET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn with_progress<R>(f: impl FnOnce(&mut Vec<ProgressSlot>) -> R) -> R {
+    let mut slots = PROGRESS.lock().unwrap_or_else(|error| error.into_inner());
+    f(&mut slots)
+}
+
+/// The live progress of the newest unsettled optimizer run of `generation`, or `None`
+/// when no run of that generation is in flight (never started, finished or failed).
+pub fn foliage_optimize_progress(generation: u32) -> Option<FoliageOptimizeProgress> {
+    with_progress(|slots| {
+        slots
+            .iter()
+            .rev()
+            .find(|slot| slot.progress.generation == generation)
+            .map(|slot| slot.progress)
+    })
+}
+
+/// Lists one optimizer run in the progress registry from its registration until it is
+/// dropped, which happens when the run settles (ready or error) or is abandoned.
+#[derive(Debug)]
+pub struct FoliageOptimizeProgressTicket {
+    ticket: u64,
+    generation: u32,
+    iterations: u32,
+}
+
+impl FoliageOptimizeProgressTicket {
+    /// Registers a run of `generation` with an `iterations` budget in [`STAGE_PREPARE`].
+    pub fn register(generation: u32, iterations: u32) -> Self {
+        let ticket = NEXT_TICKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        with_progress(|slots| {
+            slots.push(ProgressSlot {
+                ticket,
+                progress: FoliageOptimizeProgress {
+                    generation,
+                    stage: STAGE_PREPARE,
+                    iteration: 0,
+                    iterations,
+                },
+            })
+        });
+        Self {
+            ticket,
+            generation,
+            iterations,
+        }
+    }
+
+    /// The source generation of the run.
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// The iteration budget the run was registered with.
+    pub fn iterations(&self) -> u32 {
+        self.iterations
+    }
+
+    /// Publishes that the run entered `stage` during zero-based `iteration`.
+    pub fn set(&self, stage: &'static str, iteration: u32) {
+        with_progress(|slots| {
+            if let Some(slot) = slots.iter_mut().find(|slot| slot.ticket == self.ticket) {
+                slot.progress.stage = stage;
+                slot.progress.iteration = iteration;
+            }
+        });
+    }
+}
+
+impl Drop for FoliageOptimizeProgressTicket {
+    fn drop(&mut self) {
+        with_progress(|slots| slots.retain(|slot| slot.ticket != self.ticket));
+    }
+}
+
+/// Names the failing `stage` and zero-based `iteration` in `error`: the message reads
+/// `foliage optimizer failed at stage '<stage>' (iteration <i> of <n>): <cause>`. The code
+/// of a `foliage.*` refusal is kept; any other error becomes `foliage.bake_failed`.
+pub fn optimize_stage_error(
+    error: RaaError,
+    stage: &'static str,
+    iteration: u32,
+    iterations: u32,
+) -> RaaError {
+    let code = match &error {
+        RaaError::FrameGraph { code, .. } => code,
+        _ => "foliage.bake_failed",
+    };
+    RaaError::FrameGraph {
+        code,
+        message: format!(
+            "foliage optimizer failed at stage '{stage}' (iteration {iteration} of {iterations}): {}",
+            error.message()
+        ),
+    }
+}
+
+/// The device side of one optimizer run that [`drive_foliage_optimizer`] sequences. The
+/// renderer implements it with the GPU stages; the subject tests implement it on the CPU.
+pub trait FoliageOptimizeSteps {
+    /// Writes the params of `iteration` with `capacity` and submits the counted bins.
+    fn submit_bins(&mut self, iteration: u32, capacity: u32) -> Result<(), RaaError>;
+    /// Reads back the per-tile triangle counts of the last bins submission.
+    fn bin_counts(&mut self, capacity: u32) -> impl Future<Output = Result<Vec<u32>, RaaError>>;
+    /// Reallocates the counted bins for the grown `capacity`.
+    fn grow_bins(&mut self, capacity: u32) -> Result<(), RaaError>;
+    /// Encodes and submits raster, gradients and update, advancing `coordinator` through
+    /// `raster_encoded`, `gradients_encoded` and `update_encoded`.
+    fn submit_iteration(
+        &mut self,
+        coordinator: &mut FoliageOptimizeCoordinator,
+    ) -> Result<(), RaaError>;
+    /// Reads the terminal triangles back once, frozen opaque.
+    fn terminal(&mut self) -> impl Future<Output = Result<Vec<MicroTriangle>, RaaError>>;
+    /// Waits for the submitted work and lets the host run (the step yield).
+    fn settle(&mut self) -> impl Future<Output = ()>;
+}
+
+/// Drives one optimizer run from `Prepared` to `Published` through `steps` and returns the
+/// published terminal triangles.
+///
+/// Every iteration submits the bins, reads their counts, grows and re-runs them on an
+/// overflow, then submits raster, gradients and update; the terminal readback is checked by
+/// [`FoliageOptimizeCoordinator::publish`]. Before each stage the run's `progress` ticket
+/// is set to that stage and iteration, so a waiting caller sees it advance, and every error
+/// is returned through [`optimize_stage_error`] naming the stage that failed. The loop ends
+/// after the coordinator's finite iteration budget or at the first error; a bin capacity
+/// that cannot grow is an error, never another retry.
+pub async fn drive_foliage_optimizer<S: FoliageOptimizeSteps>(
+    steps: &mut S,
+    coordinator: &mut FoliageOptimizeCoordinator,
+    progress: &FoliageOptimizeProgressTicket,
+) -> Result<Vec<MicroTriangle>, RaaError> {
+    let iterations = coordinator.iterations();
+    let at = |stage: &'static str, iteration: u32| {
+        progress.set(stage, iteration);
+        move |error: RaaError| optimize_stage_error(error, stage, iteration, iterations)
+    };
+    coordinator.begin().map_err(at(STAGE_BINS, 0))?;
+    while coordinator.state() != FoliageOptimizeState::Finalizing {
+        let iteration = coordinator.iteration();
+        loop {
+            let fail = at(STAGE_BINS, iteration);
+            steps
+                .submit_bins(iteration, coordinator.capacity())
+                .map_err(fail)?;
+            coordinator.bins_encoded().map_err(fail)?;
+            let fail = at(STAGE_BIN_READBACK, iteration);
+            let counts = steps
+                .bin_counts(coordinator.capacity())
+                .await
+                .map_err(fail)?;
+            steps.settle().await;
+            let fail = at(STAGE_BIN_GROWTH, iteration);
+            match coordinator.bins_completed(&counts).map_err(fail)? {
+                FoliageBinOutcome::Retry => {
+                    steps.grow_bins(coordinator.capacity()).map_err(fail)?;
+                }
+                FoliageBinOutcome::Raster => break,
+            }
+        }
+        steps
+            .submit_iteration(coordinator)
+            .map_err(at(STAGE_ITERATION, iteration))?;
+        steps.settle().await;
+    }
+    let last = iterations - 1;
+    let triangles = steps
+        .terminal()
+        .await
+        .map_err(at(STAGE_TERMINAL_READBACK, last))?;
+    steps.settle().await;
+    coordinator
+        .publish(&triangles)
+        .map_err(at(STAGE_PUBLICATION, last))?;
+    Ok(triangles)
+}
+
+/// The GPU implementation of [`FoliageOptimizeSteps`] over one generation's buffers.
+struct GpuSteps {
+    gpu: GpuContext,
+    work: Option<FoliageCompute>,
+    settings: FoliageOptimizeSettings,
+    tiles: u32,
+}
+
+impl GpuSteps {
+    fn work(&self) -> Result<&FoliageCompute, RaaError> {
+        self.work
+            .as_ref()
+            .ok_or_else(|| invalid("foliage optimizer buffers were already read back"))
+    }
+}
+
+impl FoliageOptimizeSteps for GpuSteps {
+    fn submit_bins(&mut self, iteration: u32, capacity: u32) -> Result<(), RaaError> {
+        let work = self.work()?;
+        write_params(&self.gpu, work, &self.settings, iteration, capacity);
+        let mut encoder =
+            self.gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("raa.lit.foliage.optimize.bins"),
+                });
+        encode_bins(&self.gpu, &mut encoder, work)?;
+        self.gpu.queue().submit([encoder.finish()]);
+        Ok(())
+    }
+
+    fn bin_counts(&mut self, capacity: u32) -> impl Future<Output = Result<Vec<u32>, RaaError>> {
+        let read = self
+            .work()
+            .map(|work| read_bin_counts(&self.gpu, &work.bins, capacity, self.tiles));
+        async move { read?.await }
+    }
+
+    fn grow_bins(&mut self, capacity: u32) -> Result<(), RaaError> {
+        let work = self
+            .work
+            .as_mut()
+            .ok_or_else(|| invalid("foliage optimizer buffers were already read back"))?;
+        resize_bins(&self.gpu, work, capacity)
+    }
+
+    fn submit_iteration(
+        &mut self,
+        coordinator: &mut FoliageOptimizeCoordinator,
+    ) -> Result<(), RaaError> {
+        let work = self.work()?;
+        let mut encoder =
+            self.gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("raa.lit.foliage.optimize.iteration"),
+                });
+        encode_raster(&self.gpu, &mut encoder, work)?;
+        coordinator.raster_encoded()?;
+        encode_gradients(&self.gpu, &mut encoder, work)?;
+        coordinator.gradients_encoded()?;
+        encode_update(&self.gpu, &mut encoder, work)?;
+        self.gpu.queue().submit([encoder.finish()]);
+        coordinator.update_encoded()
+    }
+
+    fn terminal(&mut self) -> impl Future<Output = Result<Vec<MicroTriangle>, RaaError>> {
+        let work = self.work.take();
+        let gpu = self.gpu.clone();
+        async move {
+            match work {
+                Some(work) => work.finish(&gpu).await,
+                None => Err(invalid("foliage optimizer buffers were already read back")),
+            }
+        }
+    }
+
+    fn settle(&mut self) -> impl Future<Output = ()> {
+        yield_step(&self.gpu)
+    }
+}
+
 impl OptimizeJob {
-    async fn run(self) -> Result<FoliageMeshBake, RaaError> {
+    async fn run(
+        self,
+        progress: &FoliageOptimizeProgressTicket,
+    ) -> Result<FoliageMeshBake, RaaError> {
         let OptimizeJob {
             gpu,
             source,
             samples,
             albedo,
-            mut work,
+            work,
             mut coordinator,
             settings,
         } = self;
-        let albedo = albedo.await?;
+        let iterations = coordinator.iterations();
+        progress.set(STAGE_ALBEDO, 0);
+        let albedo = albedo
+            .await
+            .map_err(|error| optimize_stage_error(error, STAGE_ALBEDO, 0, iterations))?;
         yield_step(&gpu).await;
-        let tiles = bin_tiles(work.resolution, work.views)?;
-        coordinator.begin()?;
-        while coordinator.state() != FoliageOptimizeState::Finalizing {
-            let iteration = coordinator.iteration();
-            loop {
-                let capacity = coordinator.capacity();
-                write_params(&gpu, &work, &settings, iteration, capacity);
-                let mut encoder =
-                    gpu.device()
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("raa.lit.foliage.optimize.bins"),
-                        });
-                encode_bins(&gpu, &mut encoder, &work)?;
-                gpu.queue().submit([encoder.finish()]);
-                coordinator.bins_encoded()?;
-                let counts = read_bin_counts(&gpu, &work.bins, capacity, tiles).await?;
-                yield_step(&gpu).await;
-                match coordinator.bins_completed(&counts)? {
-                    FoliageBinOutcome::Retry => {
-                        resize_bins(&gpu, &mut work, coordinator.capacity())?;
-                    }
-                    FoliageBinOutcome::Raster => break,
-                }
-            }
-            let mut encoder =
-                gpu.device()
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("raa.lit.foliage.optimize.iteration"),
-                    });
-            encode_raster(&gpu, &mut encoder, &work)?;
-            coordinator.raster_encoded()?;
-            encode_gradients(&gpu, &mut encoder, &work)?;
-            coordinator.gradients_encoded()?;
-            encode_update(&gpu, &mut encoder, &work)?;
-            gpu.queue().submit([encoder.finish()]);
-            coordinator.update_encoded()?;
-            yield_step(&gpu).await;
-        }
-        let triangles = work.finish(&gpu).await?;
-        yield_step(&gpu).await;
-        coordinator.publish(&triangles)?;
+        let tiles = bin_tiles(work.resolution, work.views)
+            .map_err(|error| optimize_stage_error(error, STAGE_PREPARE, 0, iterations))?;
+        let mut steps = GpuSteps {
+            gpu,
+            work: Some(work),
+            settings,
+            tiles,
+        };
+        let triangles = drive_foliage_optimizer(&mut steps, &mut coordinator, progress).await?;
+        let last = iterations - 1;
+        progress.set(STAGE_ASSEMBLY, last);
         assemble_optimized_foliage(&source, &triangles, &samples, &albedo, settings.resolution)
+            .map_err(|error| optimize_stage_error(error, STAGE_ASSEMBLY, last, iterations))
     }
 }
 
@@ -1197,6 +1477,11 @@ fn prepare(
 /// then the [`set_foliage_host_yield`] hook) after the albedo samples, after every bin
 /// readback, after every iteration and after the terminal readback.
 ///
+/// From its call until it settles, the run is listed in [`foliage_optimize_progress`] under
+/// `source.generation` with its current stage and iteration, and every error names the
+/// stage that failed ([`optimize_stage_error`]); the iteration loop is
+/// [`drive_foliage_optimizer`].
+///
 /// Handoff: 'Publish completed foliage assets in the renderer' (card #9135) calls
 /// `optimize_foliage`, which today validates the m7 settings and the 64..=128 references,
 /// seeds the micro-triangles, runs the ordered optimizer iterations with bin-overflow
@@ -1209,13 +1494,18 @@ pub fn optimize_foliage(
     references: FoliageReferences,
     settings: FoliageOptimizeSettings,
 ) -> impl Future<Output = Result<FoliageMeshBake, RaaError>> + 'static {
-    let prepared = prepare(gpu, lit, source, references, settings);
+    let progress = FoliageOptimizeProgressTicket::register(source.generation, settings.iterations);
+    let prepared = prepare(gpu, lit, source, references, settings)
+        .map_err(|error| optimize_stage_error(error, STAGE_PREPARE, 0, settings.iterations));
     async move {
         match prepared? {
             Prepared::Empty { source, resolution } => {
-                assemble_optimized_foliage(&source, &[], &[], &[], resolution)
+                progress.set(STAGE_ASSEMBLY, 0);
+                assemble_optimized_foliage(&source, &[], &[], &[], resolution).map_err(|error| {
+                    optimize_stage_error(error, STAGE_ASSEMBLY, 0, settings.iterations)
+                })
             }
-            Prepared::Job(job) => job.run().await,
+            Prepared::Job(job) => job.run(&progress).await,
         }
     }
 }

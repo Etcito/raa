@@ -92,34 +92,6 @@ fn world_gradient(clip: vec4<f32>, matrix: mat4x4<f32>) -> vec3<f32> {
     return vec3<f32>(dot(clip, matrix[0]), dot(clip, matrix[1]), dot(clip, matrix[2]));
 }
 
-struct TriangleSample { coverage: f32, visibility: f32, depth: f32 }
-
-fn triangle_sample(triangle: Triangle, matrix: mat4x4<f32>, point: vec2<f32>, resolution: f32, temperature: f32, depth_temperature: f32, reference_z: f32, visible: bool) -> TriangleSample {
-    var out: TriangleSample;
-    out.coverage = 0.0;
-    out.visibility = 0.0;
-    out.depth = 0.0;
-    let a = matrix * vec4<f32>(triangle.p0.xyz, 1.0);
-    let b = matrix * vec4<f32>(triangle.p1.xyz, 1.0);
-    let c = matrix * vec4<f32>(triangle.p2.xyz, 1.0);
-    if (min(min(a.w, b.w), c.w) <= 0.0) { return out; }
-    let pa = screen_position(a, resolution);
-    let pb = screen_position(b, resolution);
-    let pc = screen_position(c, resolution);
-    let area = cross2(pb - pa, pc - pa);
-    if (abs(area) < 1e-8) { return out; }
-    let orient = select(-1.0, 1.0, area > 0.0);
-    let d0 = edge_partial(pb, pc, point, orient).distance;
-    let d1 = edge_partial(pc, pa, point, orient).distance;
-    let d2 = edge_partial(pa, pb, point, orient).distance;
-    out.coverage = foliage_soft_coverage(d0, temperature) * foliage_soft_coverage(d1, temperature)
-        * foliage_soft_coverage(d2, temperature) * triangle.normal.w;
-    let l = barycentric(pa, pb, pc, point, area);
-    out.depth = l.x * (a.z / a.w) + l.y * (b.z / b.w) + l.z * (c.z / c.w);
-    out.visibility = select(0.0, foliage_soft_coverage((reference_z - out.depth) / depth_temperature, 1.0), visible);
-    return out;
-}
-
 @compute @workgroup_size(64)
 fn gradient_triangles(@builtin(global_invocation_id) id: vec3<u32>) {
     let index = id.x;
@@ -166,8 +138,6 @@ fn gradient_triangles(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         for (var ty = lo.y; ty <= hi.y; ty++) {
             for (var tx = lo.x; tx <= hi.x; tx++) {
-                let base = (view * side * side + ty * side + tx) * (params.capacity + 1u);
-                let count = min(bins[base], params.capacity);
                 for (var py = 0u; py < 16u; py++) {
                     let y = ty * 16u + py;
                     if (y >= params.resolution) { continue; }
@@ -203,14 +173,10 @@ fn gradient_triangles(@builtin(global_invocation_id) id: vec3<u32>) {
                             if (reference_length > 1e-8 && length(predicted) > 0.5) {
                                 let n_ref = reference.xyz / reference_length;
                                 // The normalization derivative needs the length of the
-                                // published coverage/visibility-weighted normal sum.
-                                var sum = vec3<f32>(0.0);
-                                for (var i = 0u; i < count; i++) {
-                                    let other = triangles[bins[base + 1u + i]];
-                                    let part = triangle_sample(other, matrix, point, resolution, temperature, depth_temperature, reference_z, visible);
-                                    if (part.coverage > 0.0) { sum += part.coverage * part.visibility * other.normal.xyz; }
-                                }
-                                let sum_length = length(sum);
+                                // coverage/visibility-weighted normal sum of this pixel's
+                                // tile, which the raster stage stored in lane 1 z: one read
+                                // instead of a re-sum of the tile per pixel and triangle.
+                                let sum_length = pixel.depth_loss.z;
                                 if (sum_length > 1e-8) {
                                     let dl_ds = -(params.normal / sum_length) * (n_ref - predicted * dot(n_ref, predicted));
                                     let dw = dot(dl_ds, triangle.normal.xyz);

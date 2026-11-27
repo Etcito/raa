@@ -101,6 +101,11 @@ export interface FoliageState {
   level: 0 | 1;
   /** The failure message, or null when the group is not failed. */
   error: string | null;
+  /**
+   * Present only while a differentiable generation is pending: the optimizer stage it is in
+   * and its zero-based iteration of the `iterations` budget.
+   */
+  progress?: { stage: string; iteration: number; iterations: number };
 }
 
 export interface Engine {

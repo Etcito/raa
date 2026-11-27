@@ -370,6 +370,22 @@ pub fn phase_name(phase: FoliagePhase) -> &'static str {
     }
 }
 
+/// The live optimizer progress a `FoliageState` publishes as `progress`: only a pending
+/// differentiable generation reports one, read from
+/// `raa_lit::foliage_optimize::foliage_optimize_progress` (the optimizer lists a run from its
+/// call until it settles), so a waiting caller sees the stage and iteration advance.
+pub fn pending_progress(
+    phase: FoliagePhase,
+    mode: u32,
+    generation: u32,
+) -> Option<raa_lit::foliage_optimize::FoliageOptimizeProgress> {
+    if phase == FoliagePhase::Pending && mode == FoliageMode::Differentiable.rank() {
+        raa_lit::foliage_optimize::foliage_optimize_progress(generation)
+    } else {
+        None
+    }
+}
+
 /// The `FoliageState.mode` text of native rank `rank`.
 pub fn mode_name(rank: u32) -> &'static str {
     FoliageMode::from_rank(rank).map_or(FoliageMode::Spom.name(), FoliageMode::name)
@@ -884,6 +900,13 @@ mod web {
                 .as_ref()
                 .map_or(JsValue::NULL, |error| JsValue::from_str(error)),
         );
+        if let Some(progress) = pending_progress(state.phase, state.mode, state.generation) {
+            let value = Object::new();
+            set_field(&value, "stage", JsValue::from_str(progress.stage));
+            set_field(&value, "iteration", JsValue::from(progress.iteration));
+            set_field(&value, "iterations", JsValue::from(progress.iterations));
+            set_field(&obj, "progress", value.into());
+        }
         obj.into()
     }
 

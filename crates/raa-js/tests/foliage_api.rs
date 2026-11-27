@@ -20,7 +20,8 @@ mod m38;
 use m38::{
     CompletionTarget, FOLIAGE_BAKE_FAILED, FOLIAGE_TEXTURE_RESOLUTION, FoliageAssetInfo,
     FoliageFields, FoliageLedger, FoliageMode, FoliageRemovalStep, FoliageSpec, bake_settings,
-    completion_target, mode_name, phase_name, plan_removal, source_draw_material, translate_error,
+    completion_target, mode_name, pending_progress, phase_name, plan_removal, source_draw_material,
+    translate_error,
 };
 use raa_js::foliage_state::{
     FOLIAGE_INVALID, FoliageAssetEntry, FoliageAssets, FoliageGroupConfig, FoliageLevel,
@@ -480,4 +481,51 @@ fn state_reports_the_prepared_phase_and_mode() {
     assert_eq!(mode_name(state.mode), "pom");
     assert_eq!(state.asset, Some(ASSET));
     assert_eq!(state.level, 1);
+}
+
+#[test]
+fn a_pending_differentiable_generation_publishes_the_live_optimizer_progress() {
+    use raa_lit::foliage_optimize::{
+        FoliageOptimizeProgressTicket, STAGE_BIN_READBACK, STAGE_PREPARE,
+    };
+    let differentiable = FoliageMode::Differentiable.rank();
+    assert_eq!(
+        pending_progress(FoliagePhase::Pending, differentiable, 77),
+        None
+    );
+    let ticket = FoliageOptimizeProgressTicket::register(77, 64);
+    let started = pending_progress(FoliagePhase::Pending, differentiable, 77).unwrap();
+    assert_eq!(
+        (started.stage, started.iteration, started.iterations),
+        (STAGE_PREPARE, 0, 64)
+    );
+    ticket.set(STAGE_BIN_READBACK, 12);
+    let advanced = pending_progress(FoliagePhase::Pending, differentiable, 77).unwrap();
+    assert_eq!(
+        (advanced.stage, advanced.iteration),
+        (STAGE_BIN_READBACK, 12)
+    );
+    // Only a pending differentiable generation of the same number reports progress.
+    assert_eq!(
+        pending_progress(FoliagePhase::Ready, differentiable, 77),
+        None
+    );
+    assert_eq!(
+        pending_progress(FoliagePhase::Failed, differentiable, 77),
+        None
+    );
+    assert_eq!(
+        pending_progress(FoliagePhase::Pending, FoliageMode::Stochastic.rank(), 77),
+        None
+    );
+    assert_eq!(
+        pending_progress(FoliagePhase::Pending, differentiable, 78),
+        None
+    );
+    // A settled run (its ticket dropped) is never reported as live.
+    drop(ticket);
+    assert_eq!(
+        pending_progress(FoliagePhase::Pending, differentiable, 77),
+        None
+    );
 }

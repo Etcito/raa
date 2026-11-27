@@ -2,8 +2,10 @@
 // reference view from the triangles of its 16-by-16 tile: the three soft edge coverages
 // give the silhouette, the captured reference depth soft-orders the overlapping predicted
 // surfaces of the normal, and the record holds the predicted world normal and coverage in
-// lane 0 with the predicted depth, zero loss and two zeros in lane 1. A pixel without
-// predicted coverage is the background record: zero coverage and a defined zero normal.
+// lane 0 with the predicted depth, zero loss, the length of the coverage/visibility-weighted
+// normal sum and a zero in lane 1 (the gradient stage reads that length instead of
+// re-summing the tile for every pixel of every triangle). A pixel without predicted
+// coverage is the background record: zero coverage and a defined zero normal.
 struct Params {
     count: u32, views: u32, resolution: u32, iteration: u32,
     silhouette: f32, normal: f32, edge: f32, temperature: f32,
@@ -101,7 +103,7 @@ fn raster_pixels(@builtin(global_invocation_id) id: vec3<u32>) {
         if (length(normal_sum) > 1e-8) { normal = normalize(normal_sum); }
         let depth = select(1.0, depth_sum / max(weight_sum, 1e-8), weight_sum > 1e-8);
         record.normal_coverage = vec4<f32>(normal, clamp(coverage_sum, 0.0, 1.0));
-        record.depth_loss = vec4<f32>(depth, 0.0, 0.0, 0.0);
+        record.depth_loss = vec4<f32>(depth, 0.0, length(normal_sum), 0.0);
     } else {
         record.normal_coverage = vec4<f32>(0.0);
         record.depth_loss = vec4<f32>(1.0, 0.0, 0.0, 0.0);
