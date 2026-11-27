@@ -16,6 +16,8 @@ struct RaaVsmPage {
     page: vec2<i32>,
     // Texel origin of the page's slot (xy) and its array layer (z).
     origin: vec3<i32>,
+    // The whole kernel lies inside this page: taps skip the page translation.
+    inside: bool,
 }
 
 fn raa_csm_vsm_param(column: u32) -> vec4<f32> {
@@ -62,6 +64,9 @@ fn raa_csm_vsm_slot(level: u32, page: vec2<i32>) -> i32 {
 // Physical texel position (xy) and layer (z) of virtual texel position `texel`: its own page
 // when resident, otherwise clamped into `home`.
 fn raa_csm_vsm_resolve(level: u32, texel: vec2<f32>, home: RaaVsmPage) -> vec3<f32> {
+    if (home.inside) {
+        return vec3<f32>(vec2<f32>(home.origin.xy) + texel - vec2<f32>(home.page * 128), f32(home.origin.z));
+    }
     let page = vec2<i32>(floor(texel / 128.0));
     var p = home.page;
     var o = home.origin;
@@ -142,7 +147,7 @@ fn raa_csm_vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>, view_
     }
     let m = raa_shadow.cascade_view_proj[0];
     var level = raa_csm_vsm_level(view_depth);
-    var home = RaaVsmPage(vec2<i32>(0), vec3<i32>(-1));
+    var home = RaaVsmPage(vec2<i32>(0), vec3<i32>(-1), false);
     var texel_m = 1.0;
     var uv = vec2<f32>(0.0);
     var depth = 0.0;
@@ -154,7 +159,7 @@ fn raa_csm_vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>, view_
         let page = vec2<i32>(floor(uv / 128.0));
         let s = raa_csm_vsm_slot(l, page);
         if (s >= 0) {
-            home = RaaVsmPage(page, raa_csm_vsm_slot_origin(s));
+            home = RaaVsmPage(page, raa_csm_vsm_slot_origin(s), false);
             level = l;
             break;
         }
@@ -168,6 +173,11 @@ fn raa_csm_vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>, view_
     let tan_angle = max(tan(raa_frame.sun_dir.w * raa_shadow.params.x), 0.0);
     let min_texels = 1.5;
     let search_texels = clamp(max(tan_angle * raa_csm_vsm_param(1u).z / texel_m, min_texels + 1.0), 1.0, 32.0);
+    // Texels from uv to the nearest border of the home page: kernels that stay inside it
+    // (most pixels) address the slot directly.
+    let local = uv - vec2<f32>(home.page * 128);
+    let room = min(min(local.x, local.y), 128.0 - max(local.x, local.y)) - 1.0;
+    home.inside = search_texels < room;
     var blocker_sum = 0.0;
     var blocker_count = 0.0;
     for (var i = 0u; i < 16u; i = i + 1u) {
@@ -183,6 +193,7 @@ fn raa_csm_vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>, view_
     // Light-depth delta in metres (depth range in param 1.w) x tan(angle), in texels.
     let delta_m = (depth - blocker_sum / blocker_count) * raa_csm_vsm_param(1u).w;
     let penumbra = clamp(delta_m * tan_angle / texel_m, min_texels, 48.0);
+    home.inside = penumbra < room;
     if any(raa_frame.camera_jitter.xy != vec2<f32>(0.0)) {
         return raa_csm_vsm_poisson_pcf(level, uv, depth, penumbra, raa_csm_frame_rotation(frag.xy), home);
     }

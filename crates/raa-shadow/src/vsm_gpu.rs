@@ -471,7 +471,8 @@ impl VsmGpu {
             });
             pass.set_pipeline(&self.mark_pipeline);
             pass.set_bind_group(0, group, &[]);
-            pass.dispatch_workgroups(size.0.div_ceil(8), size.1.div_ceil(8), 1);
+            // vsm_mark.wgsl: 8 x 8 threads of 4 x 4 pixels.
+            pass.dispatch_workgroups(size.0.div_ceil(32), size.1.div_ceil(32), 1);
         }
         encoder.copy_buffer_to_buffer(&self.requests, 0, &readback, 0, REQUEST_BYTES);
         busy.store(true, Ordering::Release);
