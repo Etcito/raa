@@ -6,6 +6,9 @@
 //! view finds the card from a hull fragment. The depth the reference pass wrote before
 //! (z divided by the fragment w, that is z times clip w) lies above 1 on every covered
 //! texel, so frag_depth clamped to the clear depth and the Less test dropped every layer.
+//! A texel without a reference fragment packs coverage 0 and the clear depth 1: with the
+//! empty depth 0 the linear sampler blended a near depth into every silhouette edge, the
+//! march hit at the hull entry and the whole hull was filled.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -21,6 +24,10 @@ const MAX: [f32; 3] = [2.0, 6.0, 2.0];
 /// The leaf card: the root plane z = 0 over x in -1.5..1.5 and y in 1..5.
 const CARD: [f32; 4] = [-1.5, 1.5, 1.0, 5.0];
 const CUTOFF: f32 = 0.5;
+/// What the reference targets hold where no fragment landed: the normal/coverage target is
+/// cleared to zero and the standard-Z depth target to the clear depth 1.
+const EMPTY_NORMAL_COVERAGE: [f32; 4] = [0.0; 4];
+const EMPTY_REFERENCE_DEPTH: f32 = 1.0;
 
 fn root_world() -> Mat4 {
     Mat4::from_trs(
@@ -64,7 +71,8 @@ fn reference_layer(camera: &ReferenceCamera, world_to_root: &[[f32; 4]; 3]) -> (
     let inverse = camera.root_to_clip.inverse().unwrap().to_cols_array();
     let world_normal = root_world().transform_vector(Vec3::new(0.0, 0.0, 1.0));
     let mut coverage = vec![0.0; RESOLUTION * RESOLUTION];
-    let mut normal_depth = vec![[0.0; 4]; RESOLUTION * RESOLUTION];
+    let empty = pack_texel(world_to_root, EMPTY_NORMAL_COVERAGE, EMPTY_REFERENCE_DEPTH);
+    let mut normal_depth = vec![empty; RESOLUTION * RESOLUTION];
     let mut old_depths = Vec::new();
     for ty in 0..RESOLUTION {
         for tx in 0..RESOLUTION {
@@ -163,8 +171,38 @@ fn pack_texel_rotates_normals_into_the_root_and_clamps_depth() {
     assert_eq!(packed[3], 1.0);
     assert_eq!(
         pack_texel(&world_to_root, [0.0; 4], -0.5),
-        [0.0, 0.0, 0.0, 0.0]
+        [0.0, 0.0, 0.0, 1.0]
     );
+}
+
+#[test]
+fn texel_without_a_reference_fragment_packs_coverage_zero_and_the_clear_depth() {
+    let world_to_root = world_to_root_normal(root_world()).unwrap();
+    let n = root_world()
+        .transform_vector(Vec3::new(0.0, 1.0, 0.0))
+        .normalize_or_zero();
+    // The cleared targets (depth 1), the earlier depth clear 0, and a stray depth or normal
+    // under zero coverage all pack the empty texel: no normal and the clear depth 1.
+    for (normal_coverage, depth) in [
+        (EMPTY_NORMAL_COVERAGE, EMPTY_REFERENCE_DEPTH),
+        (EMPTY_NORMAL_COVERAGE, 0.0),
+        ([n.x, n.y, n.z, 0.0], 0.4),
+    ] {
+        assert_eq!(
+            pack_texel(&world_to_root, normal_coverage, depth),
+            [0.0, 0.0, 0.0, 1.0],
+            "reference {normal_coverage:?} depth {depth}"
+        );
+    }
+    let (layer, _) = reference_layer(
+        &reference_cameras(MIN, MAX, root_world(), VIEWS).unwrap()[0],
+        &world_to_root,
+    );
+    for (i, texel) in layer.normal_depth.iter().enumerate() {
+        if layer.coverage[i] == 0.0 {
+            assert_eq!(*texel, [0.0, 0.0, 0.0, 1.0], "empty texel {i}");
+        }
+    }
 }
 
 // ---- CPU mirror of foliage_parallax.wgsl (nearest texel instead of the linear sampler) ----
@@ -227,6 +265,41 @@ fn forward(clip: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
     f.map(|v| v * s)
 }
 
+/// The GPU linear sampler at `uv` (clamp to edge): bilinear coverage and packed depth,
+/// accepted like `foliage_parallax_sample`.
+fn sample_linear(layer: &Layer, uv: [f32; 2], threshold: f32) -> Sample {
+    let miss = Sample {
+        coverage: 0.0,
+        depth: 1.0,
+    };
+    if !(uv.iter().all(|&c| (0.0..=1.0).contains(&c))) {
+        return miss;
+    }
+    let r = RESOLUTION as f32;
+    let (x, y) = (uv[0] * r - 0.5, uv[1] * r - 0.5);
+    let (fx, fy) = (x - x.floor(), y - y.floor());
+    let at = |c: f32| (c.max(0.0) as usize).min(RESOLUTION - 1);
+    let (x0, y0) = (at(x.floor()), at(y.floor()));
+    let (x1, y1) = (at(x.floor() + 1.0), at(y.floor() + 1.0));
+    let (mut a, mut depth) = (0.0, 0.0);
+    for (tx, ty, w) in [
+        (x0, y0, (1.0 - fx) * (1.0 - fy)),
+        (x1, y0, fx * (1.0 - fy)),
+        (x0, y1, (1.0 - fx) * fy),
+        (x1, y1, fx * fy),
+    ] {
+        a += w * layer.coverage[ty * RESOLUTION + tx];
+        depth += w * layer.normal_depth[ty * RESOLUTION + tx][3];
+    }
+    if a > 0.0 && a >= threshold && (0.0..=1.0).contains(&depth) {
+        return Sample {
+            coverage: a.min(1.0),
+            depth,
+        };
+    }
+    miss
+}
+
 fn sample(layer: &Layer, uv: [f32; 2], threshold: f32) -> Sample {
     let miss = Sample {
         coverage: 0.0,
@@ -254,9 +327,12 @@ fn probe(
     t: f32,
     side: f32,
     threshold: f32,
+    linear: bool,
 ) -> Probe {
     let pr = project(&layer.clip, add(origin, ray, t));
-    let s = if pr[3] > 0.5 {
+    let s = if pr[3] > 0.5 && linear {
+        sample_linear(layer, [pr[0], pr[1]], threshold)
+    } else if pr[3] > 0.5 {
         sample(layer, [pr[0], pr[1]], threshold)
     } else {
         Sample {
@@ -273,8 +349,16 @@ fn probe(
     }
 }
 
-/// `foliage_parallax_hit` in SPOM (mode 0): (hit point, coverage, depth), coverage 0 on a miss.
-fn parallax_hit(layers: &[Layer], position: [f32; 3], ray: [f32; 3]) -> ([f32; 3], f32, f32) {
+/// `foliage_parallax_hit` without refinement: SPOM (mode 0) with `threshold` the cutoff,
+/// POM (mode 1) with 0, nearest or linear texels; (hit point, coverage, depth), coverage 0
+/// on a miss.
+fn parallax_march(
+    layers: &[Layer],
+    position: [f32; 3],
+    ray: [f32; 3],
+    threshold: f32,
+    linear: bool,
+) -> ([f32; 3], f32, f32) {
     let miss = (position, 0.0, 1.0);
     let (near, t1) = parallax_box(position, ray);
     let t0 = near.max(0.0);
@@ -298,18 +382,23 @@ fn parallax_hit(layers: &[Layer], position: [f32; 3], ray: [f32; 3]) -> ([f32; 3
     let b = project(&layer.clip, add(position, ray, t1));
     let texels = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt() * RESOLUTION as f32;
     let steps = texels.ceil().clamp(8.0, 64.0) as u32;
-    let first = probe(layer, position, ray, t0, side, CUTOFF);
+    let first = probe(layer, position, ray, t0, side, threshold, linear);
     if first.covered && first.f >= 0.0 {
         return (add(position, ray, t0), first.s.coverage, first.z);
     }
     for i in 1..=steps {
         let t = t0 + (t1 - t0) * i as f32 / steps as f32;
-        let cur = probe(layer, position, ray, t, side, CUTOFF);
+        let cur = probe(layer, position, ray, t, side, threshold, linear);
         if cur.covered && cur.f >= 0.0 {
             return (add(position, ray, t), cur.s.coverage, cur.z);
         }
     }
     miss
+}
+
+/// SPOM (mode 0) with the nearest texel.
+fn parallax_hit(layers: &[Layer], position: [f32; 3], ray: [f32; 3]) -> ([f32; 3], f32, f32) {
+    parallax_march(layers, position, ray, CUTOFF, false)
 }
 
 #[test]
@@ -351,4 +440,75 @@ fn parallax_mirror_finds_the_card_from_a_hull_fragment() {
     let (enter, _) = parallax_box(eye, ray);
     let (_, coverage, _) = parallax_hit(&layers, add(eye, ray, enter + 1e-4), ray);
     assert_eq!(coverage, 0.0, "beside the card is a miss");
+}
+
+#[test]
+fn parallax_mirror_misses_through_empty_texels_beside_the_silhouette() {
+    let world_to_root = world_to_root_normal(root_world()).unwrap();
+    let cameras = reference_cameras(MIN, MAX, root_world(), VIEWS).unwrap();
+    let mut probed = 0;
+    for camera in &cameras {
+        let (layer, _) = reference_layer(camera, &world_to_root);
+        // The same layer with the earlier empty texel: depth 0 (the cleared depth target).
+        let mut old = Layer {
+            clip: layer.clip,
+            coverage: layer.coverage.clone(),
+            normal_depth: layer.normal_depth.clone(),
+        };
+        for (i, texel) in old.normal_depth.iter_mut().enumerate() {
+            if old.coverage[i] == 0.0 {
+                *texel = [0.0; 4];
+            }
+        }
+        // A covered texel whose right neighbour has no reference fragment: the linear sample
+        // halfway between them, at a ray depth just in front of the card.
+        let edge = (0..RESOLUTION * RESOLUTION).find(|&i| {
+            i % RESOLUTION + 1 < RESOLUTION
+                && layer.coverage[i] > 0.0
+                && layer.coverage[i + 1] == 0.0
+        });
+        let Some(i) = edge else { continue };
+        probed += 1;
+        let uv = [
+            (i % RESOLUTION + 1) as f32 / RESOLUTION as f32,
+            ((i / RESOLUTION) as f32 + 0.5) / RESOLUTION as f32,
+        ];
+        let z = layer.normal_depth[i][3] - 1e-4;
+        let s = sample_linear(&layer, uv, 0.0);
+        assert!(
+            s.coverage > 0.0 && z - s.depth < 0.0,
+            "a ray in front of the card misses beside its edge: coverage {}, depth {} at z {z}",
+            s.coverage,
+            s.depth
+        );
+        let s = sample_linear(&old, uv, 0.0);
+        assert!(
+            s.coverage > 0.0 && z - s.depth >= 0.0,
+            "the empty depth 0 blends a near depth into the edge, so the same ray hit there"
+        );
+    }
+    assert!(probed > 0, "no view shows a card edge");
+
+    // A POM march (threshold 0) on linear texels through empty texels beside the card misses.
+    let layers: Vec<Layer> = cameras
+        .iter()
+        .map(|camera| reference_layer(camera, &world_to_root).0)
+        .collect();
+    let world = root_world();
+    let eye_world = world.transform_point(Vec3::new(1.0, 4.0, 14.0));
+    let to_root = world.inverse().unwrap();
+    let eye = to_root.transform_point(eye_world);
+    let eye = [eye.x, eye.y, eye.z];
+    let beside = world.transform_point(Vec3::new(1.95, 0.2, 0.0));
+    let ray = to_root
+        .transform_vector(beside - eye_world)
+        .normalize_or_zero();
+    let ray = [ray.x, ray.y, ray.z];
+    let (enter, _) = parallax_box(eye, ray);
+    let (_, coverage, depth) = parallax_march(&layers, add(eye, ray, enter + 1e-4), ray, 0.0, true);
+    assert_eq!(
+        (coverage, depth),
+        (0.0, 1.0),
+        "beside the card the POM march misses"
+    );
 }

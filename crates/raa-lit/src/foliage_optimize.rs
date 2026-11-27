@@ -994,6 +994,78 @@ fn read_bin_counts(
 
 type AlbedoFuture = Pin<Box<dyn Future<Output = Result<Vec<[f32; 3]>, RaaError>> + 'static>>;
 
+/// A host yield: a future that resolves on a later turn of the host event loop (in a
+/// browser, a later task, so timers, heartbeats and frames of the page run before it).
+pub type FoliageHostYield = fn() -> Pin<Box<dyn Future<Output = ()> + 'static>>;
+
+thread_local! {
+    static HOST_YIELD: std::cell::Cell<Option<FoliageHostYield>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Installs (`Some`) or clears (`None`) the host yield [`optimize_foliage`] awaits between
+/// its optimization steps and after each GPU readback. raa-js installs a zero-delay timeout
+/// so the page heartbeat keeps running during the whole bake; a native host installs none.
+pub fn set_foliage_host_yield(host_yield: Option<FoliageHostYield>) {
+    HOST_YIELD.with(|cell| cell.set(host_yield));
+}
+
+/// Resolves once every submission made before its creation has completed on the GPU; a
+/// native host polls the device, a browser resumes in the task of the work-done promise.
+struct WorkDone {
+    #[cfg(not(target_arch = "wasm32"))]
+    gpu: GpuContext,
+    state: Arc<Mutex<MapState>>,
+}
+
+fn work_done(gpu: &GpuContext) -> WorkDone {
+    let state = Arc::new(Mutex::new(MapState::default()));
+    let signal = Arc::clone(&state);
+    gpu.queue().on_submitted_work_done(move || {
+        let mut state = signal.lock().unwrap_or_else(|error| error.into_inner());
+        state.done = true;
+        if let Some(waker) = state.waker.take() {
+            waker.wake();
+        }
+    });
+    WorkDone {
+        #[cfg(not(target_arch = "wasm32"))]
+        gpu: gpu.clone(),
+        state,
+    }
+}
+
+impl Future for WorkDone {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        let mut state = this.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !state.done {
+            state.waker = Some(cx.waker().clone());
+            drop(state);
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = this.gpu.device().poll(wgpu::PollType::wait_indefinitely());
+            state = this.state.lock().unwrap_or_else(|error| error.into_inner());
+            if !state.done {
+                return Poll::Pending;
+            }
+        }
+        Poll::Ready(())
+    }
+}
+
+/// One yield between optimization steps: waits until the submitted GPU work is done, so at
+/// most one step is queued and the browser resumes the bake in a later task, then awaits
+/// the installed host yield. Changes no setting, iteration or result.
+async fn yield_step(gpu: &GpuContext) {
+    work_done(gpu).await;
+    let host_yield = HOST_YIELD.with(|cell| cell.get());
+    if let Some(host_yield) = host_yield {
+        host_yield().await;
+    }
+}
+
 struct OptimizeJob {
     gpu: GpuContext,
     source: FoliageSource,
@@ -1024,6 +1096,7 @@ impl OptimizeJob {
             settings,
         } = self;
         let albedo = albedo.await?;
+        yield_step(&gpu).await;
         let tiles = bin_tiles(work.resolution, work.views)?;
         coordinator.begin()?;
         while coordinator.state() != FoliageOptimizeState::Finalizing {
@@ -1040,6 +1113,7 @@ impl OptimizeJob {
                 gpu.queue().submit([encoder.finish()]);
                 coordinator.bins_encoded()?;
                 let counts = read_bin_counts(&gpu, &work.bins, capacity, tiles).await?;
+                yield_step(&gpu).await;
                 match coordinator.bins_completed(&counts)? {
                     FoliageBinOutcome::Retry => {
                         resize_bins(&gpu, &mut work, coordinator.capacity())?;
@@ -1059,8 +1133,10 @@ impl OptimizeJob {
             encode_update(&gpu, &mut encoder, &work)?;
             gpu.queue().submit([encoder.finish()]);
             coordinator.update_encoded()?;
+            yield_step(&gpu).await;
         }
         let triangles = work.finish(&gpu).await?;
+        yield_step(&gpu).await;
         coordinator.publish(&triangles)?;
         assemble_optimized_foliage(&source, &triangles, &samples, &albedo, settings.resolution)
     }
@@ -1117,7 +1193,9 @@ fn prepare(
 /// native source-albedo/occlusion volume is returned; empty eligible foliage yields the wood
 /// and a zeroed volume without a zero-workgroup dispatch. A numerical or GPU failure rejects
 /// `foliage.bake_failed` and never a partial ready asset. The returned future snapshots its
-/// inputs and holds no renderer borrow.
+/// inputs and holds no renderer borrow. It yields to the host event loop (GPU work done,
+/// then the [`set_foliage_host_yield`] hook) after the albedo samples, after every bin
+/// readback, after every iteration and after the terminal readback.
 ///
 /// Handoff: 'Publish completed foliage assets in the renderer' (card #9135) calls
 /// `optimize_foliage`, which today validates the m7 settings and the 64..=128 references,

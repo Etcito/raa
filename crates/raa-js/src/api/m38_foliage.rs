@@ -539,9 +539,32 @@ mod web {
 
     type SharedFoliageLedger = Rc<RefCell<FoliageLedger<FoliageAsset>>>;
 
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(catch, js_name = setTimeout)]
+        fn set_timeout(handler: &js_sys::Function, delay: i32) -> Result<JsValue, JsValue>;
+    }
+
+    /// A zero-delay timeout as a future: it resolves in a later task of the browser event
+    /// loop, so the page heartbeat, timers and frames run before the foliage bake goes on.
+    /// A host without `setTimeout` resolves at once.
+    fn timeout_yield() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'static>> {
+        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+            if set_timeout(&resolve, 0).is_err() {
+                let _ = resolve.call0(&JsValue::UNDEFINED);
+            }
+        });
+        Box::pin(async move {
+            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+        })
+    }
+
     /// Installs the generation-owned asset/group store and the native asset ledger. The
-    /// frame hook records the canvas size that the per-view group preparation reads.
+    /// frame hook records the canvas size that the per-view group preparation reads. The
+    /// browser yield of the differentiable bake is installed here: `optimize_foliage` awaits
+    /// [`timeout_yield`] between its steps and readbacks.
     pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
+        raa_lit::foliage_optimize::set_foliage_host_yield(Some(timeout_yield));
         ctx.features.insert(FoliageStateStore::new());
         ctx.features
             .insert(Rc::new(RefCell::new(FoliageLedger::<FoliageAsset>::new())));
@@ -946,7 +969,11 @@ mod web {
             })();
             wasm_bindgen_futures::future_to_promise(async move {
                 let (gpu, rc, ledger, id, spec, root, completion, triangles) = submission?;
+                // The caller's task ends before the bake's synchronous reference views, and
+                // the page runs again before the synchronous publication below.
+                timeout_yield().await;
                 let result = completion.await;
+                timeout_yield().await;
                 // The stage lines of `raa_lit::foliage_bake::report_foliage_stage` end here;
                 // `crate::alloc_log::report_stage` writes them to `console.error`.
                 raa_lit::foliage_bake::report_foliage_stage(

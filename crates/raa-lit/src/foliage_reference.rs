@@ -252,13 +252,25 @@ fn layer_view(texture: &wgpu::Texture, layer: u32) -> wgpu::TextureView {
     })
 }
 
-fn clear_color(view: &wgpu::TextureView) -> Option<wgpu::RenderPassColorAttachment<'_>> {
+/// The clear of the standard-Z depth reference target: the clear depth 1 in X, so a texel
+/// without a reference fragment reads as the far plane, like the depth attachment.
+const DEPTH_REFERENCE_CLEAR: wgpu::Color = wgpu::Color {
+    r: 1.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.0,
+};
+
+fn clear_color(
+    view: &wgpu::TextureView,
+    clear: wgpu::Color,
+) -> Option<wgpu::RenderPassColorAttachment<'_>> {
     Some(wgpu::RenderPassColorAttachment {
         view,
         depth_slice: None,
         resolve_target: None,
         ops: wgpu::Operations {
-            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            load: wgpu::LoadOp::Clear(clear),
             store: wgpu::StoreOp::Store,
         },
     })
@@ -776,9 +788,9 @@ pub fn render_foliage_references(
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raa.lit.foliage_reference.render"),
                 color_attachments: &[
-                    clear_color(&normal_view),
-                    clear_color(&depth_view),
-                    clear_color(&albedo_view),
+                    clear_color(&normal_view, wgpu::Color::TRANSPARENT),
+                    clear_color(&depth_view, DEPTH_REFERENCE_CLEAR),
+                    clear_color(&albedo_view, wgpu::Color::TRANSPARENT),
                 ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &attachment,
@@ -904,13 +916,19 @@ fn normal_uniform(matrix: &[[f32; 4]; 3]) -> [u8; 48] {
 /// `normal_coverage` into a unit source-root normal (zero when degenerate) and the
 /// reference standard-Z `depth` is clamped to 0..=1 into W. The coverage stays in the
 /// copied albedo/coverage layer, so a covered texel is one whose reference wrote a depth
-/// below the clear depth 1.
+/// below the clear depth 1. A texel without a reference fragment (coverage W of
+/// `normal_coverage` not above 0) packs `[0, 0, 0, 1]`: no normal and the clear depth 1,
+/// whatever its depth reference holds, so the linear sample next to the silhouette blends
+/// towards the far plane and the parallax march misses there.
 pub fn pack_texel(
     world_to_root: &[[f32; 4]; 3],
     normal_coverage: [f32; 4],
     depth: f32,
 ) -> [f32; 4] {
-    let [x, y, z, _] = normal_coverage;
+    let [x, y, z, coverage] = normal_coverage;
+    if coverage.is_nan() || coverage <= 0.0 {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
     let n = [0, 1, 2].map(|row| {
         world_to_root[0][row] * x + world_to_root[1][row] * y + world_to_root[2][row] * z
     });
