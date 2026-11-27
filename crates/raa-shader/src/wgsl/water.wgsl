@@ -1,15 +1,16 @@
 // Shared water surface (caustics-design.md, "une seule fonction de surface"). One still water body
 // per scene: a horizontal surface at `level` over the footprint [lo, hi] (world XZ), its ripple a
 // fixed sum of RAA_WATER_WAVES directional sines whose analytic gradient gives the normal. The
-// water's material shader and the caustics of the transmission slot (raa_water_caustic) evaluate
-// these functions, so the caustics follow the visible ripple. `time` is the animation phase of a
+// water's material shader, the forward's sun of submerged receivers (raa_water_sun, its caustics
+// raa_water_caustic) and the DDGI update's sun evaluate these functions, so the caustics follow
+// the visible ripple. `time` is the animation phase of a
 // later step (0 = static). CPU twin: raa_shader::water (same constants, same order).
 //
 // The body is carried by FrameGpu.reserved[0..4] (zero = no water), unpacked by raa_water_unpack:
 //   [0] level, rms slope, frequency (1/m), time (s)
 //   [1] footprint lo.x, lo.z, hi.x, hi.z
 //   [2] ior, absorption sigma r, g, b (1/m, Beer-Lambert)
-//   [3] caustics on (0/1), unused x 2, water present (0/1)
+//   [3] caustics on (0/1), sun bend (1 = physical refraction), distortion (1 = physical), water present (0/1)
 
 struct RaaWater {
     level: f32,
@@ -21,6 +22,8 @@ struct RaaWater {
     ior: f32,
     sigma: vec3<f32>,
     caustics: bool,
+    sun_bend: f32,
+    distortion: f32,
     present: bool,
 }
 
@@ -31,7 +34,7 @@ const RAA_WATER_ANGLE_STEP: f32 = 2.3999632;
 
 fn raa_water_unpack(r: array<vec4<f32>, 4>) -> RaaWater {
     return RaaWater(r[0].x, r[0].y, r[0].z, r[0].w, r[1].xy, r[1].zw, r[2].x, r[2].yzw, r[3].x > 0.5,
-        r[3].w > 0.5);
+        r[3].y, r[3].z, r[3].w > 0.5);
 }
 
 fn raa_water_inside(w: RaaWater, xz: vec2<f32>) -> bool {
@@ -105,6 +108,102 @@ fn raa_water_sun_entry(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> vec3<f3
     return p - t.xyz * ((w.level - p.y) / -t.y);
 }
 
+// The sun of a receiver `p` under the water: it arrives along the direction refracted by the
+// rippled surface at the point x whose refracted sun lands on p (raa_water_solve, shared with
+// the caustics), through `entry` where that path crosses the surface, attenuated by the Fresnel
+// transmittance and concentrated by the caustics `k` (1 / |det| at x). So the shadow of a wall
+// under water has the ripple's wavy, broken edge and the caustics run right up to it. `sun_bend`
+// is artistic: the horizontal run per metre of depth is straight + sun_bend x (refracted -
+// straight), so 0 keeps the straight sun, 1 is physical and more bends it further (and the
+// ripple's wobble of the edge with it), at most half a straight run past the vertical: the
+// strip lit next to a wall on the sun side grows by depth x sun_bend x (tan(incidence) -
+// tan(refraction)) on average. Outside the water or with caustics off (setWater caustics: false, the
+// unrefracted sun of before): not under, entry p, to_sun -sun_dir, transmit 1.
+struct RaaWaterSun {
+    under: bool,
+    entry: vec3<f32>,
+    to_sun: vec3<f32>,
+    transmit: f32,
+    k: f32,
+    sky: f32,
+    // Offset (world xz, m) of the second shadow tap where the caustics bite into the shadow.
+    bite: vec2<f32>,
+}
+
+fn raa_water_sun(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSun {
+    var o = RaaWaterSun(false, p, -sun_dir, 1.0, 1.0, 1.0, vec2<f32>(0.0));
+    if !w.present || !w.caustics || p.y >= w.level || !raa_water_inside(w, p.xz) { return o; }
+    let t = raa_water_refract(sun_dir, vec3<f32>(0.0, 1.0, 0.0), 1.0 / max(w.ior, 1.0));
+    if t.y > -1e-3 { return o; }
+    let straight = sun_dir.xz / min(sun_dir.y, -1e-3);
+    var refracted = t.xz / t.y;
+    if w.slope > 0.0 && w.frequency > 0.0 {
+        let sv = raa_water_solve(w, sun_dir, p);
+        let tw = raa_water_refract(sun_dir, normalize(vec3<f32>(-sv.g.x, 1.0, -sv.g.y)),
+            1.0 / max(w.ior, 1.0));
+        if tw.y < -1e-3 { refracted = tw.xz / tw.y; }
+        o.k = raa_water_caustic_at(w, sun_dir, p, sv);
+        o.sky = raa_water_sky_caustic(w, w.level - p.y, sv);
+        o.bite = RAA_WATER_BITE * (1.0 - 1.0 / max(w.ior, 1.0)) * max(w.sun_bend, 1.0)
+            * (w.level - p.y) * sv.g;
+    }
+    var run = mix(straight, refracted, w.sun_bend);
+    // Past the vertical by at most half a straight run (along the sun's azimuth).
+    let ss = max(dot(straight, straight), 1e-8);
+    let along = dot(run, straight) / ss;
+    if along < -0.5 { run += (-0.5 - along) * straight; }
+    let dir = normalize(vec3<f32>(-run.x, -1.0, -run.y));
+    o.under = true;
+    o.entry = vec3<f32>(p.x + run.x * (w.level - p.y), w.level, p.z + run.y * (w.level - p.y));
+    o.to_sun = -dir;
+    o.transmit = raa_water_sun_transmittance(w, sun_dir);
+    return o;
+}
+
+// Caustics biting into the shadow: a submerged receiver in the shadow also tests the sun at its
+// entry point moved along the ripple's slope there (RaaWaterSun.bite: RAA_WATER_BITE x the
+// sloped refraction's displacement, (1 - 1/ior) x bend x depth x slope), and takes that light
+// in proportion to its caustic concentration, so near a shadow's edge the bright caustic lines
+// reach into the shadow with the pattern's shape instead of stopping on the line.
+const RAA_WATER_BITE: f32 = 2.0;
+
+// Weight of the bitten light at caustic concentration k: 0 at k <= 1, 1 from k = 3.
+fn raa_water_bite_weight(k: f32) -> f32 {
+    return saturate(0.5 * (k - 1.0));
+}
+
+// True when p lies on the water's horizontal surface (either side, normal n).
+fn raa_water_on_surface(w: RaaWater, p: vec3<f32>, n: vec3<f32>) -> bool {
+    return w.present && abs(n.y) > 0.5 && abs(p.y - w.level) < 0.05 && raa_water_inside(w, p.xz);
+}
+
+// Refracted view direction that places the transmitted (opaque copy) lookup through the water's
+// surface: the deviation of the rippled refraction `dir` from the flat one is scaled by the
+// distortion lane (1 = physical), so everything seen through the water wobbles visibly; the
+// lookup's offset also grows with the path below the surface (no shift at the waterline).
+// `dir` unchanged off the water surface, without water or at distortion 1.
+fn raa_water_transmit_dir(w: RaaWater, p: vec3<f32>, n: vec3<f32>, incident: vec3<f32>,
+    dir: vec3<f32>) -> vec3<f32> {
+    if w.distortion == 1.0 || !raa_water_on_surface(w, p, n) { return dir; }
+    let up = vec3<f32>(0.0, sign(n.y), 0.0);
+    let eta = select(max(w.ior, 1.0), 1.0 / max(w.ior, 1.0), n.y > 0.0);
+    let flat_dir = refract(incident, up, eta);
+    if dot(flat_dir, flat_dir) < 1e-6 { return dir; }
+    return normalize(flat_dir + w.distortion * (dir - flat_dir));
+}
+
+// Soft caustics of the sky on a submerged receiver (the sky is an extended source, so its pattern
+// through the ripple is faint and broad): the zenith's caustics at the receiver's solved surface
+// point, for 0.6 x the depth (broader, less focused cells), capped at 4 and scaled to 0.35 of
+// their contrast. A linear contrast scale keeps the mean near 1 (the floor's average ambient
+// light is unchanged); the shadowed floor under water shows faint moving light, not a flat tone.
+const RAA_WATER_SKY_CAUSTIC_STRENGTH: f32 = 0.35;
+
+fn raa_water_sky_caustic(w: RaaWater, depth: f32, sv: RaaWaterSolve) -> f32 {
+    let k = raa_water_caustic_depth(w, vec3<f32>(0.0, -1.0, 0.0), 0.6 * depth, sv);
+    return 1.0 + RAA_WATER_SKY_CAUSTIC_STRENGTH * (min(k, 4.0) - 1.0);
+}
+
 // Flat-surface transmittance of the sun into the water: 1 - F at the sun's incidence.
 fn raa_water_sun_transmittance(w: RaaWater, sun_dir: vec3<f32>) -> f32 {
     return 1.0 - raa_water_fresnel(-sun_dir.y, 1.0 / max(w.ior, 1.0));
@@ -123,6 +222,18 @@ fn raa_water_sun_transmittance(w: RaaWater, sun_dir: vec3<f32>) -> f32 {
 fn raa_water_caustic(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> f32 {
     if !w.present || !w.caustics || w.slope <= 0.0 || w.frequency <= 0.0 || p.y >= w.level
         || !raa_water_inside(w, p.xz) { return 1.0; }
+    return raa_water_caustic_at(w, sun_dir, p, raa_water_solve(w, sun_dir, p));
+}
+
+// The surface point x whose refracted sun lands on the submerged p (three fixed-point steps from
+// the flat-refracted entry), with the slope g and curvature (hxx, hxz, hzz) there.
+struct RaaWaterSolve {
+    x: vec2<f32>,
+    g: vec2<f32>,
+    h: vec3<f32>,
+}
+
+fn raa_water_solve(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSolve {
     let depth = w.level - p.y;
     let eta = 1.0 / max(w.ior, 1.0);
     var x = raa_water_sun_entry(w, sun_dir, p).xz;
@@ -145,9 +256,21 @@ fn raa_water_caustic(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> f32 {
         g += s * cos(arg) * d;
         hxx_hxz_hzz -= s * k * sin(arg) * vec3<f32>(d.x * d.x, d.x * d.y, d.y * d.y);
     }
+    return RaaWaterSolve(x, g, hxx_hxz_hzz);
+}
+
+// 1 / |det| of the landing map's first-order Jacobian at the solved point (raa_water_caustic).
+fn raa_water_caustic_at(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>, sv: RaaWaterSolve) -> f32 {
+    return raa_water_caustic_depth(w, sun_dir, w.level - p.y, sv);
+}
+
+// The same for light arriving along `dir` from `depth` metres above the receiver.
+fn raa_water_caustic_depth(w: RaaWater, sun_dir: vec3<f32>, depth: f32, sv: RaaWaterSolve) -> f32 {
+    let eta = 1.0 / max(w.ior, 1.0);
     let e = 0.01;
-    let g1 = g + e * hxx_hxz_hzz.xy;
-    let g2 = g + e * hxx_hxz_hzz.yz;
+    let g = sv.g;
+    let g1 = g + e * sv.h.xy;
+    let g2 = g + e * sv.h.yz;
     let t0 = raa_water_refract(sun_dir, normalize(vec3<f32>(-g.x, 1.0, -g.y)), eta);
     let t1 = raa_water_refract(sun_dir, normalize(vec3<f32>(-g1.x, 1.0, -g1.y)), eta);
     let t2 = raa_water_refract(sun_dir, normalize(vec3<f32>(-g2.x, 1.0, -g2.y)), eta);

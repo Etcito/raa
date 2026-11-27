@@ -26,6 +26,12 @@ pub struct WaterBody {
     pub ior: f32,
     /// Beer-Lambert absorption coefficients per metre (linear RGB).
     pub sigma: [f32; 3],
+    /// Artistic bend of the sun under the water (raa_water_sun): 0 straight, 1 physical
+    /// refraction, more steeper (bounded at half a straight run past the vertical).
+    pub sun_bend: f32,
+    /// Artistic distortion of what is seen through the surface (raa_water_transmit_dir):
+    /// 1 physical refraction, more wobbles more, 0 undistorted.
+    pub distortion: f32,
 }
 
 impl Default for WaterBody {
@@ -39,6 +45,8 @@ impl Default for WaterBody {
             hi: [0.0; 2],
             ior: 1.33,
             sigma: [0.0; 3],
+            sun_bend: 1.0,
+            distortion: 1.0,
         }
     }
 }
@@ -60,8 +68,8 @@ impl WaterBody {
             self.sigma[1],
             self.sigma[2],
             if caustics { 1.0 } else { 0.0 },
-            0.0,
-            0.0,
+            self.sun_bend,
+            self.distortion,
             1.0,
         ]
     }
@@ -150,6 +158,29 @@ impl WaterBody {
         let a = [e + h1[0] - h0[0], h1[1] - h0[1]];
         let b = [h2[0] - h0[0], e + h2[1] - h0[1]];
         1.0 / ((a[0] * b[1] - a[1] * b[0]).abs() / (e * e)).max(0.15)
+    }
+
+    /// Mean (flat-water) horizontal run per metre of depth from a submerged receiver up to where the sun's path
+    /// enters the water, as `raa_water_sun` without the ripple (bent by `sun_bend`); None when the sun is below
+    /// the horizon of the water.
+    pub fn sun_run(&self, sun: [f32; 3]) -> Option<[f32; 2]> {
+        let t = refract(sun, [0.0, 1.0, 0.0], 1.0 / self.ior.max(1.0))?;
+        if t[1] > -1e-3 {
+            return None;
+        }
+        let y = sun[1].min(-1e-3);
+        let straight = [sun[0] / y, sun[2] / y];
+        let refracted = [t[0] / t[1], t[2] / t[1]];
+        let b = self.sun_bend;
+        let mut run = [
+            straight[0] + b * (refracted[0] - straight[0]),
+            straight[1] + b * (refracted[1] - straight[1]),
+        ];
+        let ss = straight[0] * straight[0] + straight[1] * straight[1];
+        if run[0] * straight[0] + run[1] * straight[1] < -0.5 * ss {
+            run = [-0.5 * straight[0], -0.5 * straight[1]];
+        }
+        Some(run)
     }
 
     /// Unit upward normal at (x, z), as `raa_water_normal`.
@@ -258,6 +289,8 @@ mod tests {
         assert_eq!(lanes[15], 1.0);
         assert_eq!(lanes[12], 1.0);
         assert_eq!(pool().frame_lanes(false)[12], 0.0);
+        assert_eq!(lanes[13], 1.0);
+        assert_eq!(lanes[14], 1.0);
     }
 
     /// Flat-floor check of `raa_water_caustic`: splat the sun refracted through a fine grid of
@@ -318,6 +351,28 @@ mod tests {
             "analytic mean {analytic_mean}"
         );
         assert!(corr > 0.6, "correlation {corr}");
+    }
+
+    /// The strip lit next to a wall under 1 m of water at a 75 degree sun: tan 15 - tan(refracted)
+    /// = 0.07 m when physical, 6x that bent (0.42, clamped to 1.5 x tan 15 = 0.40), none straight.
+    #[test]
+    fn sun_bend_widens_the_lit_strip() {
+        let e = 75f32.to_radians();
+        let sun = [-e.cos(), -e.sin(), 0.0];
+        let straight = 1.0 / e.tan();
+        let strip = |b: f32| {
+            straight
+                - WaterBody {
+                    sun_bend: b,
+                    ..pool()
+                }
+                .sun_run(sun)
+                .unwrap()[0]
+        };
+        assert!(strip(0.0).abs() < 1e-5);
+        assert!((strip(1.0) - 0.0696).abs() < 2e-3, "{}", strip(1.0));
+        assert!((strip(6.0) - 1.5 * straight).abs() < 1e-4, "{}", strip(6.0));
+        assert!((strip(4.0) - 4.0 * strip(1.0)).abs() < 1e-3);
     }
 
     #[test]

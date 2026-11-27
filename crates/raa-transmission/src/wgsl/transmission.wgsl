@@ -107,32 +107,19 @@ fn raa_screen_submerged(s: MaterialOutput, c: ShadeCtx, dir: vec3<f32>) -> vec3<
     return vec3<f32>(h / cos_t, h / cos_l, 1.0);
 }
 
-// Share of the opaque colour of a sunlit submerged surface that is direct sun: the opaque copy
-// mixes direct and ambient light and the caustics concentrate only the former.
-const RAA_SCREEN_CAUSTIC_SUN_SHARE: f32 = 0.8;
-
-// Caustics of the water body (FrameGpu.reserved, raa_water_caustic) on the submerged surface
-// seen at `floor`: 1 + (concentration - 1) x the direct-sun share x the sun visibility tested
-// where the refracted sun path enters the water. 1 without a water body or outside it, so a
-// scene without water pays one branch.
-fn raa_screen_caustic(c: ShadeCtx, floor: vec3<f32>) -> f32 {
-    let w = raa_water_unpack(raa_frame.reserved);
-    let sun = raa_frame.sun_dir.xyz;
-    let k = raa_water_caustic(w, sun, floor);
-    if k == 1.0 { return 1.0; }
-    let entry = raa_water_sun_entry(w, sun, floor);
-    let lit = raa_slot_shadow(entry, vec3<f32>(0.0, 1.0, 0.0), c.frag);
-    return 1.0 + (k - 1.0) * RAA_SCREEN_CAUSTIC_SUN_SHARE * lit;
-}
-
 // transmitted x T x (1 - F) x transmission, T = exp(-sigma x path) along the refracted
 // view ray (plus the light path of a submerged surface, raa_screen_submerged), F Schlick with
-// the surface f0 at n.v; a submerged surface takes the water caustics (raa_screen_caustic).
+// the surface f0 at n.v. The water's caustics are in the opaque colour already (the forward's
+// sun of submerged receivers, raa_water_sun / raa_water_caustic).
 fn raa_slot_transmission(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let n = s.normal;
     let dir = raa_screen_refract(-c.view_dir, n, 1.0 / s.ior);
     let path = raa_screen_submerged(s, c, dir);
-    let uv = raa_screen_uv(c, dir, select(s.thickness, path.x, path.z > 0.0));
+    // Through the scene's water surface the lookup's refraction is scaled by its distortion
+    // (water.wgsl raa_water_transmit_dir); the path and absorption keep the physical one.
+    let look = raa_water_transmit_dir(raa_water_unpack(raa_frame.reserved), c.position, n,
+        -c.view_dir, dir);
+    let uv = raa_screen_uv(c, look, select(s.thickness, path.x, path.z > 0.0));
     let view_depth = -(raa_frame.view * vec4<f32>(c.position, 1.0)).z;
     let lod = raa_screen_lod(s.roughness, raa_frame.viewport.y, s.thickness, view_depth);
     let max_lod = f32(textureNumLevels(raa_opaque_color) - 1u);
@@ -140,9 +127,5 @@ fn raa_slot_transmission(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let sigma = raa_screen_sigma(s.attenuation_color, s.attenuation_distance);
     let t = exp(-sigma * (path.x + path.y));
     let f = raa_screen_fresnel(c.f0, c.n_dot_v);
-    var caustic = 1.0;
-    if path.z > 0.0 {
-        caustic = raa_screen_caustic(c, c.position + dir * path.x);
-    }
-    return transmitted * caustic * t * (vec3<f32>(1.0) - f) * s.transmission;
+    return transmitted * t * (vec3<f32>(1.0) - f) * s.transmission;
 }

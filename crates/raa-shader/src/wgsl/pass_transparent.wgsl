@@ -238,6 +238,31 @@ fn raa_transparent_screen_reflection(c: ShadeCtx, s: MaterialOutput, geometric: 
     return vec4<f32>(color, edge * far * gloss);
 }
 
+// Sun visibility of the submerged surface seen through a water surface fragment, or -1 off the
+// water (or with caustics off, or nothing opaque behind). The seen point is where the
+// transmission reads (the refraction scaled by the water's distortion, water.wgsl
+// raa_water_transmit_dir) at the depth of the opaque surface behind this pixel; its visibility
+// is the forward's for a submerged receiver (raa_water_sun: tested where the bent, rippled sun
+// enters the water).
+fn raa_transparent_water_floor_sun(c: ShadeCtx, s: MaterialOutput, frag: vec4<f32>) -> f32 {
+    let w = raa_water_unpack(raa_frame.reserved);
+    if !w.caustics || s.normal.y <= 0.0 || !raa_water_on_surface(w, c.position, s.normal) { return -1.0; }
+    let size = textureDimensions(raa_opaque_depth);
+    if size.x <= 1u { return -1.0; }
+    let behind = raa_transparent_opaque_depth(c.frag.xy / vec2<f32>(size), size);
+    let own = -(raa_frame.view * vec4<f32>(c.position, 1.0)).z;
+    if behind >= 1e29 || own <= 1e-4 { return -1.0; }
+    let cam = raa_frame.camera_pos.xyz;
+    let h = c.position.y - (cam + (c.position - cam) * (behind / own)).y;
+    if h <= 0.0 { return -1.0; }
+    let dir = refract(-c.view_dir, s.normal, 1.0 / max(s.ior, 1.0));
+    let look = raa_water_transmit_dir(w, c.position, s.normal, -c.view_dir, dir);
+    let seen = c.position + look * (h / max(-look.y, 0.2));
+    let sun = raa_water_sun(w, raa_frame.sun_dir.xyz, seen);
+    if !sun.under { return -1.0; }
+    return raa_slot_shadow(sun.entry, vec3<f32>(0.0, 1.0, 0.0), frag);
+}
+
 // S11 final colour plus transmission, then fog; alpha is the material opacity. A transmissive
 // fragment takes no screen AO (the AO texture holds the opaque surface behind it) and reflects
 // the opaque copy (raa_transparent_screen_reflection). With DDGI the fragment's own probe lookup
@@ -263,8 +288,21 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) {
     if transmissive && !unlit {
         c.screen_reflection = raa_transparent_screen_reflection(c, s, in.normal);
     }
-    let direct = raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
-        raa_directional_radiance(raa_frame.sun_color.rgb) * shadow);
+    let sun_radiance = raa_directional_radiance(raa_frame.sun_color.rgb);
+    var direct = raa_slot_direct(s, c, -raa_frame.sun_dir.xyz, sun_radiance * shadow);
+    if transmissive && !unlit {
+        // The water's diffuse (its volume's back-scatter) is lit where the floor seen through it is
+        // (raa_transparent_water_floor_sun), not by the surface's own sun: no bright strip between
+        // a wall's straight shadow on the surface and its refracted shadow on the floor.
+        let floor_sun = raa_transparent_water_floor_sun(c, s, in.frag_coord);
+        if floor_sun >= 0.0 {
+            var glossy = s;
+            glossy.base_color = vec3<f32>(0.0);
+            let specular = raa_slot_direct(glossy, c, -raa_frame.sun_dir.xyz, sun_radiance);
+            let full = raa_slot_direct(s, c, -raa_frame.sun_dir.xyz, sun_radiance);
+            direct = specular * shadow + (full - specular) * floor_sun;
+        }
+    }
     let local = raa_local_lighting(s, c);
     var indirect = raa_slot_indirect(s, c);
     if c.spherical_diffuse.w > 0.0 {

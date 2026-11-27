@@ -206,9 +206,22 @@ fn raa_opaque_lighting(in: MaterialInput, shaded: MaterialOutput) -> vec4<f32> {
                 length(in.position - raa_frame.camera_pos.xyz));
         }
     }
+    // Under the water body (FrameGpu.reserved) the sun comes along its refracted direction: its
+    // visibility is tested where that path enters the water, so the shadow of a wall under water
+    // is shorter and the strip next to the wall is lit (raa_water_sun).
+    let water = raa_water_unpack(raa_frame.reserved);
+    let water_sun = raa_water_sun(water, raa_frame.sun_dir.xyz, in.position);
     var shadow = 1.0;
     if sun_far < 1.0 {
-        shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
+        shadow = raa_slot_shadow(water_sun.entry,
+            select(in.normal, vec3<f32>(0.0, 1.0, 0.0), water_sun.under), in.frag_coord);
+        // The caustic lines bite into the shadow near its edge (water.wgsl RAA_WATER_BITE).
+        let bite = raa_water_bite_weight(water_sun.k);
+        if water_sun.under && shadow < 1.0 && bite > 0.0 {
+            let o = water_sun.bite;
+            shadow = max(shadow, bite * raa_slot_shadow(water_sun.entry + vec3<f32>(o.x, 0.0, o.y),
+                vec3<f32>(0.0, 1.0, 0.0), in.frag_coord));
+        }
     }
     shadow = mix(shadow, raa_spherical_sun_visibility, sun_far);
     var ao = 1.0;
@@ -246,15 +259,27 @@ fn raa_opaque_lighting(in: MaterialInput, shaded: MaterialOutput) -> vec4<f32> {
             clamp(vec2<i32>(in.frag_coord.xy), vec2<i32>(0), nrc_size - vec2<i32>(1)), 0);
         c.spherical_diffuse = vec4<f32>(nrc.rgb, select(0.0, 1.0, nrc.a > 0.0));
     }
-    let direct = raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
-            raa_directional_radiance(raa_frame.sun_color.rgb) * shadow);
-    let ambient = raa_slot_ambient(s, c);
+    var sun_radiance = raa_directional_radiance(raa_frame.sun_color.rgb) * shadow;
+    if water_sun.under && shadow > 0.0 {
+        // Fresnel transmittance and the caustics of the ripple (raa_water_sun.k), full on an
+        // upward receiver (floor), none on a vertical one (wall).
+        sun_radiance *= water_sun.transmit * mix(1.0, water_sun.k, saturate(in.normal.y));
+    }
+    let direct = raa_slot_direct(s, c, water_sun.to_sun, sun_radiance);
+    var ambient = raa_slot_ambient(s, c);
     var indirect = vec3<f32>(0.0);
     if !capture {
         indirect = raa_slot_indirect(s, c);
         if c.spherical_diffuse.w > 0.0 {
             indirect *= 1.0 - c.spherical_diffuse.w;
         }
+    }
+    if water_sun.under {
+        // The sky's soft caustics (raa_water_sky_caustic) on the ambient and probe light, full on
+        // an upward receiver: no flat tone on the shadowed floor under the water.
+        let sky = mix(1.0, water_sun.sky, saturate(in.normal.y));
+        ambient *= sky;
+        indirect *= sky;
     }
     var local = vec3<f32>(0.0);
     if !sphere_direct {

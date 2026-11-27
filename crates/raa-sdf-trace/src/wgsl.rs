@@ -134,8 +134,9 @@ fn mesh_trace_with_rough_grid(rough_grid: &str, diffuse: &str) -> String {
     let cube = raa_shader::SPHERICAL_CUBE_WGSL;
     let spherical = raa_shader::SPHERICAL_GI_WGSL;
     let mesh = include_str!("wgsl/mesh_trace.wgsl");
+    let water = raa_shader::WATER_WGSL;
     format!(
-        "{RAY_INTERVAL_WGSL}{gi}{cube}\n\
+        "{RAY_INTERVAL_WGSL}{gi}{cube}{water}\n\
          @group(0) @binding({MESH_SPHERICAL_BINDING}) var<storage, read> raa_spherical_data: array<vec4<u32>>;\n\
          const MESH_GRAPH_SCREEN: u32 = {MESH_GRAPH_SCREEN}u;\n\
          const MESH_VOLUME_GI: u32 = {MESH_VOLUME_GI}u;\n\
