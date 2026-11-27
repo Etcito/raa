@@ -252,6 +252,10 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) {
     let shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
     let ao = select(raa_slot_ao(in.frag_coord), 1.0, transmissive);
     var c = raa_pass_shade_ctx(s, in, ao, shadow);
+    if transmissive {
+        // raa_sky_sun_peak: the environment's sun follows this fragment's sun visibility.
+        c.material_flags |= RAA_FLAG_TRANSMISSIVE;
+    }
     if !unlit && raa_feature_enabled(RAA_DDGI_GI_FEATURE) && !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE)
         && raa_ddgi_active() {
         c.spherical_diffuse = raa_ddgi_sample(c.position, s.normal, c.view_dir);

@@ -344,11 +344,27 @@ fn raa_probe_sky_environment(env: vec3<f32>, sky_diffuse: vec3<f32>, c: ShadeCtx
     return env * mix(1.0, visible, c.spherical_diffuse.w);
 }
 
+// Sun disc and glow in the environment seen by a transmissive fragment (the transparent pass
+// sets RAA_FLAG_TRANSMISSIVE in ShadeCtx.material_flags): the radiance above 16x the sky's
+// average (luminance of `sky_diffuse`) is the sun, which the fragment sees only where the sun
+// reaches it. That excess is scaled by the sun visibility (ShadeCtx.shadow) and capped at 4x
+// the threshold, so a rippled water surface in shade shows no sun glints and a sunlit one no
+// single-pixel fireflies (its direct term already carries the sun highlight).
+fn raa_sky_sun_peak(env: vec3<f32>, sky_diffuse: vec3<f32>, c: ShadeCtx) -> vec3<f32> {
+    if (c.material_flags & RAA_FLAG_TRANSMISSIVE) == 0u { return env; }
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let lum = dot(env, luma);
+    let cap = 16.0 * max(dot(sky_diffuse, luma), 1e-4);
+    if lum <= cap { return env; }
+    let keep = cap + min(lum - cap, 4.0 * cap) * clamp(c.shadow, 0.0, 1.0);
+    return env * (keep / lum);
+}
+
 // The incoming specular radiance of the ambient providers: the environment occluded as above,
 // replaced by the screen reflection (ShadeCtx.screen_reflection) by its weight. Opaque passes
 // leave that weight 0, so the result is the occluded environment unchanged.
 fn raa_probe_sky_specular(env: vec3<f32>, sky_diffuse: vec3<f32>, c: ShadeCtx) -> vec3<f32> {
-    let occluded = raa_probe_sky_environment(env, sky_diffuse, c);
+    let occluded = raa_probe_sky_environment(raa_sky_sun_peak(env, sky_diffuse, c), sky_diffuse, c);
     let w = clamp(c.screen_reflection.a, 0.0, 1.0);
     if w <= 0.0 { return occluded; }
     return mix(occluded, c.screen_reflection.rgb, w);
