@@ -67,7 +67,10 @@ fn raa_screen_uv(c: ShadeCtx, dir: vec3<f32>, exit_length: f32) -> vec2<f32> {
     let size = textureDimensions(raa_opaque_depth);
     let px = vec2<u32>(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(size));
     let depth = textureLoad(raa_opaque_depth, min(px, size - vec2<u32>(1u)), 0).r;
-    return select(uv, straight, depth < c.frag.z);
+    // A refracted uv off the screen has no copy to read (the clamped sampler would smear the
+    // border pixels into streaks): fade to the unrefracted pixel over the last 4% of the screen.
+    let edge = smoothstep(0.0, 0.04, min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y)));
+    return select(mix(straight, uv, edge), straight, depth < c.frag.z);
 }
 
 // Distance from the fragment to the opaque surface seen behind it at its own pixel (the depth
