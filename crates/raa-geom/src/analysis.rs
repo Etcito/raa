@@ -140,7 +140,7 @@ pub fn analyze(mesh: &MeshData) -> MeshReport {
     let mut area = 0.0f64;
     let mut volume = 0.0f64;
 
-    for tri in mesh.indices.chunks_exact(3) {
+    for tri in mesh.indices.as_chunks::<3>().0 {
         let idx = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
         let (Some(p0), Some(p1), Some(p2)) = (
             positions.get(idx[0]),

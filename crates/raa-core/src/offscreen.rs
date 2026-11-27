@@ -7,7 +7,9 @@ use crate::{GpuContext, RaaError};
 /// A trailing partial pixel (fewer than 4 bytes) is ignored.
 pub fn non_empty(pixels_rgba8: &[u8], clear_rgba8: [u8; 4]) -> bool {
     pixels_rgba8
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .any(|px| px.iter().zip(clear_rgba8).any(|(&a, b)| a.abs_diff(b) > 2))
 }
 
