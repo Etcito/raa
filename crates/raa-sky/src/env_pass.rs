@@ -631,6 +631,7 @@ impl FeaturePass for SkyEnvPass {
             state.desc.model
         };
         let physical = model == SkyModel::Physical && self.physical_ready;
+        let skipped_before = skipped_gpu_work();
         let pipeline = if physical {
             &self.physical_pipeline
         } else {
@@ -668,7 +669,29 @@ impl FeaturePass for SkyEnvPass {
         if filtered.is_err() {
             self.clear_env = true;
         }
+        // Asynchronous pipelines: a face draw or filter dispatch skipped because its pipeline
+        // was still compiling left the cube (the scene's ambient light) unrendered; the env
+        // stays dirty so a later frame renders it, instead of keeping the cleared cube forever.
+        if skipped_gpu_work() != skipped_before
+            && let Ok(mut state) = self.state.try_borrow_mut()
+        {
+            state.env_dirty = true;
+        }
         filtered
+    }
+}
+
+/// Draws plus dispatches skipped so far because their pipeline was pending (the vendored
+/// wgpu's asynchronous pipelines, WebGPU only); 0 elsewhere.
+fn skipped_gpu_work() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let stats = wgpu::webgpu::async_pipelines::stats();
+        stats.skipped_draws + stats.skipped_dispatches
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0
     }
 }
 
