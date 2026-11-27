@@ -118,6 +118,12 @@ pub(crate) struct Casters {
     hero_views: [Option<wgpu::TextureView>; MAX_HERO_LIGHTS],
     /// D2Array view over all cascades and hero layers, for `LightingResources::set_shadow`.
     array: wgpu::TextureView,
+    /// VSM page pool layers after the hero layers (0 in CSM mode).
+    pool_layers: u32,
+    /// One D2 view per pool layer (page write attachments).
+    pool_views: Vec<wgpu::TextureView>,
+    /// D2Array view over the 4 cascade layers (the VSM window renders the page writes read).
+    scratch: wgpu::TextureView,
     /// [`SLOTS`] slots of [`SLOT_SIZE`] bytes, each one `RaaShadowCasterGpu`.
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -129,10 +135,15 @@ impl Casters {
     /// views, the group-2 layout (binding 0 uniform, vertex, dynamic offset, 64 B), the
     /// [`SLOTS`]-slot caster uniform with its bind group and the two caster specs.
     /// `hero_layers` is clamped to `0..=MAX_HERO_LIGHTS`.
-    pub(crate) fn new(gpu: &GpuContext, resolution: u32, hero_layers: u32) -> Casters {
+    pub(crate) fn new(
+        gpu: &GpuContext,
+        resolution: u32,
+        hero_layers: u32,
+        pool_layers: u32,
+    ) -> Casters {
         let device = gpu.device();
         let hero_layers = hero_layers.min(MAX_HERO_LIGHTS as u32);
-        let depth_or_array_layers = CASCADES as u32 + hero_layers;
+        let depth_or_array_layers = CASCADES as u32 + hero_layers + pool_layers;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("raa.shadow.csm.map"),
             size: wgpu::Extent3d {
@@ -174,6 +185,25 @@ impl Casters {
             array_layer_count: Some(depth_or_array_layers),
             ..Default::default()
         });
+        let pool_base = CASCADES as u32 + hero_layers;
+        let pool_views = (0..pool_layers)
+            .map(|i| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("raa.shadow.vsm.pool"),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: pool_base + i,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let scratch = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("raa.shadow.vsm.windows"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            base_array_layer: 0,
+            array_layer_count: Some(CASCADES as u32),
+            ..Default::default()
+        });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("raa.shadow.caster_layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -212,10 +242,69 @@ impl Casters {
             layers,
             hero_views,
             array,
+            pool_layers,
+            pool_views,
+            scratch,
             uniform,
             bind_group,
             specs: Specs::new(Some(layout)),
         }
+    }
+
+    /// Number of VSM pool layers.
+    pub(crate) fn pool_layers(&self) -> u32 {
+        self.pool_layers
+    }
+
+    /// Array layer of the first VSM pool layer.
+    pub(crate) fn pool_base(&self) -> u32 {
+        CASCADES as u32 + self.hero_layers
+    }
+
+    /// D2 view of VSM pool layer `i`.
+    pub(crate) fn pool_view(&self, i: u32) -> Option<&wgpu::TextureView> {
+        self.pool_views.get(i as usize)
+    }
+
+    /// D2Array view over the 4 cascade layers (VSM window renders).
+    pub(crate) fn scratch_view(&self) -> &wgpu::TextureView {
+        &self.scratch
+    }
+
+    /// Bytes of the array texture.
+    pub(crate) fn allocated_bytes(&self) -> u64 {
+        u64::from(self.resolution)
+            * u64::from(self.resolution)
+            * 4
+            * u64::from(CASCADES as u32 + self.hero_layers + self.pool_layers)
+    }
+
+    /// VSM: renders caster list `i` into cascade layer `i` for each `windows[i]` (its scissor,
+    /// pixels), list 3 into layer 3 when `coarse` (the scene-wide map), then the hero layers.
+    pub(crate) fn record_vsm(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        lit: &LitHandle,
+        heroes: &[Option<Mat4>; MAX_HERO_LIGHTS],
+        windows: &[[u32; 4]],
+        coarse: bool,
+    ) -> Result<(), RaaError> {
+        for (i, scissor) in windows.iter().enumerate().take(CASCADES - 1) {
+            self.record_layer_scissor(
+                gpu,
+                encoder,
+                lit,
+                &self.layers[i],
+                LABELS[i],
+                i,
+                Some(*scissor),
+            )?;
+        }
+        if coarse {
+            self.record_layer(gpu, encoder, lit, &self.layers[3], LABELS[3], 3)?;
+        }
+        self.record(gpu, encoder, lit, heroes, 0)
     }
 
     /// Width and height of each layer in texels.
@@ -292,6 +381,21 @@ impl Casters {
         label: &str,
         list: usize,
     ) -> Result<(), RaaError> {
+        self.record_layer_scissor(gpu, encoder, lit, view, label, list, None)
+    }
+
+    /// [`record_layer`](Self::record_layer) limited to `scissor` (x, y, width, height pixels).
+    #[allow(clippy::too_many_arguments, reason = "record_layer plus the scissor")]
+    fn record_layer_scissor(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        lit: &LitHandle,
+        view: &wgpu::TextureView,
+        label: &str,
+        list: usize,
+        scissor: Option<[u32; 4]>,
+    ) -> Result<(), RaaError> {
         let frame = lit.frame_bind_group();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(label),
@@ -308,6 +412,11 @@ impl Casters {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some([x, y, w, h]) = scissor {
+            let r = self.resolution;
+            let (x, y) = (x.min(r), y.min(r));
+            pass.set_scissor_rect(x, y, w.min(r - x), h.min(r - y));
+        }
         pass.set_bind_group(0, &frame, &[]);
         // Group 1 is never bound: it holds this map (Shadow variants leave it empty).
         pass.set_bind_group(2, &self.bind_group, &[(SLOT_SIZE * list as u64) as u32]);

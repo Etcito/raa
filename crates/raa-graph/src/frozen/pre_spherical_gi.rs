@@ -120,6 +120,22 @@ pub fn plan() -> crate::plan::GraphPlan {
                         crate::catalog::ParamValue::Number(0.875),
                     ),
                     ("spread".to_string(), crate::catalog::ParamValue::Bool(true)),
+                    (
+                        "mode".to_string(),
+                        crate::catalog::ParamValue::Enum("csm".to_string()),
+                    ),
+                    (
+                        "vsmPages".to_string(),
+                        crate::catalog::ParamValue::Int(2048),
+                    ),
+                    (
+                        "vsmBudget".to_string(),
+                        crate::catalog::ParamValue::Int(256),
+                    ),
+                    (
+                        "vsmBias".to_string(),
+                        crate::catalog::ParamValue::Number(0.0),
+                    ),
                 ],
                 inputs: vec![],
                 compute: None,

@@ -16,10 +16,13 @@ mod caster;
 mod desc;
 mod feature;
 mod provider;
+mod vsm;
+mod vsm_gpu;
 
 pub use cascade_access::{
     CascadeTargets, CoveredFrame, cascade_frame, cascade_frame_covered, cascade_frame_covered_n, cover_distance,
 };
 pub use cascades::{CascadeFit, FittedCascade, cascade_fit, cascade_matrix, cascade_splits};
-pub use desc::ShadowDesc;
+pub use desc::{ShadowDesc, ShadowMode, VSM_BUDGET_DEFAULT, VSM_PAGES_DEFAULT};
 pub use feature::{ShadowFeature, ShadowHandle, ShadowStats};
+pub use vsm::VsmStats;

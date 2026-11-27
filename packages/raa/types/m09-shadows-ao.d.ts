@@ -52,6 +52,19 @@ export interface ShadowSettings {
    * middle cascades reach the far side of the scene. Default true.
    */
   spread?: boolean;
+  /**
+   * `csm` (default) or `vsm`: a virtual shadow map, a 16k x 16k clipmap per level (8 levels, 1 mm
+   * to 12.5 cm texels) around the camera, paged in 128 x 128 pages, only the pages the visible
+   * pixels need, about one shadow texel per screen pixel at every distance, cached while the sun
+   * and the casters stay still.
+   */
+  mode?: 'csm' | 'vsm';
+  /** VSM physical page pool: 1024, 2048 (default) or 4096 pages of 128 x 128 (4 MB per 64 pages). */
+  vsmPages?: 1024 | 2048 | 4096;
+  /** VSM pages rendered per frame at most, 16..768 (default 256): refinement after a camera cut. */
+  vsmBudget?: number;
+  /** VSM level bias, -2..2 (default 0): negative = finer levels. */
+  vsmBias?: number;
 }
 
 /** What the last `shadow.csm` frame computed, from {@link Engine.shadowStats}. */
@@ -68,6 +81,16 @@ export interface ShadowStats {
   coverDistance: number | null;
   /** The scene bounds used, `[minX, minY, minZ, maxX, maxY, maxZ]`, or null. */
   scene: number[] | null;
+  /** The technique of the frame. */
+  mode: 'csm' | 'vsm';
+  /** Bytes of the shadow array (cascades, hero layers, VSM pool) and the VSM buffers. */
+  allocatedBytes: number;
+  /** VSM page counts of the frame, null in CSM mode. */
+  vsm: {
+    resident: number; requested: number; pending: number; rendered: number; windows: number;
+    invalidated: number; starved: number; capacity: number; latency: number; tables: number;
+    coarse: boolean;
+  } | null;
 }
 
 /**

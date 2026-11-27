@@ -32,7 +32,53 @@ pub struct ShadowDesc {
     /// middle cascades reach the far side of the scene instead of leaving it to the coarse
     /// scene-wide last cascade, and no split is spent past the scene.
     pub spread: bool,
+    /// Sun shadow technique: cascades (default) or the virtual shadow map.
+    pub mode: ShadowMode,
+    /// VSM physical page pool, in 128 x 128 pages: 1024, 2048 or 4096 (64, 128 or 256 MB).
+    pub vsm_pages: u32,
+    /// VSM pages rendered per frame at most (16..=768): new pages refine progressively and
+    /// a camera cut never costs more than this many page renders in one frame.
+    pub vsm_budget: u32,
+    /// VSM level bias in [-2, 2]: negative values pick finer levels (more texels per pixel,
+    /// more pages), positive coarser ones.
+    pub vsm_bias: f32,
 }
+
+/// Sun shadow technique of `shadow.csm`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum ShadowMode {
+    /// Cascaded shadow maps.
+    #[default]
+    Csm,
+    /// Virtual shadow map: a 16k x 16k clipmap per level around the camera, paged in 128 x 128
+    /// pages from a physical pool, only the pages the visible pixels need, cached while the
+    /// sun and the casters stay still. The cascade layers become its page render targets.
+    Vsm,
+}
+
+impl ShadowMode {
+    /// The catalog / JS name.
+    pub fn name(self) -> &'static str {
+        match self {
+            ShadowMode::Csm => "csm",
+            ShadowMode::Vsm => "vsm",
+        }
+    }
+
+    /// Parses a catalog / JS name.
+    pub fn parse(name: &str) -> Option<ShadowMode> {
+        match name {
+            "csm" => Some(ShadowMode::Csm),
+            "vsm" => Some(ShadowMode::Vsm),
+            _ => None,
+        }
+    }
+}
+
+/// Default VSM pool (pages).
+pub const VSM_PAGES_DEFAULT: u32 = 2048;
+/// Default VSM pages rendered per frame.
+pub const VSM_BUDGET_DEFAULT: u32 = 256;
 
 /// Default practical split weight: more logarithmic than the plain 0.75, the near cascades
 /// keep their density once `spread` widens the split range.
@@ -52,6 +98,10 @@ impl Default for ShadowDesc {
             filter_m: SHADOW_FILTER_DEFAULT_M,
             split_lambda: SHADOW_SPLIT_DEFAULT,
             spread: true,
+            mode: ShadowMode::Csm,
+            vsm_pages: VSM_PAGES_DEFAULT,
+            vsm_budget: VSM_BUDGET_DEFAULT,
+            vsm_bias: 0.0,
         }
     }
 }
@@ -88,6 +138,24 @@ impl ShadowDesc {
             return Err(invalid(format!(
                 "split_lambda must be finite and in [0, 1], got {}",
                 self.split_lambda
+            )));
+        }
+        if !matches!(self.vsm_pages, 1024 | 2048 | 4096) {
+            return Err(invalid(format!(
+                "vsm_pages must be 1024, 2048 or 4096, got {}",
+                self.vsm_pages
+            )));
+        }
+        if !(16..=768).contains(&self.vsm_budget) {
+            return Err(invalid(format!(
+                "vsm_budget must be 16 to 768, got {}",
+                self.vsm_budget
+            )));
+        }
+        if !(self.vsm_bias.is_finite() && (-2.0..=2.0).contains(&self.vsm_bias)) {
+            return Err(invalid(format!(
+                "vsm_bias must be finite and in [-2, 2], got {}",
+                self.vsm_bias
             )));
         }
         if !(1..=4).contains(&self.cascades) {
@@ -163,6 +231,34 @@ mod tests {
                 "filter_m",
             );
         }
+    }
+
+    #[test]
+    fn vsm_fields_refused() {
+        refused(
+            ShadowDesc {
+                vsm_pages: 3000,
+                ..Default::default()
+            },
+            "vsm_pages",
+        );
+        refused(
+            ShadowDesc {
+                vsm_budget: 8,
+                ..Default::default()
+            },
+            "vsm_budget",
+        );
+        refused(
+            ShadowDesc {
+                vsm_bias: 3.0,
+                ..Default::default()
+            },
+            "vsm_bias",
+        );
+        assert_eq!(ShadowMode::parse("vsm"), Some(ShadowMode::Vsm));
+        assert_eq!(ShadowMode::Vsm.name(), "vsm");
+        assert_eq!(ShadowMode::parse("x"), None);
     }
 
     #[test]

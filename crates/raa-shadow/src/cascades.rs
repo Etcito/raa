@@ -83,7 +83,7 @@ pub struct FittedCascade {
 
 /// The light view used by every cascade: looks along `sun_dir` (travel direction) from the
 /// world origin (a fixed origin keeps the texel grid fixed in world space).
-fn light_view_of(sun_dir: Vec3) -> Mat4 {
+pub(crate) fn light_view_of(sun_dir: Vec3) -> Mat4 {
     let dir = match sun_dir.normalize_or_zero() {
         d if d == Vec3::ZERO => FALLBACK_SUN,
         d => d,
@@ -94,7 +94,14 @@ fn light_view_of(sun_dir: Vec3) -> Mat4 {
 
 /// Orthographic box of half size `half` around light-space x/y `(cx, cy)` (already snapped);
 /// clip z = `depth * z_scale + z_bias` with the light-view depth `-z`.
-fn ortho(light_view: Mat4, half: f32, cx: f32, cy: f32, z_scale: f32, z_bias: f32) -> Mat4 {
+pub(crate) fn ortho(
+    light_view: Mat4,
+    half: f32,
+    cx: f32,
+    cy: f32,
+    z_scale: f32,
+    z_bias: f32,
+) -> Mat4 {
     let inv_r = 1.0 / half;
     let proj = Mat4::from_cols(
         Vec4::new(inv_r, 0.0, 0.0, 0.0),

@@ -845,6 +845,7 @@ fn cascade_views_are_orthographic_and_keep_the_eye_and_sun() {
         splits,
         layer_views,
         sun_dir,
+        receivers: true,
     };
     let settings = VgSettings::default();
 

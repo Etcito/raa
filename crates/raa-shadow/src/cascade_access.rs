@@ -35,6 +35,10 @@ pub struct CascadeTargets {
     pub layer_views: [wgpu::TextureView; CASCADES],
     /// World travel direction of the sun.
     pub sun_dir: Vec3,
+    /// Cull casters by the receivers of each cascade's camera slice (CSM). False for the
+    /// virtual shadow map windows: their pages are cached, so every caster in the window box
+    /// is drawn (`count` windows, `splits` all the camera near plane).
+    pub receivers: bool,
 }
 
 /// The splits and cascade matrices `shadow.csm` computes for one frame: the practical splits

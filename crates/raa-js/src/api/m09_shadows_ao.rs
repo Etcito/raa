@@ -46,6 +46,7 @@ pub(crate) fn frame(
     let sun_dir = st.scene.light.direction;
     if let Some(shadow) = st.features.get::<ShadowHandle>() {
         shadow.set_view(&view, cam.fov_y_rad, cam.aspect, cam.near, cam.far, sun_dir);
+        shadow.set_projection(&proj);
     }
     if let Some(gtao) = st.features.get::<GtaoHandle>() {
         gtao.set_camera(&proj, &inv_proj);
@@ -122,7 +123,9 @@ fn require_object(settings: &JsValue, method: &str) -> Result<(), RaaError> {
 
 #[wasm_bindgen(js_class = Engine)]
 impl Engine {
-    /// Sets the cascaded sun shadows: `{softness?, distance?, cover?, filter?, split?, spread?, resolution?: 1024|2048|4096}`
+    /// Sets the sun shadows: `{softness?, distance?, cover?, filter?, split?, spread?,
+    /// resolution?: 1024|2048|4096, mode?: 'csm'|'vsm', vsmPages?: 1024|2048|4096,
+    /// vsmBudget?: 16..768, vsmBias?: -2..2}`
     /// merged over the current settings. Out-of-range values throw `shadow.invalid` naming
     /// the field; nothing changes on a refusal.
     #[wasm_bindgen(js_name = setShadows)]
@@ -145,6 +148,25 @@ impl Engine {
                     .as_bool()
                     .ok_or_else(|| api_error("shadow.invalid", "cover must be a boolean"))?;
             }
+            if let Some(v) = get(&settings, "mode")? {
+                d.mode = v
+                    .as_string()
+                    .as_deref()
+                    .and_then(raa_shadow::ShadowMode::parse)
+                    .ok_or_else(|| api_error("shadow.invalid", "mode must be 'csm' or 'vsm'"))?;
+            }
+            read_f32(&settings, "vsmBias", &mut d.vsm_bias)?;
+            for (key, slot) in [("vsmPages", &mut d.vsm_pages), ("vsmBudget", &mut d.vsm_budget)] {
+                if let Some(r) = optional_f64(&settings, key)? {
+                    if !(r.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&r)) {
+                        return Err(api_error(
+                            "shadow.invalid",
+                            format!("{key} must be a whole number, got {r}"),
+                        ));
+                    }
+                    *slot = r as u32;
+                }
+            }
             if let Some(r) = optional_f64(&settings, "resolution")? {
                 if !(r.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&r)) {
                     return Err(api_error(
@@ -159,7 +181,9 @@ impl Engine {
     }
 
     /// The cascades of the last `shadow.csm` prepare: `{cover, splits, fits, texels,
-    /// coverDistance, scene}` (diagnostics).
+    /// coverDistance, scene, mode, allocatedBytes, vsm}` (diagnostics; `vsm` is null in CSM
+    /// mode, else the page counts of the frame: resident, requested, pending, rendered, windows,
+    /// invalidated, starved, capacity, latency (frames), tables, coarse).
     #[wasm_bindgen(js_name = shadowStats)]
     pub fn shadow_stats(&mut self) -> Result<JsValue, JsValue> {
         let stats = self.with_state(|_, st| {
@@ -197,6 +221,30 @@ impl Engine {
             "scene",
             stats.scene.map_or(JsValue::NULL, |b| {
                 numbers(&[b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z])
+            }),
+        );
+        put("mode", JsValue::from_str(stats.mode.name()));
+        put("allocatedBytes", JsValue::from_f64(stats.allocated_bytes as f64));
+        put(
+            "vsm",
+            stats.vsm.map_or(JsValue::NULL, |v| {
+                let o = js_sys::Object::new();
+                for (k, x) in [
+                    ("resident", v.resident),
+                    ("requested", v.requested),
+                    ("pending", v.pending),
+                    ("rendered", v.rendered),
+                    ("windows", v.windows),
+                    ("invalidated", v.invalidated),
+                    ("starved", v.starved),
+                    ("capacity", v.capacity),
+                    ("latency", v.latency),
+                    ("tables", v.tables),
+                ] {
+                    let _ = Reflect::set(&o, &JsValue::from_str(k), &JsValue::from_f64(f64::from(x)));
+                }
+                let _ = Reflect::set(&o, &JsValue::from_str("coarse"), &JsValue::from_bool(v.coarse));
+                o.into()
             }),
         );
         Ok(out.into())

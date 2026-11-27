@@ -1695,6 +1695,46 @@ impl LitHandle {
             .map_or(AreaStochasticFrame::empty(), |s| s.area_stochastic)
     }
 
+    /// The world boxes of the casters that changed since the snapshot in `previous` (indexed by
+    /// instance slot): the old and the new box of every moved, added or removed bounded
+    /// instance, plus the box of every skinned instance (its pose may move without changing its
+    /// bounds), appended to `out`. `previous` becomes this frame's snapshot; `scratch` is reused
+    /// storage. The virtual shadow map invalidates the pages under these boxes.
+    pub fn caster_changes(
+        &self,
+        previous: &mut Vec<Option<raa_math::Aabb>>,
+        scratch: &mut Vec<Option<raa_math::Aabb>>,
+        out: &mut Vec<raa_math::Aabb>,
+    ) {
+        let Ok(s) = self.shared.try_borrow() else {
+            return;
+        };
+        let capacity = (s.store.capacity() as usize).max(previous.len());
+        scratch.clear();
+        scratch.resize(capacity, None);
+        let skins = s.skin_source.0.borrow();
+        let has_palette = s.palette_ready();
+        for (i, &slot) in s.item_slots.iter().enumerate() {
+            let Some(bounds) = s.index.bounds(slot).flatten() else {
+                continue;
+            };
+            if let Some(entry) = scratch.get_mut(slot as usize) {
+                *entry = Some(bounds);
+            }
+            let tag = s.item_tags.get(i).copied().unwrap_or(0);
+            if has_palette && skins.draw(tag).is_some() {
+                out.push(bounds);
+            }
+        }
+        previous.resize(capacity, None);
+        for (old, new) in previous.iter().zip(scratch.iter()) {
+            if old != new {
+                out.extend(old.iter().chain(new.iter()).copied());
+            }
+        }
+        std::mem::swap(previous, scratch);
+    }
+
     /// Selects the casters of up to 8 caster lists from the frame snapshot
     /// [`LitRenderer::prepare`] left in the shared state, writes their compacted id sections
     /// after the camera section and records the id counts of lists 0 to 3 in the frame

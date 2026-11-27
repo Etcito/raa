@@ -88,15 +88,21 @@ pub fn cascade_views(
         let far = targets.splits[index];
         let receiver = slice_planes(camera, near, far);
         let view_proj = targets.view_proj[index];
-        let mut cascade = PassView::orthographic(
+        let ortho = PassView::orthographic(
             view_proj,
             camera.eye,
             [resolution, resolution],
             0.5 * resolution * view_proj.cols[0][0].abs(),
             settings.error_pixels,
-        )
-        .shadowing(&receiver, light)
-        .seen_from(camera.eye, light, eye_lod_scale, near);
+        );
+        // Virtual shadow map windows (`receivers` false) are cached pages: every caster in
+        // the window box is drawn, not only those shadowing the current camera slice.
+        let ortho = if targets.receivers {
+            ortho.shadowing(&receiver, light)
+        } else {
+            ortho
+        };
+        let mut cascade = ortho.seen_from(camera.eye, light, eye_lod_scale, near);
         cascade.allow_software = allow_software;
         *view = Some(cascade);
     }

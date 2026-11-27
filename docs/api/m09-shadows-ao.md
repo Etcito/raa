@@ -48,6 +48,10 @@ interface ShadowSettings {
   filter?: number;                      // metres, 0..0.5, minimum PCF radius
   split?: number;                       // 0..1, practical split weight
   spread?: boolean;                     // with cover: splits over the visible scene
+  mode?: 'csm' | 'vsm';                 // cascades (default) or virtual shadow map
+  vsmPages?: 1024 | 2048 | 4096;        // VSM page pool (128 x 128 pages)
+  vsmBudget?: number;                   // 16..768, VSM pages rendered per frame
+  vsmBias?: number;                     // -2..2, VSM level bias
 }
 ```
 
@@ -69,6 +73,24 @@ in a per-pixel rotated Poisson disk, turned with the camera jitter under TAA, sl
 | `filter` | metres | `0.015625` | 0 to 0.5 | Minimum PCF radius, the same world size in every cascade (at least 1.5 texels of each). |
 | `split` | - | `0.875` | 0 to 1 | Practical split weight (0 uniform, 1 logarithmic). |
 | `spread` | - | `true` | boolean | With `cover`: spread the splits over the scene the camera can see instead of `[near, distance]`. |
+| `mode` | - | `'csm'` | `'csm'`, `'vsm'` | `vsm`: virtual shadow map (below) instead of the cascades. |
+| `vsmPages` | pages | `2048` | `1024`, `2048`, `4096` | VSM physical pool of 128 x 128 Depth32Float pages (2048 = 128 MB). |
+| `vsmBudget` | pages | `256` | 16 to 768 | VSM pages rendered per frame at most. |
+| `vsmBias` | levels | `0` | -2 to 2 | VSM level bias (negative: finer levels, more pages). |
+
+**Virtual shadow map** (`mode: 'vsm'`): 8 clipmap levels of 16384 x 16384 virtual texels around the
+camera in sun space (level 0 texel 1/1024 m, doubling per level), paged in 128 x 128 pages. A
+compute pass marks, from the prepass depth, the pages each visible pixel needs at the level whose
+texel matches its footprint (about one texel per pixel), plus the pages its filter reaches; the
+request set is read back asynchronously and the CPU allocates pool pages (free list, then least
+recently requested), renders the missing pages through up to 3 windows of 16 x 16 pages per frame
+(the cascade layers; both the lit and the virtualized-geometry casters, scissored to the pages)
+and copies them into the pool layers of the same array, with the page tables. Pages are cached
+while the sun and the casters stay still; a moved caster re-renders only the pages under its
+light-space footprint, a new sun direction or scene depth range drops them all. Until a page is
+resident the pixel uses the finest resident coarser level, else a scene-wide coarse map in
+cascade layer 3 (also used by the sun shafts and planar reflections). Same PCSS kernel as the
+cascades with per-tap page translation, minimum radius 1.5 texels (the `filter` floor is not used).
 
 A wrong type, a non-finite number or a value outside its range throws `shadow.invalid` naming the
 field.

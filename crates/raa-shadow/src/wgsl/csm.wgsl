@@ -122,13 +122,19 @@ fn raa_csm_planar(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
     return 1.0;
 }
 
-// S11 Shadow slot: contact and cloud terms when shadows are cleared, otherwise the cascade
+// S11 Shadow slot: contact and cloud terms when shadows are cleared, the virtual shadow map
+// when ShadowGpu.params.w is 2, otherwise the cascade
 // shadow (blended across the 10% band, faded to 1 past the shadow distance) x contact,
 // times the shared cloud-shadow visibility. Disabled clouds return 1 from the helper.
 fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
     if raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE) {
         let cloud = raa_cloud_shadow(world_pos);
         if raa_shadow.params.w < 0.5 { return cloud; }
+        if raa_shadow.params.w > 1.5 {
+            // VSM: the reflected view reads the scene-wide coarse map (cascade layer 3).
+            let vd = max(-(raa_frame.view * vec4<f32>(world_pos, 1.0)).z, 0.0);
+            return raa_csm_cascade(world_pos, n, frag, 3u, vd) * cloud;
+        }
         return raa_csm_planar(world_pos, n, frag) * cloud;
     }
     // Clamped like crates/raa-gi/src/wgsl/slots/slot_ao.wgsl:9-27: the 1x1 dummy reads 1, never out of bounds.
@@ -139,6 +145,10 @@ fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
         return contact * raa_cloud_shadow(world_pos);
     }
     let view_depth = -(raa_frame.view * vec4<f32>(world_pos, 1.0)).z;
+    // params.w 2: the virtual shadow map (vsm.wgsl) instead of the cascades.
+    if (raa_shadow.params.w > 1.5) {
+        return raa_vsm_shadow(world_pos, n, frag, view_depth) * contact * raa_cloud_shadow(world_pos);
+    }
     let s = raa_shadow.splits;
     let band = max(raa_shadow.params2.y, 1e-6);
     // params2.z = cascade count (1..4; 0 = legacy 4): the last used cascade fades to 1.

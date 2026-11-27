@@ -13,8 +13,11 @@ pub(crate) const CSM_PROVIDER: &str = "csm";
 /// Priority of the CSM shadow provider (above the raa-lit defaults at 0).
 pub(crate) const CSM_PRIORITY: i32 = 10;
 
-/// `raa_slot_shadow` of provider `csm` and its private `raa_csm_` helpers.
-pub(crate) const CSM_WGSL: &str = include_str!("wgsl/csm.wgsl");
+/// `raa_slot_shadow` of provider `csm` and its private `raa_csm_` / `raa_vsm_` helpers.
+/// The virtual shadow map path (`wgsl/vsm.wgsl`) is appended: `raa_slot_shadow` takes it when
+/// `ShadowGpu.params.w` is 2.
+pub(crate) const CSM_WGSL: &str =
+    concat!(include_str!("wgsl/csm.wgsl"), include_str!("wgsl/vsm.wgsl"));
 
 /// The `Shadow` slot provider `csm`, priority 10: cascaded soft sun shadows with a PCSS
 /// blocker search and filter, multiplied by the contact-shadow texture.
