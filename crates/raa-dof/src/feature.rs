@@ -95,7 +95,7 @@ impl DofState {
 type SharedDof = Rc<RefCell<DofState>>;
 
 fn write_vec4(out: &mut [u8], v: [f32; 4]) {
-    for (chunk, x) in out.chunks_exact_mut(4).zip(v) {
+    for (chunk, x) in out.as_chunks_mut::<4>().0.iter_mut().zip(v) {
         chunk.copy_from_slice(&x.to_le_bytes());
     }
 }
@@ -894,8 +894,8 @@ mod tests {
                 .unwrap();
             let mapped = slice.get_mapped_range().unwrap();
             let mut worst = 0.0f32;
-            for px in mapped.chunks_exact(8) {
-                for (c, want) in px.chunks_exact(2).zip(COLOUR) {
+            for px in mapped.as_chunks::<8>().0 {
+                for (c, want) in px.as_chunks::<2>().0.iter().zip(COLOUR) {
                     let v = f16_to_f32(u16::from_le_bytes([c[0], c[1]]));
                     worst =
                         worst

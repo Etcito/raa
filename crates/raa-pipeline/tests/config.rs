@@ -1167,7 +1167,12 @@ mod gpu {
         assert_eq!(size, Some((32, 16)));
         let pixels = target.read_rgba8(gpu).expect("readback");
         assert!(
-            pixels.chunks_exact(4).all(|px| px == [0, 255, 0, 255]),
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| c.as_slice())
+                .all(|px| px == [0, 255, 0, 255]),
             "tonemap mock cleared the backbuffer"
         );
 

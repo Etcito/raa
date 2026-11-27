@@ -79,7 +79,10 @@ pub(crate) fn validate(program: &TraceProgram, d: &[f32], path: &str) -> Result<
         return Err(bad("sampled Lipschitz bound is too small"));
     }
     let norm = d[..12]
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| c.as_slice())
         .flat_map(|r| r[..3].iter())
         .map(|v| v * v)
         .sum::<f32>()

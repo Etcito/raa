@@ -55,7 +55,7 @@ fn params_bytes(settings: &ToneMapping, surface_is_srgb: bool) -> [u8; PARAMS_SI
         u32::from(settings.dither),
         u32::from(surface_is_srgb),
     ];
-    for (chunk, word) in out.chunks_exact_mut(4).zip(words) {
+    for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
     out

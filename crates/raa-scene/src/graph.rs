@@ -19,6 +19,14 @@ use crate::{
     RenderList, SceneError, Transform,
 };
 
+/// Which instances a render list builder emits: only visible ones, or every live
+/// instance regardless of visibility.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum VisibilityPolicy {
+    VisibleOnly,
+    All,
+}
+
 /// One node of the hierarchy.
 struct Node {
     parent: Option<NodeId>,
@@ -501,14 +509,14 @@ impl Scene {
     /// and nothing is allocated when both `out.items` and `out.batches` have room for
     /// the visible instances (for example `RenderList::with_capacity(instance_count)`).
     pub fn build_render_list(&self, out: &mut RenderList) {
-        self.fill_render_list(out, None, None);
+        self.fill_render_list(out, None, None, VisibilityPolicy::VisibleOnly);
     }
 
     /// Same as [`Scene::build_render_list`] (identical items, batches and order), and
     /// also fills `tags` so that `tags[i]` is the tag of `out.items[i]`. `tags` is
     /// cleared first; nothing is allocated when it has room for the visible instances.
     pub fn build_render_list_tagged(&self, out: &mut RenderList, tags: &mut Vec<u32>) {
-        self.fill_render_list(out, Some(tags), None);
+        self.fill_render_list(out, Some(tags), None, VisibilityPolicy::VisibleOnly);
     }
 
     /// Same as [`Scene::build_render_list`] (identical items, batches and order), and
@@ -520,15 +528,34 @@ impl Scene {
         tags: &mut Vec<u32>,
         slots: &mut Vec<u32>,
     ) {
-        self.fill_render_list(out, Some(tags), Some(slots));
+        self.fill_render_list(out, Some(tags), Some(slots), VisibilityPolicy::VisibleOnly);
     }
 
-    /// The shared body of the three list builders, so they cannot diverge.
+    /// Same as [`Scene::build_render_list_slots`] (identical items, batches and order),
+    /// but emits every live instance regardless of visibility. Use it to enumerate
+    /// retained draws for an offline job (the billboard bake) that must see instances
+    /// hidden in the active view.
+    ///
+    /// `out`, `tags` and `slots` are cleared first. Removed instances and instances
+    /// without a live node are excluded exactly as in the visible-only builders; world
+    /// matrices are read as of the last [`Scene::update_world`]. This method never
+    /// changes an instance's visibility.
+    pub fn build_all_render_list_slots(
+        &self,
+        out: &mut RenderList,
+        tags: &mut Vec<u32>,
+        slots: &mut Vec<u32>,
+    ) {
+        self.fill_render_list(out, Some(tags), Some(slots), VisibilityPolicy::All);
+    }
+
+    /// The shared body of the list builders, so they cannot diverge.
     fn fill_render_list(
         &self,
         out: &mut RenderList,
         mut tags: Option<&mut Vec<u32>>,
         mut slots: Option<&mut Vec<u32>>,
+        visibility: VisibilityPolicy,
     ) {
         out.clear();
         if let Some(tags) = tags.as_deref_mut() {
@@ -541,7 +568,7 @@ impl Scene {
             let Some(inst) = self.instance_at(slot) else {
                 continue;
             };
-            if !inst.visible {
+            if visibility == VisibilityPolicy::VisibleOnly && !inst.visible {
                 continue;
             }
             // Invariant: an instance's node is live (remove_node drops its instances).
@@ -1070,5 +1097,167 @@ mod tests {
         scene.update_world();
         scene.build_render_list(&mut list);
         assert_eq!(list.items[0].world, at(3.0, 2.0, 0.0).to_mat4());
+    }
+
+    #[test]
+    fn all_render_list_includes_hidden_and_excludes_removed() {
+        let mut scene = Scene::with_capacity(2, 4);
+        let node = scene.add_node(None, at(1.0, 0.0, 0.0)).unwrap();
+        let hidden = scene.add_instance(node, MeshId(1), MaterialId(0)).unwrap();
+        let visible = scene.add_instance(node, MeshId(1), MaterialId(1)).unwrap();
+        let removed = scene.add_instance(node, MeshId(2), MaterialId(0)).unwrap();
+        scene.set_instance_tag(hidden, 11).unwrap();
+        scene.set_instance_tag(visible, 22).unwrap();
+        scene.set_instance_visible(hidden, false).unwrap();
+        scene.remove_instance(removed).unwrap();
+        scene.update_world();
+
+        let mut list = RenderList::with_capacity(4);
+        let mut tags = Vec::new();
+        let mut slots = Vec::new();
+        scene.build_all_render_list_slots(&mut list, &mut tags, &mut slots);
+        assert_eq!(keys(&list), vec![(1, 0), (1, 1)]);
+        assert_eq!(tags, vec![11, 22]);
+        assert_eq!(slots, vec![hidden.index(), visible.index()]);
+        assert_eq!(list.items.len(), tags.len());
+        assert_eq!(list.items.len(), slots.len());
+        for (i, item) in list.items.iter().enumerate() {
+            assert_eq!(item.world, at(1.0, 0.0, 0.0).to_mat4());
+            assert_eq!(scene.instance_at(slots[i]).unwrap().tag, tags[i]);
+        }
+        assert_eq!(scene.instance_count(), 2);
+        assert!(!scene.instance(hidden).unwrap().visible);
+
+        // The visible-only builder is unchanged: the hidden instance stays out.
+        scene.build_render_list_slots(&mut list, &mut tags, &mut slots);
+        assert_eq!(keys(&list), vec![(1, 1)]);
+        assert_eq!(tags, vec![22]);
+        assert_eq!(slots, vec![visible.index()]);
+    }
+
+    #[test]
+    fn all_render_list_matches_the_visible_list_and_batches_when_all_visible() {
+        let mut scene = Scene::new();
+        let n = scene.add_node(None, Transform::IDENTITY).unwrap();
+        for (mesh, mat) in [(5, 0), (3, 1), (5, 2), (3, 0), (3, 1), (9, 0)] {
+            scene
+                .add_instance(n, MeshId(mesh), MaterialId(mat))
+                .unwrap();
+        }
+        scene.update_world();
+        let mut visible = RenderList::default();
+        let mut visible_tags = Vec::new();
+        let mut visible_slots = Vec::new();
+        scene.build_render_list_slots(&mut visible, &mut visible_tags, &mut visible_slots);
+        let mut all = RenderList::default();
+        let mut all_tags = Vec::new();
+        let mut all_slots = Vec::new();
+        scene.build_all_render_list_slots(&mut all, &mut all_tags, &mut all_slots);
+        assert_eq!(all, visible);
+        assert_eq!(all_tags, visible_tags);
+        assert_eq!(all_slots, visible_slots);
+        assert_eq!(
+            all.batches
+                .iter()
+                .map(|b| (b.mesh.0, b.first, b.count))
+                .collect::<Vec<_>>(),
+            vec![(3, 0, 3), (5, 3, 2), (9, 5, 1)]
+        );
+        assert_eq!(
+            keys(&all),
+            vec![(3, 0), (3, 1), (3, 1), (5, 0), (5, 2), (9, 0)]
+        );
+    }
+
+    #[test]
+    fn all_render_list_batches_span_hidden_instances() {
+        let mut scene = Scene::new();
+        let n = scene.add_node(None, Transform::IDENTITY).unwrap();
+        let first = scene.add_instance(n, MeshId(2), MaterialId(0)).unwrap();
+        let hidden = scene.add_instance(n, MeshId(2), MaterialId(1)).unwrap();
+        scene.add_instance(n, MeshId(2), MaterialId(2)).unwrap();
+        scene.add_instance(n, MeshId(7), MaterialId(0)).unwrap();
+        scene.set_instance_visible(hidden, false).unwrap();
+        assert_ne!(first.index(), hidden.index());
+
+        let mut list = RenderList::default();
+        let mut tags = Vec::new();
+        let mut slots = Vec::new();
+        scene.build_all_render_list_slots(&mut list, &mut tags, &mut slots);
+        assert_eq!(list.items.len(), 4);
+        let batches: Vec<_> = list
+            .batches
+            .iter()
+            .map(|b| (b.mesh.0, b.first, b.count))
+            .collect();
+        assert_eq!(batches, vec![(2, 0, 3), (7, 3, 1)]);
+        assert_eq!(slots.len(), 4);
+
+        // Still four draws in the visible path: the hidden middle draw makes two runs.
+        scene.build_render_list_slots(&mut list, &mut tags, &mut slots);
+        assert_eq!(list.items.len(), 3);
+        let visible_batches: Vec<_> = list
+            .batches
+            .iter()
+            .map(|b| (b.mesh.0, b.first, b.count))
+            .collect();
+        assert_eq!(visible_batches, vec![(2, 0, 2), (7, 2, 1)]);
+    }
+
+    #[test]
+    fn all_render_list_clears_outputs_and_reuses_buffers() {
+        let mut scene = Scene::with_capacity(1, 2);
+        let node = scene.add_node(None, Transform::IDENTITY).unwrap();
+        let visible = scene.add_instance(node, MeshId(1), MaterialId(0)).unwrap();
+        let hidden = scene.add_instance(node, MeshId(2), MaterialId(0)).unwrap();
+        scene.set_instance_visible(hidden, false).unwrap();
+
+        let mut list = RenderList::with_capacity(2);
+        let mut tags = vec![99, 98, 97];
+        let mut slots = vec![9, 8, 7, 6];
+        let ptr = list.items.as_ptr();
+        scene.build_all_render_list_slots(&mut list, &mut tags, &mut slots);
+        assert_eq!(list.items.len(), 2);
+        assert_eq!(list.items.as_ptr(), ptr);
+        assert_eq!(tags.len(), 2);
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots, vec![visible.index(), hidden.index()]);
+
+        // A second call clears the previous result before refilling it.
+        scene.remove_instance(visible).unwrap();
+        scene.build_all_render_list_slots(&mut list, &mut tags, &mut slots);
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.batches.len(), 1);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(slots, vec![hidden.index()]);
+        assert!(list.items.iter().all(|i| i.mesh == MeshId(2)));
+    }
+
+    #[test]
+    fn all_render_list_reads_worlds_as_of_the_last_update_world() {
+        let mut scene = Scene::with_capacity(2, 1);
+        let root = scene.add_node(None, at(1.0, 0.0, 0.0)).unwrap();
+        let child = scene.add_node(Some(root), at(0.0, 2.0, 0.0)).unwrap();
+        let inst = scene.add_instance(child, MeshId(0), MaterialId(0)).unwrap();
+        scene.set_instance_visible(inst, false).unwrap();
+        let mut list = RenderList::with_capacity(1);
+        let mut tags = Vec::new();
+        let mut slots = Vec::new();
+        scene.build_all_render_list_slots(&mut list, &mut tags, &mut slots);
+        assert_eq!(list.items[0].world, Mat4::IDENTITY);
+
+        scene.update_world();
+        scene.build_all_render_list_slots(&mut list, &mut tags, &mut slots);
+        assert_eq!(list.items[0].world, at(1.0, 2.0, 0.0).to_mat4());
+
+        scene.set_local(root, at(3.0, 0.0, 0.0)).unwrap();
+        scene.build_all_render_list_slots(&mut list, &mut tags, &mut slots);
+        assert_eq!(list.items[0].world, at(1.0, 2.0, 0.0).to_mat4());
+
+        scene.update_world();
+        scene.build_all_render_list_slots(&mut list, &mut tags, &mut slots);
+        assert_eq!(list.items[0].world, at(3.0, 2.0, 0.0).to_mat4());
+        assert_eq!(slots, vec![inst.index()]);
+        assert!(!scene.instance(inst).unwrap().visible);
     }
 }

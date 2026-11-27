@@ -79,7 +79,10 @@ fn read(gpu: &GpuContext, buffer: &wgpu::Buffer) -> Vec<u8> {
 }
 fn floats(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| c.as_slice())
         .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
         .collect()
 }

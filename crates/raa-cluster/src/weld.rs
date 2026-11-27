@@ -172,7 +172,7 @@ impl WeldState {
         let start = self.next_triangle.min(total);
         let end = (start + WELD_BATCH).min(total);
         let batch = indices.get(start * 3..end * 3).unwrap_or(&[]);
-        for face in batch.chunks_exact(3) {
+        for face in batch.as_chunks::<3>().0 {
             if let &[a, b, c] = face
                 && let Some(triangle) = self.weld_face(input, [a, b, c])
             {

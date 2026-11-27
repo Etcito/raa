@@ -136,7 +136,7 @@ fn validate_weather_data(map: &[f32; 4], light: &[f32; 4]) -> Result<(), RaaErro
 
 fn vec4_bytes(values: &[f32; 4]) -> [u8; 16] {
     let mut out = [0u8; 16];
-    for (chunk, value) in out.chunks_exact_mut(4).zip(values) {
+    for (chunk, value) in out.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         chunk.copy_from_slice(&value.to_le_bytes());
     }
     out
@@ -144,7 +144,7 @@ fn vec4_bytes(values: &[f32; 4]) -> [u8; 16] {
 
 fn uvec4_bytes(values: &[u32; 4]) -> [u8; 16] {
     let mut out = [0u8; 16];
-    for (chunk, value) in out.chunks_exact_mut(4).zip(values) {
+    for (chunk, value) in out.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         chunk.copy_from_slice(&value.to_le_bytes());
     }
     out
@@ -489,7 +489,7 @@ impl<V: Clone + PartialEq> State<V> {
             .iter()
             .chain([&self.sh_info, &self.sh_gi])
             .flat_map(|v| v.iter());
-        for (chunk, value) in out.chunks_exact_mut(4).zip(values) {
+        for (chunk, value) in out.as_chunks_mut::<4>().0.iter_mut().zip(values) {
             chunk.copy_from_slice(&value.to_le_bytes());
         }
         out

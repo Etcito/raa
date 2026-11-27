@@ -49,7 +49,9 @@ pub fn pack_colors(key: &str, colors: &[f32]) -> Result<Vec<u32>, RaaError> {
         return Err(invalid(key, "colours must be finite"));
     }
     Ok(colors
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| {
             let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
             byte(c[0]) | byte(c[1]) << 8 | byte(c[2]) << 16 | byte(c[3]) << 24

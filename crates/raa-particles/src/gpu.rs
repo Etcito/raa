@@ -231,7 +231,12 @@ pub(crate) fn write_spawn_table(spawns: &[[u32; 2]], out: &mut Vec<u8>) {
     let n = spawns.len().min(MAX_STEPS_PER_FRAME * MAX_EMITTERS);
     out.clear();
     out.resize(n * SPAWN_COMMAND_SIZE, 0);
-    for (chunk, pair) in out.chunks_exact_mut(SPAWN_COMMAND_SIZE).zip(spawns) {
+    for (chunk, pair) in out
+        .as_chunks_mut::<SPAWN_COMMAND_SIZE>()
+        .0
+        .iter_mut()
+        .zip(spawns)
+    {
         chunk[0..4].copy_from_slice(&pair[0].to_le_bytes());
         chunk[4..8].copy_from_slice(&pair[1].to_le_bytes());
     }
@@ -243,19 +248,19 @@ pub(crate) fn write_slot_table(slots: &[u32], out: &mut Vec<u8>) {
     let n = slots.len().min(TOTAL_CAPACITY_MAX as usize);
     out.clear();
     out.resize(n * 4, 0);
-    for (chunk, v) in out.chunks_exact_mut(4).zip(slots) {
+    for (chunk, v) in out.as_chunks_mut::<4>().0.iter_mut().zip(slots) {
         chunk.copy_from_slice(&v.to_le_bytes());
     }
 }
 
 fn write_f32x4(out: &mut [u8], v: [f32; 4]) {
-    for (chunk, x) in out.chunks_exact_mut(4).zip(v) {
+    for (chunk, x) in out.as_chunks_mut::<4>().0.iter_mut().zip(v) {
         chunk.copy_from_slice(&x.to_le_bytes());
     }
 }
 
 fn write_u32x4(out: &mut [u8], v: [u32; 4]) {
-    for (chunk, x) in out.chunks_exact_mut(4).zip(v) {
+    for (chunk, x) in out.as_chunks_mut::<4>().0.iter_mut().zip(v) {
         chunk.copy_from_slice(&x.to_le_bytes());
     }
 }

@@ -33,7 +33,7 @@ fn lex_cmp(a: V3, b: V3) -> Ordering {
 /// of range are skipped (callers validate the mesh first).
 pub(crate) fn polys_from_mesh(mesh: &MeshData) -> Vec<Poly> {
     let mut polys = Vec::with_capacity(mesh.indices.len() / 3);
-    for t in mesh.indices.chunks_exact(3) {
+    for t in mesh.indices.as_chunks::<3>().0 {
         let mut pos = Vec::with_capacity(3);
         let mut nrm = Vec::with_capacity(3);
         for &i in t {

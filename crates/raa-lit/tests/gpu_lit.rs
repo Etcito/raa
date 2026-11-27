@@ -79,7 +79,7 @@ fn read_rgba16f(gpu: &GpuContext, texture: &wgpu::Texture, size: (u32, u32)) -> 
     let mapped = slice.get_mapped_range().expect("mapped range");
     let mut texels = Vec::with_capacity((size.0 * size.1) as usize);
     for row in mapped.chunks_exact(padded) {
-        for px in row[..row_bytes].chunks_exact(8) {
+        for px in row[..row_bytes].as_chunks::<8>().0 {
             texels.push(std::array::from_fn(|c| {
                 f16_to_f32(u16::from_le_bytes([px[2 * c], px[2 * c + 1]]))
             }));

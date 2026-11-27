@@ -281,7 +281,9 @@ pub fn from_js_arrays(
         colors: colors.map(|c| match c {
             Colors::Linear(c) => to_arrays(c),
             Colors::Srgb8(c) => c
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|px| {
                     let mut out = [0.0; 4];
                     for (o, v) in out.iter_mut().zip(px) {
@@ -322,7 +324,9 @@ fn srgb8_to_linear(v: u8) -> f32 {
 }
 
 fn to_arrays<const N: usize>(flat: &[f32]) -> Vec<[f32; N]> {
-    flat.chunks_exact(N)
+    flat.as_chunks::<N>()
+        .0
+        .iter()
         .map(|chunk| {
             let mut out = [0.0; N];
             out.copy_from_slice(chunk);

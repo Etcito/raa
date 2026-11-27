@@ -1134,6 +1134,20 @@ impl EngineState {
     }
 }
 
+// The M7 foliage hook of the per-view frame, wasm32 only like its billboard counterpart: the
+// preparation lives in `foliage_state`, which only the wasm adapter compiles.
+#[cfg(target_arch = "wasm32")]
+impl EngineState {
+    /// Prepares the whole-tree foliage groups of `view`. The full-canvas `update` and the
+    /// split `prepare_view` call it after the view's camera is installed, beside the
+    /// billboard groups and before that view's `lit.prepare`.
+    /// It forwards to `prepare_foliage_groups` at `crates/raa-js/src/foliage_state.rs:681`,
+    /// the upstream definition of 'Manage foliage generations and whole-tree LOD groups'.
+    pub(crate) fn prepare_foliage_groups(&mut self, view: u8) -> Result<(), RaaError> {
+        crate::foliage_state::prepare_foliage_groups(self, view)
+    }
+}
+
 /// Rebuilds `group` from the sub-meshes of its lit mesh (`render.unknown_mesh` when the
 /// mesh was removed) and re-registers the group's tag on the mesh's shared rest upload.
 /// The group's scene instances share one lit mesh and tag, so one view (and one pose)

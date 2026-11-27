@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn every_triangle_winds_along_its_face_normal() {
         let m = cube(1.0);
-        for t in m.indices.chunks_exact(3) {
+        for t in m.indices.as_chunks::<3>().0 {
             let [a, b, c] = [0, 1, 2].map(|i| m.positions[t[i] as usize]);
             let e1: [f32; 3] = std::array::from_fn(|i| b[i] - a[i]);
             let e2: [f32; 3] = std::array::from_fn(|i| c[i] - a[i]);

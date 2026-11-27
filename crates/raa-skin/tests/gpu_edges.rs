@@ -67,14 +67,25 @@ fn read(gpu: &GpuContext, buffer: &wgpu::Buffer) -> Vec<f32> {
     let bytes = staging.get_mapped_range(..).unwrap().to_vec();
     staging.unmap();
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| c.as_slice())
         .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
         .collect()
 }
 
 fn pairs(mesh: &SkinMesh) -> Vec<u32> {
     let mut edges = BTreeSet::new();
-    for tri in mesh.rest.base.indices.chunks_exact(3) {
+    for tri in mesh
+        .rest
+        .base
+        .indices
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|c| c.as_slice())
+    {
         for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
             edges.insert((a.min(b), a.max(b)));
         }
@@ -85,7 +96,10 @@ fn pairs(mesh: &SkinMesh) -> Vec<u32> {
 fn records(cpu: &CpuSkin, pairs: &[u32]) -> Vec<f32> {
     assert_eq!(pairs.len(), cpu.edge_segments.len() * 2);
     pairs
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| c.as_slice())
         .flat_map(|p| {
             p.iter().flat_map(|&v| {
                 let v = v as usize;

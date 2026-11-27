@@ -17,6 +17,11 @@
 //! the [`LitHandle`] cache and the two [`PipelineSpec`]s of a pass are built once, so a warm
 //! frame allocates nothing.
 //!
+//! M7 foliage is additive: a draw whose material has an associated foliage generation draws
+//! through the foliage pipeline of [`LitHandle::pipeline_for_foliage`] and binds that
+//! generation's group 2 with [`LitHandle::bind_foliage`], in both the prepass and the forward
+//! pass. Ordinary draws keep the unchanged pipeline and lighting path.
+//!
 //! [`LitRenderer::new`]: crate::LitRenderer::new
 
 use std::cell::RefCell;
@@ -24,7 +29,8 @@ use std::rc::Rc;
 
 use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{
-    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
+    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, LightingResources, Pipeline, PrepareCtx,
+    RecordCtx, Targets,
 };
 use raa_shader::{PassKind, VariantKey};
 
@@ -137,19 +143,47 @@ impl Specs {
     }
 }
 
-/// Draws every Opaque and Fur draw of `lit` into `pass` (groups 0 and 1 bound by the
-/// caller): per draw the `kind` variant of its material function at `msaa` samples, its
-/// sub-mesh ([`LitHandle::bind_mesh`]) and its instances
-/// `first_instance..first_instance + instance_count`.
-fn draw_lit(
+/// The pipeline a prepared draw records with: the unchanged ordinary material variant, or
+/// the additive foliage pipeline of the material's associated generation.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum DrawPipeline {
+    Ordinary,
+    Foliage,
+}
+
+/// Selects the pipeline of one draw from its material's foliage mode: a material with an
+/// associated generation draws through the additive foliage pipeline (and binds its group
+/// 2), an ordinary material keeps the unchanged S10 path.
+fn select_pipeline(foliage_mode: Option<u32>) -> DrawPipeline {
+    if foliage_mode.is_some() {
+        DrawPipeline::Foliage
+    } else {
+        DrawPipeline::Ordinary
+    }
+}
+
+/// Draws every Opaque and Fur draw of `lit` into `pass` (group 0 bound by the caller): per
+/// draw the `kind` variant of its material function at `msaa` samples, its sub-mesh
+/// ([`LitHandle::bind_mesh`]) and its instances
+/// `first_instance..first_instance + instance_count`. A draw whose material has an
+/// associated foliage generation takes the additive foliage pipeline, binds the S44 opaque
+/// group 1 and that generation's group 2 ([`LitHandle::bind_foliage`]); every other draw
+/// keeps the ordinary pipeline, the full group 1 and no group 2. The full group 1 is
+/// restored after the draws for the pass's contributors.
+fn draw_lit<'a>(
     gpu: &GpuContext,
-    pass: &mut wgpu::RenderPass<'_>,
-    lit: &LitHandle,
+    pass: &mut wgpu::RenderPass<'a>,
+    lit: &'a LitHandle,
+    lighting: &LightingResources,
     kind: PassKind,
-    msaa: u32,
     specs: &Specs,
     extra_flags: u32,
 ) -> Result<(), RaaError> {
+    let msaa = if kind == PassKind::Forward {
+        lit.msaa()
+    } else {
+        1
+    };
     for class in DRAWN_CLASSES {
         let draws = lit.camera_draws(class);
         for d in draws.iter() {
@@ -167,8 +201,20 @@ fn draw_lit(
                 msaa,
                 flags: flags | lit.material_variant_flags(d.material) | extra_flags,
             };
-            let pipeline = lit.pipeline_for_draw(gpu, d.mesh, key, specs.get(flags))?;
-            pass.set_pipeline(&pipeline);
+            match select_pipeline(lit.foliage_mode(d.material)) {
+                DrawPipeline::Foliage => {
+                    let pipeline =
+                        lit.pipeline_for_foliage(gpu, d.mesh, key, specs.get(flags), d.material)?;
+                    pass.set_pipeline(&pipeline);
+                    pass.set_bind_group(1, lighting.opaque_bind_group(), &[]);
+                    lit.bind_foliage(pass, d.material)?;
+                }
+                DrawPipeline::Ordinary => {
+                    let pipeline = lit.pipeline_for_draw(gpu, d.mesh, key, specs.get(flags))?;
+                    pass.set_pipeline(&pipeline);
+                    pass.set_bind_group(1, lighting.bind_group(), &[]);
+                }
+            }
             let instances = d.first_instance..d.first_instance.saturating_add(d.instance_count);
             if kind == PassKind::Forward {
                 lit.draw_surface_instances(pass, 0..count, instances);
@@ -177,6 +223,7 @@ fn draw_lit(
             }
         }
     }
+    pass.set_bind_group(1, lighting.bind_group(), &[]);
     Ok(())
 }
 
@@ -287,8 +334,8 @@ impl FeaturePass for Prepass {
             ctx.gpu,
             &mut pass,
             &self.lit,
+            ctx.lighting,
             PassKind::Prepass,
-            1,
             &self.specs,
             extra_flags,
         )
@@ -440,8 +487,8 @@ impl FeaturePass for ForwardPass {
                 ctx.gpu,
                 &mut pass,
                 &self.lit,
+                ctx.lighting,
                 PassKind::Forward,
-                self.msaa,
                 &self.specs,
                 0,
             )?;
@@ -510,6 +557,14 @@ mod tests {
                 Some(wgpu::TextureFormat::Rgba16Float)
             ]
         );
+    }
+
+    #[test]
+    fn foliage_association_selects_the_additive_pipeline() {
+        assert_eq!(select_pipeline(None), DrawPipeline::Ordinary);
+        for mode in [0, 1, 2, 3, 4, 5] {
+            assert_eq!(select_pipeline(Some(mode)), DrawPipeline::Foliage);
+        }
     }
 
     #[test]

@@ -214,7 +214,9 @@ impl Rig {
         let row = {
             let mapped = slice.get_mapped_range().expect("mapped range");
             mapped
-                .chunks_exact(8)
+                .as_chunks::<8>()
+                .0
+                .iter()
                 .map(|px| std::array::from_fn(|c| u16::from_le_bytes([px[2 * c], px[2 * c + 1]])))
                 .collect()
         };

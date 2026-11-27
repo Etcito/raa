@@ -194,6 +194,8 @@ pub(crate) struct GpuLitMesh {
     /// Per-recreation buffer key, fresh on every upload and update.
     key: u64,
     info: LitMeshInfo,
+    /// Immutable CPU source kept beside the GPU buffers for foliage baking (`m7-source`).
+    pub(crate) source: AttributedMesh,
     pub(crate) edge_bytes: Vec<u8>,
     pub(crate) edges: Option<wgpu::Buffer>,
 }
@@ -316,6 +318,14 @@ impl MeshStore {
         self.table.record(mesh)
     }
 
+    /// The retained CPU source of sub-mesh `mesh` with its `(first_index, index_count)`.
+    /// `None` once the mesh is removed; the source is replaced by every upload and update.
+    pub(crate) fn source(&self, mesh: MeshId) -> Option<(&AttributedMesh, u32, u32)> {
+        let record = self.table.record(mesh)?;
+        let gpu = self.lit_mesh(record.lit)?;
+        Some((&gpu.source, record.first_index, record.index_count))
+    }
+
     /// The buffers holding sub-mesh `mesh` and its `(first_index, index_count)`;
     /// unknown ids give `render.unknown_mesh`.
     pub(crate) fn resolve(&self, mesh: MeshId) -> Result<(&GpuLitMesh, u32, u32), RaaError> {
@@ -424,6 +434,7 @@ fn build(gpu: &GpuContext, m: &AttributedMesh) -> Result<(GpuLitMesh, Vec<SubMes
         index,
         key: 0,
         info,
+        source: m.clone(),
         edge_bytes: triangle_edge_bytes(m),
         edges: None,
     };
@@ -608,7 +619,7 @@ pub(crate) fn edge_bytes(m: &AttributedMesh, edges: &[u32]) -> Vec<u8> {
 
 fn triangle_edge_bytes(m: &AttributedMesh) -> Vec<u8> {
     let mut edges = std::collections::BTreeSet::new();
-    for t in m.base.indices.chunks_exact(3) {
+    for t in m.base.indices.as_chunks::<3>().0 {
         for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
             edges.insert((a.min(b), a.max(b)));
         }

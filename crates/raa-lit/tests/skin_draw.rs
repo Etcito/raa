@@ -112,9 +112,11 @@ fn posed_instances_of_one_mesh_and_material_share_one_instanced_draw() {
             let first = draw.first_instance as usize * 4;
             let end = (draw.first_instance + draw.instance_count) as usize * 4;
             let records: Vec<&[u8]> = prep.id_bytes()[first..end]
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|id| {
-                    let slot = u32::from_le_bytes(id.try_into().unwrap());
+                    let slot = u32::from_le_bytes(*id);
                     store.record(slot).unwrap()
                 })
                 .collect();

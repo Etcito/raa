@@ -165,7 +165,7 @@ impl LocalLight {
             self.size[0],
             self.size[1],
         ];
-        for (bytes, value) in out.chunks_exact_mut(4).zip(words) {
+        for (bytes, value) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
             bytes.copy_from_slice(&value.to_le_bytes());
         }
         out[52..56].copy_from_slice(&self.kind.rank().to_le_bytes());

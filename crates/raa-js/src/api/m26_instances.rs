@@ -194,7 +194,12 @@ pub(crate) fn positions(flat: &[f32]) -> Result<Vec<[f32; 3]>, RaaError> {
             "'positions' must hold a whole number of xyz triples",
         ));
     }
-    Ok(flat.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect())
+    Ok(flat
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| [p[0], p[1], p[2]])
+        .collect())
 }
 
 /// The geometry `lod_error` reads: positions and triangle indices.

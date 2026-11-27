@@ -20,6 +20,11 @@ const PASSTHROUGH_MATERIAL_VERTEX: &str =
 }
 ";
 
+/// Foliage material parts, assembled by [`Composer::compose_foliage`] only.
+const FOLIAGE_MATERIAL_WGSL: &str = include_str!("wgsl/foliage_material.wgsl");
+/// TRANSPARENT | TRANSMISSIVE draw-class bits (S10), never set on a foliage variant.
+const FOLIAGE_TRANSLUCENT_CLASSES: u32 = 3;
+
 /// FNV-1a 64-bit offset basis and prime.
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -116,6 +121,116 @@ impl Composer {
         reg: &MaterialFnRegistry,
         key: &VariantKey,
     ) -> Result<String, ShaderError> {
+        self.compose_pass(reg, key, None)
+    }
+
+    /// Composes an unlit billboard bake with diffuse, object normal and opacity targets.
+    /// Call [`Composer::validate`] before creating a pipeline. The pipeline must use depth
+    /// testing and clear its colour targets to zero.
+    ///
+    /// Handoff: `Composer::compose_billboard_bake` composes the shader for Render eight directions into the bake targets.
+    pub fn compose_billboard_bake(
+        &self,
+        reg: &MaterialFnRegistry,
+        key: &VariantKey,
+    ) -> Result<String, ShaderError> {
+        self.compose_pass(
+            reg,
+            key,
+            Some(include_str!("wgsl/pass_billboard_bake.wgsl")),
+        )
+    }
+
+    /// Composes the unlit foliage reference shader: `vs_main` and `fs_main` evaluate the
+    /// material function and the vertex path, then write the world normal and coverage
+    /// (location 0, Rgba16Float), the standard-Z depth in X and zero YZW (location 1,
+    /// Rgba32Float) and the linear unlit albedo and coverage (location 2, Rgba8Unorm).
+    /// Coverage is the material opacity of the source. The depth attachment is
+    /// Depth32Float with clear 1 and `Less`; every colour target clears to zero.
+    ///
+    /// Handoff: `Composer::compose_foliage_reference` composes this reference module
+    /// (`vs_main` and `fs_main`) for Render reference views and convex-hull bake layers.
+    pub fn compose_foliage_reference(
+        &self,
+        reg: &MaterialFnRegistry,
+        key: &VariantKey,
+    ) -> Result<String, ShaderError> {
+        self.compose_pass(
+            reg,
+            key,
+            Some(include_str!("wgsl/pass_foliage_reference.wgsl")),
+        )
+    }
+
+    /// Composes the relightable foliage module of `key.pass` ([`PassKind::Prepass`] or
+    /// [`PassKind::Forward`]) for `mode` in the m7-foliage-resources rank (spom 0, pom 1,
+    /// offset 2, shell 3, stochastic 4, differentiable 5). The pass section holds
+    /// `RAA_FOLIAGE_MODE`, the sampling fragments once (group 2 and foliage_parallax.wgsl for
+    /// modes 0, 1, 4 and 5; foliage_offset.wgsl, which declares group 2 itself, for modes 2
+    /// and 3), then the foliage_material.wgsl material part and its `vs_main`/`fs_main`.
+    /// Distilled modes sample the native volume at the source-root position; impostor modes
+    /// shade the hull hit. Forward adds backlit translucency yet stays opaque: the
+    /// TRANSPARENT and TRANSMISSIVE draw-class bits are cleared from the variant flags. Any
+    /// other mode or pass refuses `shader.validate` before a pipeline exists. The result is
+    /// not validated (see [`Composer::validate`]).
+    ///
+    /// Handoff: `Composer::compose_foliage` composes the foliage prepass and forward modules
+    /// for Bind foliage resources in lit pipelines.
+    pub fn compose_foliage(
+        &self,
+        reg: &MaterialFnRegistry,
+        key: &VariantKey,
+        mode: u32,
+    ) -> Result<String, ShaderError> {
+        let entry = match key.pass {
+            PassKind::Prepass => "prepass",
+            PassKind::Forward => "forward",
+            other => {
+                return Err(ShaderError::new(
+                    ShaderError::VALIDATE,
+                    format!("foliage composes the Prepass and Forward passes, not {other:?}"),
+                ));
+            }
+        };
+        let sampling = match mode {
+            0 | 1 | 4 | 5 => [
+                foliage_part("group2"),
+                include_str!("wgsl/foliage_parallax.wgsl"),
+                foliage_part("parallax sample"),
+            ],
+            2 | 3 => [
+                "",
+                include_str!("wgsl/foliage_offset.wgsl"),
+                foliage_part("offset sample"),
+            ],
+            _ => {
+                return Err(ShaderError::new(
+                    ShaderError::VALIDATE,
+                    format!("foliage mode {mode} is not in 0..=5"),
+                ));
+            }
+        };
+        let mut body = format!("const RAA_FOLIAGE_MODE: u32 = {mode}u;\n");
+        for part in sampling
+            .into_iter()
+            .chain([foliage_part("material"), foliage_part(entry)])
+        {
+            body.push_str(part);
+            body.push('\n');
+        }
+        let key = VariantKey {
+            flags: key.flags & !FOLIAGE_TRANSLUCENT_CLASSES,
+            ..*key
+        };
+        self.compose_pass(reg, &key, Some(&body))
+    }
+
+    fn compose_pass(
+        &self,
+        reg: &MaterialFnRegistry,
+        key: &VariantKey,
+        bake: Option<&str>,
+    ) -> Result<String, ShaderError> {
         let entry = reg.get(key.material_fn).ok_or_else(|| {
             ShaderError::new(
                 ShaderError::UNKNOWN_FN,
@@ -164,7 +279,7 @@ impl Composer {
             section(&mut out, &title, &p.wgsl);
         }
         section(&mut out, "local lighting", LOCAL_LIGHTING_WGSL);
-        if matches!(key.pass, PassKind::VgGbuffer | PassKind::VgShade) {
+        if bake.is_none() && matches!(key.pass, PassKind::VgGbuffer | PassKind::VgShade) {
             section(&mut out, "depth", DEPTH_WGSL);
             section(&mut out, "vg surface", VG_SURFACE_WGSL);
         }
@@ -172,7 +287,7 @@ impl Composer {
             "const RAA_MSAA: u32 = {}u;\nconst RAA_VARIANT_FLAGS: u32 = {}u;\n\n{}",
             key.msaa,
             key.flags,
-            pass_wgsl(key.pass)
+            bake.unwrap_or_else(|| pass_wgsl(key.pass))
         );
         section(&mut out, &format!("pass {:?}", key.pass), &pass);
         Ok(out)
@@ -371,6 +486,17 @@ fn unparenthesised_mixes(source: &str) -> Vec<String> {
         }
     }
     found
+}
+
+/// The text of the `// raa foliage part: <name>` section of foliage_material.wgsl, up to
+/// the next part marker; empty when the part does not exist.
+fn foliage_part(name: &str) -> &'static str {
+    let marker = format!("// raa foliage part: {name}\n");
+    let start = FOLIAGE_MATERIAL_WGSL
+        .find(&marker)
+        .map_or(FOLIAGE_MATERIAL_WGSL.len(), |i| i + marker.len());
+    let rest = &FOLIAGE_MATERIAL_WGSL[start..];
+    &rest[..rest.find("// raa foliage part: ").unwrap_or(rest.len())]
 }
 
 /// Entry points of `pass`.

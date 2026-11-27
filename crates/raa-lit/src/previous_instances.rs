@@ -13,10 +13,10 @@ const PAGE_RECORDS: usize = 32;
 /// in `lib.rs`. The lifecycle share calls it for existing scene-instance slots, with
 /// committed models when valid and current models on creation, reuse or unsupported history.
 pub(crate) fn write_previous_record(out: &mut [u8; 64], model: &Mat4, valid: bool) {
-    for row in 0..3 {
-        for col in 0..4 {
+    for (col, column) in model.cols.iter().enumerate() {
+        for (row, value) in column.iter().enumerate() {
             let offset = row * 16 + col * 4;
-            out[offset..offset + 4].copy_from_slice(&model.cols[col][row].to_le_bytes());
+            out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
     }
     out[48..52].copy_from_slice(&u32::from(valid).to_le_bytes());
@@ -335,7 +335,7 @@ mod tests {
                     false,
                 );
             }
-            for (slot, record) in store.bytes().chunks_exact(64).enumerate() {
+            for (slot, record) in store.bytes().as_chunks::<64>().0.iter().enumerate() {
                 if slot < capacity as usize {
                     assert_eq!(&record[12..16], &(slot as f32).to_le_bytes());
                 } else {

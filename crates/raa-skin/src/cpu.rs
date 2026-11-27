@@ -70,7 +70,7 @@ pub fn skin_cpu(mesh: &SkinMesh, pose: Option<&[f32]>) -> Result<CpuSkin, SkinEr
         out.tangents.push([xyz[0], xyz[1], xyz[2], t[3]]);
     }
     let mut edges = BTreeSet::new();
-    for tri in rest.base.indices.chunks_exact(3) {
+    for tri in rest.base.indices.as_chunks::<3>().0 {
         for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
             edges.insert((a.min(b), a.max(b)));
         }

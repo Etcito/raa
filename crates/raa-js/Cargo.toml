@@ -18,11 +18,8 @@ raa-math = { workspace = true }
 raa-geom = { workspace = true }
 raa-material = { workspace = true }
 raa-scene = { workspace = true }
-raa-render = { workspace = true }
-raa-prims = { workspace = true }
 raa-loader = { workspace = true }
 raa-csg = { workspace = true }
-raa-graph = { path = "../raa-graph" }
 wgpu = { workspace = true }
 raa-mesh = { path = "../raa-mesh" }
 raa-skin = { path = "../raa-skin" }
@@ -35,14 +32,9 @@ raa-ibl = { path = "../raa-ibl" }
 raa-shadow = { path = "../raa-shadow" }
 raa-gtao = { path = "../raa-gtao" }
 raa-contact = { path = "../raa-contact" }
-raa-matfn = { path = "../raa-matfn" }
 raa-brdf = { path = "../raa-brdf" }
-raa-fur = { path = "../raa-fur" }
 raa-bloom = { path = "../raa-bloom" }
-raa-transmission = { path = "../raa-transmission" }
 raa-oit = { path = "../raa-oit" }
-raa-liquid = { path = "../raa-liquid" }
-raa-particles = { path = "../raa-particles" }
 raa-ssr = { path = "../raa-ssr" }
 raa-dof = { path = "../raa-dof" }
 raa-fog = { path = "../raa-fog" }
@@ -53,16 +45,28 @@ raa-vg = { path = "../raa-vg" }
 raa-gi = { path = "../raa-gi" }
 raa-taa = { path = "../raa-taa" }
 raa-grading = { path = "../raa-grading" }
+raa-sdf-trace = { path = "../raa-sdf-trace" }
+
+[dev-dependencies]
+raa-graph = { path = "../raa-graph" }
 raa-exposure = { path = "../raa-exposure" }
 raa-sharpen = { path = "../raa-sharpen" }
-raa-deform = { path = "../raa-deform" }
-raa-sdf-trace = { path = "../raa-sdf-trace" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 js-sys = { workspace = true }
 web-sys = { workspace = true, features = ["HtmlCanvasElement"] }
+raa-prims = { workspace = true }
+raa-matfn = { path = "../raa-matfn" }
+raa-graph = { path = "../raa-graph" }
+raa-fur = { path = "../raa-fur" }
+raa-transmission = { path = "../raa-transmission" }
+raa-liquid = { path = "../raa-liquid" }
+raa-particles = { path = "../raa-particles" }
+raa-exposure = { path = "../raa-exposure" }
+raa-sharpen = { path = "../raa-sharpen" }
+raa-deform = { path = "../raa-deform" }
 
 [[test]]
 name = "m15_animation"

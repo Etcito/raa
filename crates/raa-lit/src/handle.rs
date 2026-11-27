@@ -11,9 +11,11 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::num::NonZeroU64;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
-use raa_math::{Mat4, Vec3};
+use raa_math::{Aabb, Mat4, Vec3};
+use raa_mesh::AttributedMesh;
 use raa_scene::{InstanceIndex, RenderList, frustum_planes};
 use raa_shader::{
     ComposeOptions, Composer, MaterialFnId, MaterialFnRegistry, PassKind, ShaderError,
@@ -23,6 +25,8 @@ use raa_shader::{
 use crate::area_shadow::MAX_HERO_LIGHTS;
 use crate::area_stochastic::AreaStochasticFrame;
 use crate::extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
+use crate::foliage_bindings::{FoliagePipelineCache, FoliagePipelineKey};
+use crate::foliage_resources::{FoliageResources, FoliageSource, SourceTriangle};
 use crate::frame::FRAME_GPU_SIZE;
 use crate::instance_store::InstanceStore;
 use crate::library::SurfaceLibrary;
@@ -159,6 +163,12 @@ fn vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 3] {
     ]
 }
 
+/// The vertex buffers of a billboard bake draw: stream 0, the bake's own instance id
+/// stream (step Instance) and stream 1, matching the standard lit vertex layouts.
+pub(crate) fn bake_vertex_buffer_layouts() -> Vec<Option<wgpu::VertexBufferLayout<'static>>> {
+    vertex_buffer_layouts().to_vec()
+}
+
 /// The vertex buffers of posed variants: stream 0 (rest), the id stream, stream 1
 /// without its tangent and the rest skin records in slot 3.
 fn posed_vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 4] {
@@ -204,7 +214,7 @@ fn palette_layout_entries() -> [wgpu::BindGroupLayoutEntry; 1] {
 /// and binding 2 `array<InstanceExtraGpu>`, both read-only storage; 3, 4, 5 the material
 /// texture atlas, its sampler and rects; 6 the material data words (read-only storage);
 /// 7 the persistent instance records; 8 the previous affine records (vertex-only storage).
-fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 9] {
+pub(crate) fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 9] {
     let read_only = wgpu::BufferBindingType::Storage { read_only: true };
     [
         buffer_entry(0, wgpu::BufferBindingType::Uniform, FRAME_GPU_SIZE),
@@ -285,6 +295,83 @@ fn check_msaa(msaa: u32) -> Result<(), RaaError> {
             code: "render.invalid_msaa",
             message: format!("msaa must be 1 or 4 samples, got {msaa}"),
         })
+    }
+}
+
+/// Refuses `foliage.invalid` for a non-finite or singular source transform and returns its
+/// inverse-transpose normal matrix (the one [`Mat4::normal_matrix`] gives, checked first so
+/// a singular transform is never silently replaced by the identity).
+fn source_normal_matrix(m: &Mat4, name: &str) -> Result<[[f32; 4]; 3], RaaError> {
+    if !m.cols.iter().flatten().all(|v| v.is_finite()) {
+        return Err(foliage_invalid(format!("{name} is not finite")));
+    }
+    if m.inverse().is_none() {
+        return Err(foliage_invalid(format!("{name} is singular")));
+    }
+    Ok(m.normal_matrix())
+}
+
+/// Source position `index` transformed into source-root metres.
+fn source_position(source: &AttributedMesh, index: u32, m: &Mat4) -> Result<[f32; 3], RaaError> {
+    let position = source
+        .base
+        .positions
+        .get(index as usize)
+        .copied()
+        .ok_or_else(|| foliage_invalid(format!("source index {index} is out of range")))?;
+    if !position.iter().all(|v| v.is_finite()) {
+        return Err(foliage_invalid(format!(
+            "source position {index} is not finite"
+        )));
+    }
+    Ok(m.transform_point(Vec3::from_array(position)).to_array())
+}
+
+/// Source shading normal `index` through `normal_matrix` and renormalised.
+fn source_normal(
+    source: &AttributedMesh,
+    index: u32,
+    normal_matrix: [[f32; 4]; 3],
+) -> Result<[f32; 3], RaaError> {
+    let normal = source
+        .base
+        .normals
+        .get(index as usize)
+        .copied()
+        .ok_or_else(|| foliage_invalid(format!("source normal {index} is out of range")))?;
+    if !normal.iter().all(|v| v.is_finite()) {
+        return Err(foliage_invalid(format!(
+            "source normal {index} is not finite"
+        )));
+    }
+    let v = Vec3::from_array(normal);
+    let t = Vec3::new(
+        normal_matrix[0][0] * v.x + normal_matrix[1][0] * v.y + normal_matrix[2][0] * v.z,
+        normal_matrix[0][1] * v.x + normal_matrix[1][1] * v.y + normal_matrix[2][1] * v.z,
+        normal_matrix[0][2] * v.x + normal_matrix[1][2] * v.y + normal_matrix[2][2] * v.z,
+    );
+    Ok(t.normalize_or_zero().to_array())
+}
+
+/// Source UV `index`, `[0, 0]` when the mesh carries none.
+fn source_uv(source: &AttributedMesh, index: u32) -> Result<[f32; 2], RaaError> {
+    let uv = source
+        .uvs
+        .as_ref()
+        .and_then(|uvs| uvs.get(index as usize))
+        .copied()
+        .unwrap_or([0.0, 0.0]);
+    if !uv.iter().all(|v| v.is_finite()) {
+        return Err(foliage_invalid(format!("source UV {index} is not finite")));
+    }
+    Ok(uv)
+}
+
+/// Refuses `foliage.invalid` with `message`.
+fn foliage_invalid(message: impl Into<String>) -> RaaError {
+    RaaError::FrameGraph {
+        code: "foliage.invalid",
+        message: message.into(),
     }
 }
 
@@ -459,6 +546,17 @@ pub(crate) struct LitShared {
     /// The fullscreen VG kinds lay out group 1 with it so their fragment stage keeps 15
     /// sampled textures (S38/S44).
     opaque_lighting_layout: wgpu::BindGroupLayout,
+    /// The exact fragment-only group 2 of m7-foliage-resources, shared by every foliage
+    /// pipeline and compatible with each [`FoliageResources`] bind group (wgpu pools equal
+    /// layouts).
+    foliage_layout: wgpu::BindGroupLayout,
+    /// The actual entry identity of `foliage_layout`, part of every foliage pipeline cache key.
+    foliage_layout_id: u64,
+    /// The immutable foliage generation of each material, installed by
+    /// [`LitHandle::set_foliage`] and bound per draw by [`LitHandle::bind_foliage`].
+    foliage: HashMap<MaterialId, Rc<FoliageResources>>,
+    /// Foliage pipelines by mode, actual group-2 layout identity, variant and spec.
+    foliage_pipelines: RefCell<FoliagePipelineCache<Arc<wgpu::RenderPipeline>>>,
     pipelines: RefCell<PipelineCache<wgpu::RenderPipeline>>,
     /// Composed WGSL by canonical variant; cleared with the pipeline cache.
     composed: RefCell<HashMap<VariantKey, String>>,
@@ -539,6 +637,15 @@ impl LitShared {
                     label: Some("raa.lit.skin_palette_layout"),
                     entries: &palette_layout_entries(),
                 });
+        let foliage_layout =
+            gpu.device()
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("raa.lit.foliage_layout"),
+                    entries: &crate::foliage_resources::foliage_layout_entries(),
+                });
+        let foliage_layout_id = crate::foliage_bindings::layout_identity(
+            &crate::foliage_resources::foliage_layout_entries(),
+        );
         let textures = TextureAtlas::new(gpu);
         let data = MaterialData::new(gpu);
         let frame_bind_group = create_frame_bind_group(
@@ -603,6 +710,10 @@ impl LitShared {
             frame_bind_group,
             lighting_layout: lighting_layout.clone(),
             opaque_lighting_layout: opaque_lighting_layout.clone(),
+            foliage_layout,
+            foliage_layout_id,
+            foliage: HashMap::new(),
+            foliage_pipelines: RefCell::new(FoliagePipelineCache::new()),
             pipelines: RefCell::new(PipelineCache::new()),
             composed: RefCell::new(HashMap::new()),
             canonical_fns: RefCell::new(HashMap::new()),
@@ -632,6 +743,7 @@ impl LitShared {
         self.composed.get_mut().clear();
         self.modules.get_mut().clear();
         self.content_pipelines.get_mut().clear();
+        self.foliage_pipelines.get_mut().clear();
         Ok(())
     }
 
@@ -849,6 +961,77 @@ impl LitShared {
         self.palette_group.is_some()
     }
 
+    /// The local-space bounds of sub-mesh `mesh`, `None` when the id is not uploaded or
+    /// has no bounds. Read by the billboard bake to frame every submitted draw.
+    pub(crate) fn mesh_bounds(&self, mesh: MeshId) -> Option<Aabb> {
+        let sub = self.meshes.submesh(mesh)?;
+        self.meshes.info(sub.lit).map(|info| info.bounds)
+    }
+
+    /// A group 0 over `buffers` (frame, materials, extras, instance records, previous
+    /// records) with this renderer's frame layout, texture atlas and material data, so a
+    /// bake renders with isolated uniform/instance state but the existing atlas bindings.
+    pub(crate) fn bake_frame_bind_group(
+        &self,
+        gpu: &GpuContext,
+        buffers: [&wgpu::Buffer; 5],
+    ) -> wgpu::BindGroup {
+        create_frame_bind_group(gpu, &self.frame_layout, buffers, &self.textures, &self.data)
+    }
+
+    /// Binds `ids` (the bake's own compacted instance id stream) and sub-mesh `mesh` into
+    /// `pass`, returning its index count. The bake never touches the prepared camera ids.
+    pub(crate) fn bake_bind_mesh(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        mesh: MeshId,
+        ids: &wgpu::Buffer,
+    ) -> Result<u32, RaaError> {
+        let (g, first, count) = self.meshes.resolve(mesh)?;
+        pass.set_vertex_buffer(STREAM0_SLOT, g.stream0.slice(..));
+        pass.set_vertex_buffer(INSTANCE_SLOT, ids.slice(..));
+        pass.set_vertex_buffer(STREAM1_SLOT, g.stream1.slice(..));
+        let start = u64::from(first) * 4;
+        let end = start + u64::from(count) * 4;
+        let indices = if count == 0 {
+            g.index.slice(..)
+        } else {
+            g.index.slice(start..end)
+        };
+        pass.set_index_buffer(indices, wgpu::IndexFormat::Uint32);
+        Ok(count)
+    }
+
+    /// Submits the billboard copies into the installed atlas and updates group 0 before
+    /// returning an owned GPU-completion future. No atlas borrow survives submission.
+    pub(crate) fn submit_billboard_publication(
+        &mut self,
+        gpu: &GpuContext,
+        targets: &mut crate::BillboardTargets,
+    ) -> Result<
+        (
+            crate::billboard_targets::BillboardAtlasImages,
+            impl std::future::Future<Output = Result<(), RaaError>> + 'static + use<>,
+        ),
+        RaaError,
+    > {
+        let publication = targets.submit_publish(gpu, &mut self.textures);
+        self.frame_bind_group = create_frame_bind_group(
+            gpu,
+            &self.frame_layout,
+            [
+                &self.frame_buffer,
+                &self.material_buffer,
+                &self.extras_buffer,
+                &self.instance_storage,
+                &self.previous_storage,
+            ],
+            &self.textures,
+            &self.data,
+        );
+        publication
+    }
+
     /// Mirrors the editor overlay state into the skin draw source (the skin pass builds
     /// overlay geometry only for tags whose outline or wireframe is on).
     pub(crate) fn sync_skin_overlays(&self) {
@@ -1039,6 +1222,95 @@ impl LitShared {
             .insert(content_key, pipeline.clone());
         Ok(pipeline)
     }
+
+    /// The foliage pipeline of the canonical `key` and `spec` for `mode`: composed with
+    /// `Composer::compose_foliage`, validated, and built with the layouts [group 0, the S44
+    /// opaque group 1 (GI retained), the foliage group 2]. The complete layout is validated
+    /// before any pipeline is allocated; the cache is keyed by the mode and the actual group-2
+    /// layout identity beside the variant and spec hash.
+    fn pipeline_for_foliage(
+        &self,
+        gpu: &GpuContext,
+        key: VariantKey,
+        spec: &PipelineSpec,
+        mode: u32,
+    ) -> Result<Arc<wgpu::RenderPipeline>, RaaError> {
+        check_msaa(key.msaa)?;
+        crate::foliage_bindings::validate_foliage_layouts()?;
+        let key = VariantKey {
+            material_fn: self.canonical_fn(key.material_fn),
+            ..key
+        };
+        let cache_key =
+            FoliagePipelineKey::from_parts(mode, self.foliage_layout_id, key, spec_hash(spec));
+        self.foliage_pipelines
+            .borrow_mut()
+            .get_or_build(cache_key, spec, self.slots_hash, || {
+                self.build_foliage_pipeline(gpu, &key, spec, mode)
+            })
+    }
+
+    /// Composes, validates and builds one foliage render pipeline (see
+    /// [`pipeline_for_foliage`](Self::pipeline_for_foliage)).
+    fn build_foliage_pipeline(
+        &self,
+        gpu: &GpuContext,
+        key: &VariantKey,
+        spec: &PipelineSpec,
+        mode: u32,
+    ) -> Result<Arc<wgpu::RenderPipeline>, RaaError> {
+        let wgsl = self
+            .composer
+            .compose_foliage(&self.fns, key, mode)
+            .map_err(shader_error)?;
+        Composer::validate(&wgsl).map_err(shader_error)?;
+        let device = gpu.device();
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raa.lit.foliage.variant"),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raa.lit.foliage.pipeline_layout"),
+            bind_group_layouts: &[
+                Some(&self.frame_layout),
+                Some(&self.opaque_lighting_layout),
+                Some(&self.foliage_layout),
+            ],
+            immediate_size: 0,
+        });
+        let buffers = vertex_buffer_layouts();
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raa.lit.foliage.pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: spec.cull,
+                ..Default::default()
+            },
+            depth_stencil: spec.depth.clone(),
+            multisample: wgpu::MultisampleState {
+                count: key.msaa,
+                mask: !0,
+                alpha_to_coverage_enabled: spec.alpha_to_coverage,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &spec.color_targets,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        Ok(Arc::new(pipeline))
+    }
 }
 
 /// The group-0 bind group: `buffers` (frame, materials, extras, instance records) at
@@ -1074,6 +1346,49 @@ fn whole(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
         binding,
         resource: buffer.as_entire_binding(),
     }
+}
+
+/// The group-0 layout of the foliage appearance compute pipeline: bindings 0-7 of
+/// `frame_layout_entries` with `COMPUTE` visibility. Binding 8 (the vertex-only previous
+/// records) is left out so the compute group keeps six storage buffers.
+fn compute_frame_layout(gpu: &GpuContext) -> wgpu::BindGroupLayout {
+    let mut all = frame_layout_entries();
+    let entries = &mut all[..8];
+    for entry in entries.iter_mut() {
+        entry.visibility = wgpu::ShaderStages::COMPUTE;
+    }
+    gpu.device()
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raa.lit.compute_frame_layout"),
+            entries,
+        })
+}
+
+/// A compute group 0 over the renderer's live frame, material, extras and instance buffers,
+/// its current texture atlas and material data (bindings 0-7 of `frame_layout_entries`).
+fn create_material_compute_group(
+    gpu: &GpuContext,
+    layout: &wgpu::BindGroupLayout,
+    buffers: [&wgpu::Buffer; 4],
+    textures: &TextureAtlas,
+    data: &MaterialData,
+) -> wgpu::BindGroup {
+    let [frame, materials, extras, instances] = buffers;
+    let [atlas, sampler, rects] = textures.bind_entries();
+    gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raa.lit.material_compute_group"),
+        layout,
+        entries: &[
+            whole(0, frame),
+            whole(1, materials),
+            whole(2, extras),
+            atlas,
+            sampler,
+            rects,
+            data.bind_entry(),
+            whole(7, instances),
+        ],
+    })
 }
 
 /// Writes the part of `bytes` that fits `buffer` at offset 0 (nothing when empty).
@@ -1419,6 +1734,129 @@ impl LitHandle {
             .unwrap_or((0, 0))
     }
 
+    /// The immutable source-root triangles of `draws` for `generation`.
+    ///
+    /// Every tuple is `(mesh, material, source_tag, model_to_root, foliage)` in input draw
+    /// order; the triangles of each sub-mesh follow their ascending source index. Source
+    /// positions go to source-root through `model_to_root` and source shading normals
+    /// through its inverse transpose, so they stay independent of proxy geometry. Empty
+    /// draws give no triangles and zero bounds; unknown or removed mesh ids, non-finite or
+    /// singular transforms and malformed triangles give `foliage.invalid`. The retained
+    /// sources live beside the GPU buffers and only an upload, update or removal replaces
+    /// them, so an intervening pass cannot invalidate a snapshot.
+    ///
+    /// Handoff: 'Evaluate unlit source appearance for foliage baking' calls
+    /// [`LitHandle::foliage_source`], which today returns the retained source-root
+    /// triangles, bounds, `root_world` and `generation` of the ordered draw tuples.
+    /// Handoff: 'Publish completed foliage assets in the renderer' calls
+    /// [`LitHandle::foliage_source`] with the ordered mesh/material/tag/transform/foliage
+    /// tuples and receives the same immutable source snapshot for its generation.
+    /// Handoff: 'Expose asynchronous foliage preparation to JavaScript' calls
+    /// [`LitHandle::foliage_source`] after resolving the descriptor's source instance
+    /// handles, keeping its source draw materials separate from the compiled LOD1 material.
+    pub fn foliage_source(
+        &self,
+        draws: &[(MeshId, MaterialId, u32, Mat4, bool)],
+        root_world: Mat4,
+        generation: u32,
+    ) -> Result<FoliageSource, RaaError> {
+        if draws.is_empty() {
+            return Ok(FoliageSource {
+                triangles: Vec::new(),
+                min: [0.0; 3],
+                max: [0.0; 3],
+                root_world,
+                generation,
+            });
+        }
+        source_normal_matrix(&root_world, "root_world")?;
+        let s = self.shared.borrow();
+        // The snapshot is reserved once at its exact size, fallibly: growing it by pushes
+        // held the old and the doubled list at once (up to three times the snapshot), and
+        // a refused growth aborted the wasm module instead of returning an error.
+        let total = draws.iter().fold(0usize, |sum, draw| {
+            let count = s.meshes.source(draw.0).map_or(0, |(_, _, count)| count);
+            sum.saturating_add(count as usize / 3)
+        });
+        // 108 B per `SourceTriangle`: 281 808 720 B for the 2 609 340-triangle sample tree.
+        crate::foliage_bake::report_foliage_stage(
+            "source snapshot",
+            total.saturating_mul(std::mem::size_of::<SourceTriangle>()),
+            total,
+        );
+        let mut triangles: Vec<SourceTriangle> = Vec::new();
+        triangles.try_reserve_exact(total).map_err(|_| {
+            foliage_invalid(format!(
+                "foliage source of {total} triangles needs {} bytes the heap cannot hold",
+                total.saturating_mul(std::mem::size_of::<SourceTriangle>())
+            ))
+        })?;
+        let mut bounds = Aabb::EMPTY;
+        for &(mesh, material, source_tag, model_to_root, foliage) in draws {
+            let normal_matrix = source_normal_matrix(&model_to_root, "model_to_root")?;
+            let (source, first, count) = s
+                .meshes
+                .source(mesh)
+                .ok_or_else(|| foliage_invalid(format!("mesh {} is not uploaded", mesh.0)))?;
+            let start = first as usize;
+            let end = start
+                .checked_add(count as usize)
+                .filter(|&end| end <= source.base.indices.len())
+                .ok_or_else(|| {
+                    foliage_invalid(format!(
+                        "mesh {} range {start}..+{count} leaves its index buffer",
+                        mesh.0
+                    ))
+                })?;
+            let indices = &source.base.indices[start..end];
+            if !indices.len().is_multiple_of(3) {
+                return Err(foliage_invalid(format!(
+                    "mesh {} sub-mesh index count {count} is not a multiple of 3",
+                    mesh.0
+                )));
+            }
+            for triangle in indices.as_chunks::<3>().0 {
+                let index = [triangle[0], triangle[1], triangle[2]];
+                let positions = [
+                    source_position(source, index[0], &model_to_root)?,
+                    source_position(source, index[1], &model_to_root)?,
+                    source_position(source, index[2], &model_to_root)?,
+                ];
+                for position in positions {
+                    bounds.include(Vec3::from_array(position));
+                }
+                triangles.push(SourceTriangle {
+                    positions,
+                    normals: [
+                        source_normal(source, index[0], normal_matrix)?,
+                        source_normal(source, index[1], normal_matrix)?,
+                        source_normal(source, index[2], normal_matrix)?,
+                    ],
+                    uv: [
+                        source_uv(source, index[0])?,
+                        source_uv(source, index[1])?,
+                        source_uv(source, index[2])?,
+                    ],
+                    material: material.0,
+                    source_tag,
+                    foliage,
+                });
+            }
+        }
+        let (min, max) = if triangles.is_empty() {
+            ([0.0; 3], [0.0; 3])
+        } else {
+            (bounds.min.to_array(), bounds.max.to_array())
+        };
+        Ok(FoliageSource {
+            triangles,
+            min,
+            max,
+            root_world,
+            generation,
+        })
+    }
+
     /// The buffers of sub-mesh `mesh` with its range and lit mesh vertex count; `None` for
     /// an unknown or removed id. Resolves the given id itself, never the LOD selection.
     /// The key changes whenever the lit mesh's buffers are recreated by upload or update.
@@ -1556,6 +1994,36 @@ impl LitHandle {
         self.shared.borrow().frame_layout.clone()
     }
 
+    /// The group-1 lighting layout of the lit pipelines (the bake binds the pipeline's
+    /// lighting resources to it).
+    pub(crate) fn lighting_layout(&self) -> wgpu::BindGroupLayout {
+        self.shared.borrow().lighting_layout.clone()
+    }
+
+    /// A group 0 over the bake's own buffers and this renderer's atlas bindings.
+    pub(crate) fn bake_frame_bind_group(
+        &self,
+        gpu: &GpuContext,
+        buffers: [&wgpu::Buffer; 5],
+    ) -> wgpu::BindGroup {
+        self.shared.borrow().bake_frame_bind_group(gpu, buffers)
+    }
+
+    /// Binds sub-mesh `mesh` and the bake's id stream into `pass`; returns its index count.
+    pub(crate) fn bake_bind_mesh(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        mesh: MeshId,
+        ids: &wgpu::Buffer,
+    ) -> Result<u32, RaaError> {
+        self.shared.borrow().bake_bind_mesh(pass, mesh, ids)
+    }
+
+    /// The local-space bounds of sub-mesh `mesh` (used by the billboard bake framing).
+    pub(crate) fn mesh_bounds(&self, mesh: MeshId) -> Option<Aabb> {
+        self.shared.borrow().mesh_bounds(mesh)
+    }
+
     /// A clone of the renderer's S10 `FrameGpu` uniform buffer: `FRAME_GPU_SIZE` (768) bytes,
     /// usage UNIFORM | COPY_DST. It is created once in `LitShared::new`, rewritten by every
     /// [`LitRenderer::prepare`] (one per viewport, before that viewport's submission) and
@@ -1592,6 +2060,52 @@ impl LitHandle {
     /// each frame rather than keeping it.
     pub fn frame_bind_group(&self) -> wgpu::BindGroup {
         self.shared.borrow().frame_bind_group.clone()
+    }
+
+    /// The WGSL source of material function `id`, after the canonical-id mapping the
+    /// pipeline cache uses (`canonical_fn`): a clone of the registry entry's
+    /// source, or `None` when `id` is unknown. No borrow of the shared state outlives it.
+    ///
+    /// Handoff: cards 'Assemble stochastic foliage and its volume' and 'Run differentiable
+    /// foliage optimization' reach this method only through `sample_foliage_albedo`
+    /// (`crates/raa-lit/src/foliage_appearance.rs`); it gives that compute pass the source
+    /// material function of its native generation.
+    pub fn material_fn_source(&self, id: MaterialFnId) -> Option<String> {
+        let s = self.shared.borrow();
+        s.fns
+            .get(s.canonical_fn(id))
+            .map(|entry| entry.wgsl.clone())
+    }
+
+    /// The compute-visible group 0 of the foliage appearance pipeline: a new layout with
+    /// bindings 0-7 of `frame_layout_entries` at `COMPUTE` visibility (binding 8, the
+    /// vertex-only previous records, is left out) and a bind group over the renderer's live
+    /// frame, material, extras and instance buffers, its current texture atlas and material
+    /// data. Fetch the pair again for each submission: the atlas can replace its bindings.
+    ///
+    /// Handoff: cards 'Assemble stochastic foliage and its volume' and 'Run differentiable
+    /// foliage optimization' reach this method only through `sample_foliage_albedo`
+    /// (`crates/raa-lit/src/foliage_appearance.rs`); it binds the renderer's live material
+    /// resources to that compute pass.
+    pub fn material_compute_group(
+        &self,
+        gpu: &GpuContext,
+    ) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+        let s = self.shared.borrow();
+        let layout = compute_frame_layout(gpu);
+        let group = create_material_compute_group(
+            gpu,
+            &layout,
+            [
+                &s.frame_buffer,
+                &s.material_buffer,
+                &s.extras_buffer,
+                &s.instance_storage,
+            ],
+            &s.textures,
+            &s.data,
+        );
+        (layout, group)
     }
 
     /// The render pipeline of shader variant `key` with the fixed-function state `spec`:
@@ -1640,6 +2154,101 @@ impl LitHandle {
     pub fn draw_is_posed(&self, mesh: MeshId) -> bool {
         let s = self.shared.borrow();
         s.posed_binding(s.select.mesh_binding(mesh).1).is_some()
+    }
+
+    /// Installs (`Some`) or clears (`None`) the immutable foliage resource generation of
+    /// `material`. The association keeps an `Rc` of the generation; a detach removes the
+    /// entry before the caller drops its own reference, so no pipeline or draw can resolve a
+    /// released asset.
+    ///
+    /// Handoff: 'Publish completed foliage assets in the renderer' calls
+    /// [`LitHandle::set_foliage`] with `Some(completed immutable generation)` after GPU
+    /// completion and with `None` before releasing that asset; today it stores or removes the
+    /// `MaterialId`-keyed `Rc<FoliageResources>` association and returns `Ok(())`. This is the
+    /// association entry point the earlier handoff on `FoliageResources::new`
+    /// (`crates/raa-lit/src/foliage_resources.rs:301`) names for that card.
+    pub fn set_foliage(
+        &self,
+        material: MaterialId,
+        resources: Option<Rc<FoliageResources>>,
+    ) -> Result<(), RaaError> {
+        let mut s = self.shared.borrow_mut();
+        match resources {
+            Some(resources) => {
+                s.foliage.insert(material, resources);
+            }
+            None => {
+                s.foliage.remove(&material);
+            }
+        }
+        Ok(())
+    }
+
+    /// The mode rank (m7-foliage-resources: spom 0 to differentiable 5) of the generation
+    /// associated with `material`, or `None` when the material has no foliage resources.
+    pub fn foliage_mode(&self, material: MaterialId) -> Option<u32> {
+        self.shared
+            .borrow()
+            .foliage
+            .get(&material)
+            .map(|resources| resources.params().mode)
+    }
+
+    /// The cached foliage render pipeline of `material` for variant `key` and `spec`:
+    /// composed by `Composer::compose_foliage` for the material's mode and built with the
+    /// layouts [group 0, the S44 opaque group 1 (GI, weather and local lights retained), the
+    /// m7-foliage-resources group 2]. The complete groups 0+1+2 are validated against the
+    /// fragment limits (16 sampled textures, 8 storage buffers) before any pipeline is
+    /// allocated, and the cache is keyed by mode and the actual group-2 layout identity
+    /// beside the variant and spec hash. A material without a generation returns
+    /// `foliage.invalid`; a posed (skinned) draw is refused, because foliage is rest-only.
+    pub fn pipeline_for_foliage(
+        &self,
+        gpu: &GpuContext,
+        mesh: MeshId,
+        key: VariantKey,
+        spec: &PipelineSpec,
+        material: MaterialId,
+    ) -> Result<Arc<wgpu::RenderPipeline>, RaaError> {
+        let s = self.shared.borrow();
+        if s.posed_binding(s.select.mesh_binding(mesh).1).is_some() {
+            return Err(foliage_invalid(format!(
+                "material {} draws a posed foliage mesh {mesh:?}, which foliage never does",
+                material.0
+            )));
+        }
+        let mode = s.foliage.get(&material).map_or_else(
+            || {
+                Err(foliage_invalid(format!(
+                    "material {} has no foliage resources",
+                    material.0
+                )))
+            },
+            |resources| Ok(resources.params().mode),
+        )?;
+        s.pipeline_for_foliage(gpu, key, spec, mode)
+    }
+
+    /// Binds the immutable group 2 of `material`'s foliage generation into `pass` (group 1
+    /// stays the pass's complete opaque lighting group, bound once per pass). A material
+    /// without a generation returns `foliage.invalid` and binds nothing.
+    ///
+    /// Handoff: 'Draw foliage in the opaque prepass and forward pass' calls
+    /// [`LitHandle::bind_foliage`] and [`LitHandle::pipeline_for_foliage`] while recording a
+    /// foliage material in both passes; today `bind_foliage` binds group 2 from the retained
+    /// `FoliageResources`, and `pipeline_for_foliage` returns the cached pipeline whose group 1
+    /// is the S44 opaque layout and whose group 2 is the m7-foliage-resources layout.
+    pub fn bind_foliage<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        material: MaterialId,
+    ) -> Result<(), RaaError> {
+        let s = self.shared.borrow();
+        let resources = s.foliage.get(&material).ok_or_else(|| {
+            foliage_invalid(format!("material {} has no foliage resources", material.0))
+        })?;
+        pass.set_bind_group(2, resources.bind_group(), &[]);
+        Ok(())
     }
 
     /// Stores the S23 tint mode of material `id` (`multiply` by default). Draws of a

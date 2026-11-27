@@ -565,7 +565,9 @@ fn decode_helpers_round_trip_the_packed_vertex() {
     rx.recv().expect("map callback").expect("map");
     let mapped = slice.get_mapped_range().expect("mapped range");
     let decoded: Vec<[f32; 4]> = mapped
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .map(|word| {
             std::array::from_fn(|slot| {
                 f32::from_le_bytes(word[slot * 4..slot * 4 + 4].try_into().expect("four bytes"))

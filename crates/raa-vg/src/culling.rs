@@ -684,7 +684,10 @@ impl CullStats {
         if let Ok(data) = self.staging.slice(..).get_mapped_range() {
             let mut words = [0u32; 12];
             let mut complete = true;
-            for (word, chunk) in words.iter_mut().zip(data.chunks_exact(4)) {
+            for (word, chunk) in words
+                .iter_mut()
+                .zip(data.as_chunks::<4>().0.iter().map(|c| c.as_slice()))
+            {
                 match <[u8; 4]>::try_from(chunk) {
                     Ok(bytes) => *word = u32::from_le_bytes(bytes),
                     Err(_) => complete = false,

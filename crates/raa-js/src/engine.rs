@@ -105,7 +105,7 @@ impl EngineState {
 
     /// Uploads `scratch` as an attributed mesh (one sub-mesh, S10 default attributes) and
     /// returns its new v0 mesh handle. The scratch buffer keeps its capacity.
-    fn upload_scratch(&mut self, gpu: &GpuContext) -> Result<u32, RaaError> {
+    pub(crate) fn upload_scratch(&mut self, gpu: &GpuContext) -> Result<u32, RaaError> {
         let mesh = AttributedMesh::from_mesh(std::mem::take(&mut self.scratch));
         let uploaded = self.lit.upload(gpu, &mesh);
         let lit = match uploaded {
@@ -307,6 +307,11 @@ impl WebApp for EngineApp {
                 )
             });
         prepare_sky_view(s, 0, size)?;
+        // M6 group preparation: after dirty-group rebuilding and the installed camera,
+        // before lit.prepare.
+        s.prepare_billboard_groups(0)?;
+        // M7 foliage groups: beside the billboard groups, after the same camera, before lit.
+        s.prepare_foliage_groups(0)?;
         crate::trace::prepare_view(s, 0, input.size)?;
         // Viewport 0 of the invocation; split views select their slot in the callback.
         let discontinuity = s.scene_invocation.prepare(0);
@@ -365,9 +370,9 @@ fn retire_sky_views(st: &mut EngineState) -> Result<(), RaaError> {
         .get::<api::ViewsState>()
         .map_or(1, |v| v.viewports().len());
     if let Some(sky) = st.features.get::<raa_sky::SkyHandle>() {
-        for view in count..4 {
+        for (view, previous) in st.view_cameras.iter_mut().enumerate().skip(count) {
             sky.remove_view(view as u32)?;
-            st.view_cameras[view] = None;
+            *previous = None;
         }
     }
     Ok(())
@@ -417,6 +422,14 @@ impl Engine {
         let mut guard = self.state.borrow_mut();
         let s = guard.as_mut().ok_or_else(disposed)?;
         f(runtime.gpu(), s).map_err(|e| js_err(&e))
+    }
+
+    /// Returns owned handles to the live GPU and shared state. Async callers borrow the
+    /// state only for submission and publication, leaving it available between awaits.
+    pub(crate) fn bake_context(&self) -> Result<(GpuContext, Shared), JsValue> {
+        let runtime = self.runtime.as_ref().ok_or_else(disposed)?;
+        runtime.gpu().ensure_live().map_err(|e| js_err(&e))?;
+        Ok((runtime.gpu().clone(), Rc::clone(&self.state)))
     }
 
     /// Opens one scene invocation: clear the observation and open the renderer's index.
