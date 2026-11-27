@@ -143,12 +143,19 @@ impl LocalLight {
     /// `LocalLights::write_gpu` attaches this to its ascending `LightHandle` registry;
     /// handles, radius and shadows stay outside the S10 record.
     pub(crate) fn write_gpu(self, out: &mut [u8; raa_shader::LIGHT_GPU_SIZE]) {
-        self.write_gpu_tiered(0.0, out);
+        self.write_gpu_tiered(0.0, None, out);
     }
 
     /// As [`LocalLight::write_gpu`] with the forward radius of a tiered point or spot light in
-    /// the width lane (those kinds have no rectangle; 0 = forward everywhere, light_cutoff.rs).
-    pub(crate) fn write_gpu_tiered(self, forward_radius: f32, out: &mut [u8; raa_shader::LIGHT_GPU_SIZE]) {
+    /// the width lane (those kinds have no rectangle; 0 = forward everywhere, light_cutoff.rs)
+    /// and, for a point or spot light, `shadow_slot + 1` in the height lane (0 = unshadowed): the
+    /// slot of its cached cube faces in the local shadow array (group 1 binding 22).
+    pub(crate) fn write_gpu_tiered(
+        self,
+        forward_radius: f32,
+        shadow_slot: Option<u32>,
+        out: &mut [u8; raa_shader::LIGHT_GPU_SIZE],
+    ) {
         // Compute in f64 to avoid intermediate overflow; extremely small positive
         // ranges saturate at the largest finite GPU value instead of emitting infinity.
         let inverse_range_squared =
@@ -177,6 +184,8 @@ impl LocalLight {
         out[52..56].copy_from_slice(&self.kind.rank().to_le_bytes());
         if self.kind.rank() < 2 {
             out[56..60].copy_from_slice(&forward_radius.to_le_bytes());
+            let shadow = shadow_slot.map_or(0.0, |slot| (slot + 1) as f32);
+            out[60..64].copy_from_slice(&shadow.to_le_bytes());
         }
     }
 

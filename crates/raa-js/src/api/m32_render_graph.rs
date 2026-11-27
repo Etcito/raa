@@ -156,6 +156,7 @@ pub(crate) mod web {
         crate::spherical_gi::install_for_graph(ctx)?;
         crate::ddgi_gi::install_for_graph(ctx)?;
         crate::nrc_gi::install_for_graph(ctx)?;
+        crate::local_shadow::install_for_graph(ctx)?;
         ctx.features.insert(RenderGraphState {
             executor: GraphExecutor::new(),
             catalog: Catalog::build(),

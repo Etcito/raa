@@ -50,6 +50,7 @@ pub(crate) fn prepare(
     st: &EngineState,
     view: usize,
 ) -> Result<(), RaaError> {
+    crate::local_shadow::prepare(st, view);
     let Some(handle) = st.features.get::<MeshTraceHandle>() else {
         return Ok(());
     };

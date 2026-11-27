@@ -8,7 +8,7 @@ struct LightGpu {
     cos_inner: f32,                 // 48
     kind: u32,                      // 52: point 0, spot 1, directional 2, area 3
     width: f32,                     // 56: full extent in metres
-    height: f32,                    // 60: full extent in metres
+    height: f32,                    // 60: full extent in metres (area); point/spot: shadow slot + 1, 0 = none
 }
 
 struct FrameGpu {
@@ -187,6 +187,9 @@ struct RaaAreaStochasticGpu { lights: array<vec4<u32>, 2>, weights: array<vec4<f
 @group(1) @binding(19) var<uniform> raa_area_stochastic: RaaAreaStochasticGpu;
 // 20: the Rgba16Float viewport mask; slot s is layer s / 4, channel s % 4.
 @group(1) @binding(20) var raa_area_shadow_mask: texture_2d_array<f32>;
+// 22: cached local-light cube shadows (R32Float): layer 6 x slot + face (+X, -X, +Y, -Y, +Z, -Z),
+// texel = distance from the light to the first occluder, 0 = not baked (read as unoccluded).
+@group(1) @binding(22) var raa_local_shadow_map: texture_2d_array<f32>;
 // The generated prelude appends weather_lighting.wgsl
 // exactly once for the fragment-only texture/uniform bindings 15/16; no added storage.
 

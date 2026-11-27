@@ -184,7 +184,25 @@ fn slot_texture_fits(slot: u32, texture: &wgpu::Texture) -> bool {
         }
 }
 
-/// The twelve texture bindings of group 1.
+/// Largest number of shadow-casting point/spot lights (`shadows: true`) with a cached cube
+/// shadow map: slot `s` holds faces `6 s .. 6 s + 5` of the local shadow array (binding 22).
+/// Further shadow-casting lights stay unshadowed.
+pub const MAX_LOCAL_SHADOWS: usize = 32;
+
+/// One shadow-casting local light, as raa-lit assigns it: the stable `slot` of its cube faces in
+/// the local shadow array (its GPU record carries `slot + 1` in the height lane), the dense record
+/// `index`, and what the bake needs (world position, range and the emitter radius `near`: shadow
+/// rays start that far from the light, so the light's own housing does not shadow it).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LocalShadowSlot {
+    pub slot: u32,
+    pub index: u32,
+    pub position: [f32; 3],
+    pub range: f32,
+    pub near: f32,
+}
+
+/// The thirteen texture bindings of group 1.
 #[derive(Clone, Debug, PartialEq)]
 struct Views<V> {
     shadow_map: V,
@@ -199,6 +217,8 @@ struct Views<V> {
     gi_screen: V,
     gi_volume: V,
     area_shadow_mask: V,
+    /// Binding 22: the cached local-light cube shadow distances (R32Float array, 0 = not baked).
+    local_shadow: V,
 }
 
 /// Which group-1 binding set a bind group is built over: the pre-P4 base set (S38), the
@@ -411,6 +431,16 @@ impl<V: Clone + PartialEq> State<V> {
         self.area_table = [0; AREA_STOCHASTIC_GPU_SIZE];
     }
 
+    /// Assigns the local shadow array (binding 22); `take_pending` compares it with the bound one.
+    fn set_local_shadow(&mut self, view: V) {
+        self.views.local_shadow = view;
+    }
+
+    /// Restores the 1x1 dummy (0 = not baked: every shadowed light reads as unoccluded).
+    fn clear_local_shadow(&mut self) {
+        self.views.local_shadow = self.dummies.local_shadow.clone();
+    }
+
     /// The view assigned to the forward-class group-1 `slot`, or None outside the fixed set
     /// (0, 3, 7, 8, 9, 10, 14, 15, 20).
     fn slot_view(&self, slot: u32) -> Option<&V> {
@@ -569,10 +599,11 @@ fn uniform_entry(binding: u32, size: usize) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// The full S44 group-1 binding set, ascending: 0..=21. Bindings 14, 17 and 18 are the GI
+/// The full S44 group-1 binding set, ascending: 0..=22. Bindings 14, 17 and 18 are the GI
 /// screen texture, the volume atlas and the 96 B volume params; 19 and 20 are the 80 B area
-/// stochastic table and the two-layer area shadow mask.
-fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 22] {
+/// stochastic table and the two-layer area shadow mask; 22 is the local-light cube shadow array
+/// (R32Float distances, read with textureLoad only).
+fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 23] {
     use wgpu::TextureSampleType as S;
     use wgpu::TextureViewDimension as D;
     let filterable = S::Float { filterable: true };
@@ -608,6 +639,10 @@ fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 22] {
                 min_binding_size: NonZeroU64::new(16),
             },
             count: None,
+        },
+        22 => wgpu::BindGroupLayoutEntry {
+            visibility: fragment,
+            ..texture_entry(22, S::Float { filterable: false }, D::D2Array)
         },
         index if index < 14 => base[index],
         index => base[index - 1],
@@ -869,6 +904,14 @@ fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
         AREA_SHADOW_MASK_LAYERS,
         &f16_texel(&[1.0; 4]),
     );
+    // Binding 22: one zero texel = "not baked", so a shadowed light reads as unoccluded.
+    let local_shadow = dummy_texture(
+        gpu,
+        "raa-pipeline.dummy.local_shadow",
+        wgpu::TextureFormat::R32Float,
+        1,
+        &0.0f32.to_le_bytes(),
+    );
     Views {
         shadow_map: view_of(&shadow, D::D2Array),
         env_specular: view_of(&env, D::Cube),
@@ -882,6 +925,7 @@ fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
         gi_screen: view_of(&gi_screen, D::D2),
         gi_volume: view_of(&gi_volume, D::D3),
         area_shadow_mask: view_of(&area_mask, D::D2Array),
+        local_shadow: view_of(&local_shadow, D::D2Array),
     }
 }
 
@@ -920,6 +964,8 @@ pub struct LightingResources {
     spherical_dummy: wgpu::Buffer,
     spherical_gi: Option<(wgpu::Buffer, wgpu::Buffer)>,
     spherical_dirty: bool,
+    /// The shadow-casting local lights of this frame (raa-lit `light.tiles` publishes them).
+    local_shadow_slots: Vec<LocalShadowSlot>,
     state: State<wgpu::TextureView>,
 }
 
@@ -1042,6 +1088,7 @@ impl LightingResources {
             spherical_dummy,
             spherical_gi: None,
             spherical_dirty: false,
+            local_shadow_slots: Vec::new(),
             state,
         }
     }
@@ -1382,6 +1429,32 @@ impl LightingResources {
         Ok(())
     }
 
+    /// Publishes the shadow-casting local lights of this frame (raa-lit, with the light records).
+    pub fn set_local_shadow_slots(&mut self, slots: &[LocalShadowSlot]) {
+        if self.local_shadow_slots != slots {
+            self.local_shadow_slots.clear();
+            self.local_shadow_slots.extend_from_slice(slots);
+        }
+    }
+
+    /// The shadow-casting local lights last published (slot order is not guaranteed).
+    pub fn local_shadow_slots(&self) -> &[LocalShadowSlot] {
+        &self.local_shadow_slots
+    }
+
+    /// Binds the cached local-light cube shadow array (binding 22): an R32Float D2Array view
+    /// with 6 layers per slot (face order +X, -X, +Y, -Y, +Z, -Z), texel = distance from the
+    /// light to the first occluder, 0 = not baked. The bind group is rebuilt at the next
+    /// `upload` only when the view differs from the bound one.
+    pub fn set_local_shadow_map(&mut self, view: wgpu::TextureView) {
+        self.state.set_local_shadow(view);
+    }
+
+    /// Restores the binding-22 dummy (every shadowed light unoccluded).
+    pub fn clear_local_shadow_map(&mut self) {
+        self.state.clear_local_shadow();
+    }
+
     /// The 80-byte `RaaAreaStochasticGpu` uniform (group 1 binding 19), `UNIFORM | COPY_DST`.
     pub fn area_stochastic_buffer(&self) -> &wgpu::Buffer {
         &self.area_table_buffer
@@ -1619,6 +1692,7 @@ fn build_bind_group(
         resources.push((19, area.as_entire_binding()));
         resources.push((20, R::TextureView(&views.area_shadow_mask)));
         resources.push((21, spherical.as_entire_binding()));
+        resources.push((22, R::TextureView(&views.local_shadow)));
         resources.sort_by_key(|(binding, _)| *binding);
     }
     if set == GroupSet::Opaque {
@@ -1656,6 +1730,7 @@ mod tests {
             gi_screen: 8,
             gi_volume: 9,
             area_shadow_mask: 10,
+            local_shadow: 11,
         }
     }
 
@@ -1705,7 +1780,7 @@ mod tests {
         let entries = layout_entries();
         assert_eq!(LOCAL_LIGHTS_SIZE, 16384);
         let bindings: Vec<u32> = entries.iter().map(|entry| entry.binding).collect();
-        assert_eq!(bindings, (0..=21).collect::<Vec<u32>>(), "full S44 set");
+        assert_eq!(bindings, (0..=22).collect::<Vec<u32>>(), "full S44 set");
         for entry in &entries {
             assert_eq!(entry.count, None);
             assert_eq!(
@@ -2229,8 +2304,8 @@ mod tests {
         assert_eq!(base, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16]);
         let full = layout_entries();
         let bindings: Vec<u32> = full.iter().map(|entry| entry.binding).collect();
-        assert_eq!(bindings, (0..=21).collect::<Vec<u32>>());
-        for binding in [14, 17, 18, 19, 20, 21] {
+        assert_eq!(bindings, (0..=22).collect::<Vec<u32>>());
+        for binding in [14, 17, 18, 19, 20, 21, 22] {
             let entry = full.iter().find(|entry| entry.binding == binding);
             let visibility = entry.map(|entry| entry.visibility);
             assert_eq!(
@@ -2242,11 +2317,11 @@ mod tests {
     }
 
     #[test]
-    fn full_layout_fragment_counts_are_12_textures_2_samplers_and_7_uniforms() {
+    fn full_layout_fragment_counts_are_13_textures_2_samplers_and_7_uniforms() {
         let (textures, samplers, uniforms) = fragment_counts(&layout_entries());
         assert_eq!(
             textures,
-            [0, 3, 5, 7, 8, 9, 10, 13, 14, 15, 17, 20],
+            [0, 3, 5, 7, 8, 9, 10, 13, 14, 15, 17, 20, 22],
             "sampled textures"
         );
         assert_eq!((samplers, uniforms), (2, 7));
@@ -2257,7 +2332,7 @@ mod tests {
         let full = layout_entries();
         let opaque = opaque_layout_entries();
         let bindings: Vec<u32> = opaque.iter().map(|entry| entry.binding).collect();
-        assert_eq!(bindings, (0..=8).chain(11..=21).collect::<Vec<u32>>());
+        assert_eq!(bindings, (0..=8).chain(11..=22).collect::<Vec<u32>>());
         for entry in &opaque {
             let same = full.iter().find(|other| other.binding == entry.binding);
             assert_eq!(Some(entry), same, "binding {}", entry.binding);
@@ -2269,7 +2344,7 @@ mod tests {
         let full = layout_entries();
         let transparent = transparent_layout_entries();
         let bindings: Vec<u32> = transparent.iter().map(|entry| entry.binding).collect();
-        assert_eq!(bindings, (0..=20).collect::<Vec<u32>>());
+        assert_eq!(bindings, (0..=20).chain([22]).collect::<Vec<u32>>());
         for entry in &transparent {
             let same = full.iter().find(|other| other.binding == entry.binding);
             assert_eq!(Some(entry), same, "binding {}", entry.binding);

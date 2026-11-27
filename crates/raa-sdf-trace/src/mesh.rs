@@ -3,6 +3,7 @@
 mod ddgi;
 mod geometry;
 mod hybrid;
+mod local_shadow;
 mod nrc;
 mod pass;
 pub mod spherical;
@@ -14,6 +15,10 @@ pub use ddgi::{
     DdgiWarmup, DdgiWarmupStatus,
 };
 pub use geometry::MeshInput;
+pub use local_shadow::{
+    LOCAL_SHADOW_MAX_JOBS, LOCAL_SHADOW_NAME, LocalShadowFeature, LocalShadowHandle,
+    LocalShadowSettings, LocalShadowState, LocalShadowStats,
+};
 pub use nrc::{
     NRC_FRAME_FEATURE, NRC_GI_NAME, NrcFeature, NrcHandle, NrcSettings, NrcState, NrcStats,
 };

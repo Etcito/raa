@@ -13,6 +13,54 @@ fn raa_local_falloff(distance: f32, range: f32) -> f32 {
     return window * window / max(distance * distance, 0.04);
 }
 
+// Cached cube shadow of a point or spot light with `shadows` (light.height = slot + 1, see
+// raa-sdf-trace mesh/local_shadow.rs, which bakes the faces by tracing the scene BVH from the
+// light). `p` is the receiver, `n` the normal it is lit around (the caller's -N for diffuse
+// transmission). The receiver is pushed 1.5 texels along `n` and compared with a half-texel
+// tolerance, with 2x2 bilinear PCF inside the face. A receiver closer to the light than the bake's
+// near radius (the light's own housing, e.g. a lantern's glass) always passes: every stored
+// distance is at least that radius. A texel of 0 (not baked yet) and a slot outside the bound
+// array read as unoccluded. Only textureLoad: this runs inside the nonuniform light loop.
+fn raa_local_shadow_face(v: vec3<f32>) -> vec4<f32> {
+    let a = abs(v);
+    if a.x >= a.y && a.x >= a.z {
+        if v.x > 0.0 { return vec4<f32>(0.0, -v.z / a.x, -v.y / a.x, a.x); }
+        return vec4<f32>(1.0, v.z / a.x, -v.y / a.x, a.x);
+    }
+    if a.y >= a.z {
+        if v.y > 0.0 { return vec4<f32>(2.0, v.x / a.y, v.z / a.y, a.y); }
+        return vec4<f32>(3.0, v.x / a.y, -v.z / a.y, a.y);
+    }
+    if v.z > 0.0 { return vec4<f32>(4.0, v.x / a.z, -v.y / a.z, a.z); }
+    return vec4<f32>(5.0, -v.x / a.z, -v.y / a.z, a.z);
+}
+
+fn raa_local_shadow(light: LightGpu, p: vec3<f32>, n: vec3<f32>) -> f32 {
+    if light.kind > 1u || light.height < 0.5 { return 1.0; }
+    let slot = u32(light.height + 0.5) - 1u;
+    let layers = textureNumLayers(raa_local_shadow_map);
+    if 6u * slot + 5u >= layers { return 1.0; }
+    let res = f32(textureDimensions(raa_local_shadow_map).x);
+    let d0 = length(p - light.position_range.xyz);
+    // World size of one texel at the receiver's distance (a cube face spans 2 d).
+    let texel = 2.0 * d0 / res;
+    let v = p + n * (1.5 * texel) - light.position_range.xyz;
+    let d = length(v) - 0.5 * texel;
+    let face = raa_local_shadow_face(v);
+    let layer = i32(6u * slot + u32(face.x));
+    let f = (face.yz * 0.5 + 0.5) * res - 0.5;
+    let base = floor(f);
+    let t = f - base;
+    let hi = i32(res) - 1;
+    var lit = vec4<f32>(0.0);
+    for (var k = 0; k < 4; k += 1) {
+        let texel_xy = clamp(vec2<i32>(base) + vec2<i32>(k & 1, k >> 1), vec2<i32>(0), vec2<i32>(hi));
+        let stored = textureLoad(raa_local_shadow_map, texel_xy, layer, 0).x;
+        lit[k] = select(0.0, 1.0, stored == 0.0 || d <= stored);
+    }
+    return mix(mix(lit.x, lit.y, t.x), mix(lit.z, lit.w, t.x), t.y);
+}
+
 fn raa_local_spot(cosine: f32, outer: f32, inner: f32) -> f32 {
     if inner <= outer { return select(0.0, 1.0, cosine >= outer); }
     return smoothstep(outer, inner, cosine);
@@ -228,7 +276,9 @@ fn raa_local_contribution(index: u32, budget: f32, s: MaterialOutput, c: ShadeCt
     if dot(s.normal, direction) <= 0.0 || falloff <= 0.0 { return vec3<f32>(0.0); }
     var visibility = 1.0;
     if !capture {
-        visibility = clamp(raa_slot_local_visibility(index, c.position, s.normal,
+        visibility = raa_local_shadow(light, c.position, s.normal);
+        if visibility <= 0.0 { return vec3<f32>(0.0); }
+        visibility *= clamp(raa_slot_local_visibility(index, c.position, s.normal,
             direction, distance), 0.0, 1.0);
     }
     let radiance = light.color_inv_range_sq.rgb * (falloff * visibility);

@@ -62,7 +62,7 @@ fn raa_dt_color(record: SurfaceMaterialGpu) -> vec3<f32> {
 // multiplies by the albedo): point/spot radiance x falloff x cone x n.l / pi x LocalVisibility,
 // directional radiance x n.l / pi, area radiance x diffuse form factor x window x GI fade (the
 // hero and stochastic shadow tiers of the front term are skipped).
-fn raa_dt_local_contribution(index: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+fn raa_dt_local_contribution(index: u32, budget: f32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let light = raa_local_lights[index];
     if all(light.color_inv_range_sq.rgb == vec3<f32>(0.0)) { return vec3<f32>(0.0); }
     var direction = -light.direction_cos_outer.xyz;
@@ -74,6 +74,12 @@ fn raa_dt_local_contribution(index: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32
         if distance == 0.0 || distance >= light.position_range.w { return vec3<f32>(0.0); }
         direction = to_light / distance;
         falloff = raa_local_falloff(distance, light.position_range.w);
+        // The forward tier and the tile budget of the front term (raa_local_contribution): the
+        // rest of the light reaches the back through the probes read with -N.
+        if light.width > 0.0 {
+            falloff *= 1.0 - smoothstep(0.75 * light.width, light.width, distance);
+        }
+        falloff *= budget;
         if light.kind == 1u {
             falloff *= raa_local_spot(dot(light.direction_cos_outer.xyz, -direction),
                 light.direction_cos_outer.w, light.cos_inner);
@@ -96,7 +102,10 @@ fn raa_dt_local_contribution(index: u32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32
     if n_dot_l <= 0.0 || falloff <= 0.0 { return vec3<f32>(0.0); }
     var visibility = 1.0;
     if !raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE) {
-        visibility = clamp(raa_slot_local_visibility(index, p, n, direction, distance), 0.0, 1.0);
+        // The cube shadow around -N: the lantern's own light inside its near radius stays lit.
+        visibility = raa_local_shadow(light, p, n);
+        if visibility <= 0.0 { return vec3<f32>(0.0); }
+        visibility *= clamp(raa_slot_local_visibility(index, p, n, direction, distance), 0.0, 1.0);
     }
     return light.color_inv_range_sq.rgb * (falloff * visibility * n_dot_l / RAA_DT_PI);
 }
@@ -107,16 +116,19 @@ fn raa_dt_local(p: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> vec3<f32> {
     if raa_frame.light_info.x == 0u { return result; }
     if raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE) {
         for (var index = 0u; index < min(raa_frame.light_info.x, MAX_LOCAL_LIGHTS); index += 1u) {
-            result += raa_dt_local_contribution(index, p, n);
+            result += raa_dt_local_contribution(index, 1.0, p, n);
         }
         return result;
     }
     let tile = vec2<i32>(floor(frag.xy / f32(TILE_SIZE)));
     let count = min(textureLoad(raa_light_tiles, tile, 0, 0).x, TILE_MAX_LIGHTS);
     for (var word = 1u; word <= count; word += 1u) {
-        let index = textureLoad(raa_light_tiles, tile, i32(word), 0).x;
+        // Tile word: index in bits 0..15, 255 x (1 - forward weight) in bits 16..23 (light_tiles.wgsl).
+        let entry = textureLoad(raa_light_tiles, tile, i32(word), 0).x;
+        let index = entry & 0xffffu;
+        let budget = 1.0 - f32((entry >> 16u) & 0xffu) / 255.0;
         if index < min(raa_frame.light_info.x, MAX_LOCAL_LIGHTS) {
-            result += raa_dt_local_contribution(index, p, n);
+            result += raa_dt_local_contribution(index, budget, p, n);
         }
     }
     return result;
