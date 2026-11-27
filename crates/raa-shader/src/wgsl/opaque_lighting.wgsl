@@ -61,22 +61,9 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
     let water = raa_water_unpack(raa_frame.reserved);
     let water_sun = raa_water_sun(water, raa_frame.sun_dir.xyz, in.position);
     var shadow = 1.0;
-    if sun_far < 1.0 && water_sun.under {
-        // Soft rippled penumbra: the visibility averaged over RAA_WATER_SHADOW_TAPS entry points
-        // on a disk around the solved one (raa_water_penumbra), rotated per pixel and per frame
-        // (the camera jitter) for TAA, so the caustics fade into the shadow, not on a line.
-        let radius = raa_water_penumbra(water, in.position);
-        let seed = fract(52.9829189 * fract(dot(in.frag_coord.xy, vec2<f32>(0.06711056, 0.00583715)))
-            + 113.7 * dot(raa_frame.camera_jitter.xy, vec2<f32>(1.0, 1.618)));
-        shadow = 0.0;
-        for (var i = 0u; i < RAA_WATER_SHADOW_TAPS; i++) {
-            let o = raa_water_penumbra_tap(i, seed) * radius;
-            shadow += raa_slot_shadow(water_sun.entry + vec3<f32>(o.x, 0.0, o.y),
-                vec3<f32>(0.0, 1.0, 0.0), in.frag_coord);
-        }
-        shadow /= f32(RAA_WATER_SHADOW_TAPS);
-    } else if sun_far < 1.0 {
-        shadow = raa_slot_shadow(water_sun.entry, in.normal, in.frag_coord);
+    if sun_far < 1.0 {
+        shadow = raa_slot_shadow(water_sun.entry,
+            select(in.normal, vec3<f32>(0.0, 1.0, 0.0), water_sun.under), in.frag_coord);
     }
     shadow = mix(shadow, raa_spherical_sun_visibility, sun_far);
     var ao = 1.0;
