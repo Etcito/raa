@@ -34,11 +34,11 @@ override RAA_TAA_BLEND_MOTION_GAIN: f32 = 0.03;
 override RAA_TAA_BLEND_MIN: f32 = 0.04;
 override RAA_TAA_BLEND_MAX: f32 = 0.5;
 override RAA_TAA_HISTORY_SHARPNESS: f32 = 0.6;
-override RAA_TAA_BLEND_STATIC: f32 = 0.04;
-override RAA_TAA_CLIP_STATIC: f32 = 1.0;
-override RAA_TAA_UPSAMPLE_CONFIDENCE: f32 = 0.0;
-override RAA_TAA_UPSAMPLE_CLIP_SCENE: f32 = 0.0;
-override RAA_TAA_UPSAMPLE_KERNEL: f32 = 0.0;
+override RAA_TAA_BLEND_STATIC: f32 = 0.015;
+override RAA_TAA_CLIP_STATIC: f32 = 3.0;
+override RAA_TAA_UPSAMPLE_CONFIDENCE: f32 = 3.0;
+override RAA_TAA_UPSAMPLE_CLIP_SCENE: f32 = 1.0;
+override RAA_TAA_UPSAMPLE_KERNEL: f32 = 1.0;
 
 @group(0) @binding(0) var<uniform> raa_taa_frame: RaaTemporalFrame;
 @group(0) @binding(1) var<uniform> raa_taa_params: RaaTaaParams;

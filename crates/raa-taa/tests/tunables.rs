@@ -7,7 +7,7 @@ use raa_taa::{TaaFeature, taa_module_source, tunables};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 12] = [
     "filterSharpness",
     "clipTolerance",
     "blendBase",
@@ -15,13 +15,18 @@ const KEYS: [&str; 7] = [
     "blendMin",
     "blendMax",
     "historySharpness",
+    "blendStatic",
+    "clipStatic",
+    "upsampleConfidence",
+    "upsampleClipScene",
+    "upsampleKernel",
 ];
-const DEFAULTS: [f64; 7] = [8.0, 1.25, 0.04, 0.03, 0.04, 0.5, 0.6];
+const DEFAULTS: [f64; 12] = [8.0, 1.25, 0.04, 0.03, 0.04, 0.5, 0.6, 0.015, 3.0, 3.0, 1.0, 1.0];
 
 #[test]
 fn keys_and_defaults_in_table_order() {
     let specs = tunables();
-    assert_eq!(specs.len(), 7);
+    assert_eq!(specs.len(), 12);
     for (i, spec) in specs.iter().enumerate() {
         assert_eq!(spec.key, KEYS[i]);
         assert_eq!(spec.default, DEFAULTS[i]);
@@ -76,6 +81,11 @@ fn module_with_default_overrides_validates() {
         "RAA_TAA_BLEND_MIN",
         "RAA_TAA_BLEND_MAX",
         "RAA_TAA_HISTORY_SHARPNESS",
+        "RAA_TAA_BLEND_STATIC",
+        "RAA_TAA_CLIP_STATIC",
+        "RAA_TAA_UPSAMPLE_CONFIDENCE",
+        "RAA_TAA_UPSAMPLE_CLIP_SCENE",
+        "RAA_TAA_UPSAMPLE_KERNEL",
     ] {
         assert!(source.contains(&format!("override {name}: f32")));
     }

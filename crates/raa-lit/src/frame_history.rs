@@ -150,6 +150,16 @@ mod tests {
     const F: &str = include_str!("../tests/fixtures/frame-history.txt");
     const S: (u32, u32) = (1280, 720);
 
+    #[test]
+    fn jitter_cycle_grows_with_the_upscale_area() {
+        assert_eq!(jitter_phases((1920, 1080), (1920, 1080)), JITTER_PHASES);
+        assert_eq!(jitter_phases((1286, 724), (1920, 1080)), 18);
+        assert_eq!(jitter_phases((960, 540), (1920, 1080)), 32);
+        assert_eq!(jitter_phases((100, 100), (1920, 1080)), 64);
+        assert_eq!(frame_jitter(18, S, true, 18), frame_jitter(0, S, true, 18));
+        assert_ne!(frame_jitter(8, S, true, 18), frame_jitter(0, S, true, 18));
+    }
+
     fn close(a: [f32; 2], b: [f32; 2]) -> bool {
         (a[0] - b[0]).abs() <= 1e-7 && (a[1] - b[1]).abs() <= 1e-7
     }

@@ -157,10 +157,15 @@ mod tests {
                 "blendMotionGain",
                 "blendMin",
                 "blendMax",
-                "historySharpness"
+                "historySharpness",
+                "blendStatic",
+                "clipStatic",
+                "upsampleConfidence",
+                "upsampleClipScene",
+                "upsampleKernel"
             ]
         );
-        let defaults = [8.0, 1.25, 0.04, 0.03, 0.04, 0.5, 0.6];
+        let defaults = [8.0, 1.25, 0.04, 0.03, 0.04, 0.5, 0.6, 0.015, 3.0, 3.0, 1.0, 1.0];
         for (p, d) in p.iter().zip(defaults) {
             assert_eq!(p.kind, ParamKind::Number);
             assert_eq!(p.default, ParamValue::Number(d));

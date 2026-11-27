@@ -37,19 +37,19 @@ static TUNABLES: [TunableSpec; N] = [
         0.6,
         "crates/raa-taa/src/wgsl/taa.wgsl:36",
     ),
-    spec("blendStatic", 0.04, "crates/raa-taa/src/wgsl/taa.wgsl:37"),
-    spec("clipStatic", 1.0, "crates/raa-taa/src/wgsl/taa.wgsl:38"),
+    spec("blendStatic", 0.015, "crates/raa-taa/src/wgsl/taa.wgsl:37"),
+    spec("clipStatic", 3.0, "crates/raa-taa/src/wgsl/taa.wgsl:38"),
     spec(
         "upsampleConfidence",
-        0.0,
+        3.0,
         "crates/raa-taa/src/wgsl/taa.wgsl:39",
     ),
     spec(
         "upsampleClipScene",
-        0.0,
+        1.0,
         "crates/raa-taa/src/wgsl/taa.wgsl:40",
     ),
-    spec("upsampleKernel", 0.0, "crates/raa-taa/src/wgsl/taa.wgsl:41"),
+    spec("upsampleKernel", 1.0, "crates/raa-taa/src/wgsl/taa.wgsl:41"),
 ];
 
 /// The tunables of the `taa` pass.
