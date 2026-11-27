@@ -218,8 +218,8 @@ fn composite_without_a_level_preserves_the_hdr_chain() {
         .poll(wgpu::PollType::wait_indefinitely())
         .unwrap();
     let mapped = slice.get_mapped_range().unwrap();
-    for pixel in mapped.chunks_exact(8) {
-        for channel in pixel.chunks_exact(2).take(3) {
+    for pixel in mapped.as_chunks::<8>().0 {
+        for channel in pixel.as_chunks::<2>().0.iter().take(3) {
             let value = half(u16::from_le_bytes([channel[0], channel[1]]));
             assert!((value - 2.0).abs() < 1e-2, "channel was {value}");
         }
@@ -378,8 +378,8 @@ fn composite_samples_the_current_frame_level() {
             .poll(wgpu::PollType::wait_indefinitely())
             .unwrap();
         let mapped = slice.get_mapped_range().unwrap();
-        for pixel in mapped.chunks_exact(8) {
-            for channel in pixel.chunks_exact(2).take(3) {
+        for pixel in mapped.as_chunks::<8>().0 {
+            for channel in pixel.as_chunks::<2>().0.iter().take(3) {
                 let seen = half(u16::from_le_bytes([channel[0], channel[1]]));
                 assert!(
                     (seen - frame_value).abs() < 1e-2,
