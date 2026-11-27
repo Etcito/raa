@@ -118,9 +118,12 @@ fn resource_stats_json(r: &ResourceStat) -> JsonValue {
 }
 
 /// `lightingInterlace()`: the forward "layers-interlaced" state of the latest submitted frame as
-/// `{ mode, frame, real, phase: [px, py], skipped: string[] }`, null before one. `real` is the R
-/// frame class (n even: the forward evaluated the signals at the phase pixels); `skipped` the
-/// signal pipeline entries a G frame did not record.
+/// `{ mode, frame, real, phase: [px, py], skipped: string[], shadowRate, irradianceRate }`, null
+/// before one. `real` is the R frame class (n even: the forward evaluated the signals at the
+/// phase pixels); `phase` the phase the frame sampled (a G frame's E phase with irradianceRate
+/// "phase60"); `skipped` the signal pipeline entries a G frame did not record; the rates are
+/// those of pass.lighting.reconstruct ("phase" | "real" | "every", "phase30" | "phase60" |
+/// "full").
 pub fn interlace_to_json(state: Option<raa_pipeline::LightingInterlace>) -> JsonValue {
     let Some(state) = state else {
         return JsonValue::Null;
@@ -144,6 +147,28 @@ pub fn interlace_to_json(state: Option<raa_pipeline::LightingInterlace>) -> Json
                     .skipped()
                     .map(|name| JsonValue::String(name.to_string()))
                     .collect(),
+            ),
+        ),
+        (
+            "shadowRate".to_string(),
+            JsonValue::String(
+                match state.signals.shadow {
+                    raa_pipeline::ShadowRate::Phase => "phase",
+                    raa_pipeline::ShadowRate::Real => "real",
+                    raa_pipeline::ShadowRate::Every => "every",
+                }
+                .to_string(),
+            ),
+        ),
+        (
+            "irradianceRate".to_string(),
+            JsonValue::String(
+                match state.signals.irradiance {
+                    raa_pipeline::IrradianceRate::Phase30 => "phase30",
+                    raa_pipeline::IrradianceRate::Phase60 => "phase60",
+                    raa_pipeline::IrradianceRate::Full => "full",
+                }
+                .to_string(),
             ),
         ),
     ])

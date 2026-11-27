@@ -22,7 +22,9 @@ pub use brdf_atlas::{
 };
 pub use env::EnvGpu;
 pub use graph_frame::GraphFrame;
-pub use interlace::{INTERLACE_PHASES, INTERLACE_SHADOW_FULL, LightingInterlace};
+pub use interlace::{
+    INTERLACE_PHASES, InterlaceSignals, IrradianceRate, LightingInterlace, ShadowRate,
+};
 pub use lighting::{
     AREA_SHADOW_MASK_LAYERS, AREA_STOCHASTIC_GPU_SIZE, LightingResources, MAX_STOCHASTIC_LIGHTS,
     WeatherLightingGpu,

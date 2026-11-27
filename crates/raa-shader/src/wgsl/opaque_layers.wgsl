@@ -171,6 +171,30 @@ fn raa_opaque_shadow(in: MaterialInput, s: MaterialOutput) -> f32 {
     return select(shadow, 1.0, unlit);
 }
 
+// The probe irradiance of raa_opaque_signals alone, (e x w, w) (signal rates: E on G frames).
+fn raa_opaque_probe(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
+    let capture = raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE);
+    let unlit = raa_pass_unlit(in.record);
+    if capture || unlit || raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
+        return vec4<f32>(0.0);
+    }
+    var probe = vec4<f32>(0.0);
+    if raa_feature_enabled(RAA_DDGI_GI_FEATURE) {
+        probe = raa_ddgi_evaluate(in.position, s.normal, in.view_dir, in.frag_coord.xy,
+            raa_frame.camera_pos.xyz).diffuse;
+    } else if raa_feature_enabled(RAA_NRC_GI_FEATURE) {
+        let nrc_size = vec2<i32>(textureDimensions(raa_gi_screen));
+        let nrc = textureLoad(raa_gi_screen,
+            clamp(vec2<i32>(in.frag_coord.xy), vec2<i32>(0), nrc_size - vec2<i32>(1)), 0);
+        probe = vec4<f32>(nrc.rgb, select(0.0, 1.0, nrc.a > 0.0));
+    } else if raa_feature_enabled(RAA_SPHERICAL_GI_FEATURE) {
+        probe = raa_spherical_screen(in.position, in.frag_coord.xy,
+            raa_frame.camera_pos.xyz).diffuse;
+    }
+    let w = select(0.0, probe.w, probe.w > 0.0);
+    return vec4<f32>(probe.rgb * w, w);
+}
+
 fn raa_opaque_signals(in: MaterialInput, s: MaterialOutput) -> RaaOpaqueSignals {
     let capture = raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE);
     let unlit = raa_pass_unlit(in.record);

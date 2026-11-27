@@ -18,10 +18,13 @@ use crate::error::{Issue, Severity, Stage};
 use crate::exec::{ExecExtension, FeatureHandles, NodeStats, ResourceStat};
 use crate::plan::{GraphPlan, InputSource, PlanNode};
 use crate::registry::exec_wiring::plan_fns::node_entries;
-use crate::registry::lighting_reconstruct::{DEBUG_VIEWS, TYPE};
+use crate::registry::lighting_reconstruct::{DEBUG_VIEWS, IRRADIANCE_RATES, SHADOW_RATES, TYPE};
 use raa_core::{GpuContext, RaaError};
 use raa_lit::LitHandle;
-use raa_pipeline::{FeaturePass, PrepareCtx, RecordCtx};
+use raa_pipeline::{
+    FeaturePass, InterlaceSignals, IrradianceRate, LightingInterlace, PrepareCtx, RecordCtx,
+    ShadowRate,
+};
 use std::{cell::RefCell, rc::Rc};
 
 const WGSL: &str = include_str!("lighting_reconstruct.wgsl");
@@ -32,6 +35,11 @@ const HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const LAYERS: [&str; 4] = ["layerKd", "layerS0", "layerEm", "layerE"];
 /// The forward lightingOutput the node accepts on its `color` producer.
 const INTERLACED: &str = "layers-interlaced";
+/// The camera jitter sequence length while the node is installed: odd, so that the 8-frame
+/// revisit cycle of the interlaced signals (and the 4/8-frame cycles of the faster rates) gives
+/// every pixel every sub-pixel offset. Restored to the engine default 8 on clear.
+const JITTER_PERIOD: u32 = 15;
+const DEFAULT_JITTER_PERIOD: u32 = 8;
 
 pub fn extension() -> Box<dyn ExecExtension> {
     Box::new(LightingReconstruct::default())
@@ -45,8 +53,9 @@ struct Settings {
     q_miss: f32,
     decay: f32,
     jitter_correct: bool,
-    /// Signal-sweep: s at every pixel of an R frame (forward word bit 6, flags bit 2).
-    shadow_full: bool,
+    /// The forward signal rates the node sets on the lit renderer (`shadowRate`,
+    /// `irradianceRate`; `shadowFull` = shadowRate "real" when shadowRate is "phase").
+    signals: InterlaceSignals,
     debug: u32,
 }
 
@@ -68,7 +77,17 @@ impl Settings {
             q_miss: number("qMiss", 0.3),
             decay: number("decay", 0.98),
             jitter_correct: matches!(value("jitterCorrect"), Some(ParamValue::Bool(true))),
-            shadow_full: matches!(value("shadowFull"), Some(ParamValue::Bool(true))),
+            signals: signals_of(
+                match value("shadowRate") {
+                    Some(ParamValue::Enum(rate)) => rate.as_str(),
+                    _ => SHADOW_RATES[DEFAULT_SHADOW_RATE],
+                },
+                match value("irradianceRate") {
+                    Some(ParamValue::Enum(rate)) => rate.as_str(),
+                    _ => IRRADIANCE_RATES[DEFAULT_IRRADIANCE_RATE],
+                },
+                matches!(value("shadowFull"), Some(ParamValue::Bool(true))),
+            ),
             debug: match value("debug") {
                 Some(ParamValue::Enum(view)) => DEBUG_VIEWS
                     .iter()
@@ -78,6 +97,38 @@ impl Settings {
             },
         }
     }
+}
+
+use crate::registry::lighting_reconstruct::{DEFAULT_IRRADIANCE_RATE, DEFAULT_SHADOW_RATE};
+
+/// The signal rates of the `shadowRate` / `irradianceRate` options; the legacy `shadowFull`
+/// turns shadowRate "phase" into "real".
+fn signals_of(shadow: &str, irradiance: &str, shadow_full: bool) -> InterlaceSignals {
+    let shadow = match shadow {
+        "every" => ShadowRate::Every,
+        "real" => ShadowRate::Real,
+        _ if shadow_full => ShadowRate::Real,
+        _ => ShadowRate::Phase,
+    };
+    let irradiance = match irradiance {
+        "phase60" => IrradianceRate::Phase60,
+        "full" => IrradianceRate::Full,
+        _ => IrradianceRate::Phase30,
+    };
+    InterlaceSignals { shadow, irradiance }
+}
+
+/// The `Params.flags` word of lighting_reconstruct.wgsl for one frame.
+fn frame_flags(valid: bool, interlace: &LightingInterlace) -> u32 {
+    let signals = interlace.signals;
+    let real = interlace.real();
+    u32::from(valid)
+        | (u32::from(real) << 1)
+        | (u32::from(real && signals.shadow == ShadowRate::Real) << 2)
+        | (u32::from(signals.shadow == ShadowRate::Every) << 3)
+        | (u32::from(!real && signals.irradiance == IrradianceRate::Phase60) << 4)
+        | (u32::from(signals.irradiance == IrradianceRate::Full) << 5)
+        | (u32::from(signals.irradiance != IrradianceRate::Phase30) << 6)
 }
 
 /// What the extension reports in `renderGraphStats`.
@@ -92,6 +143,8 @@ struct Report {
 struct LightingReconstruct {
     /// `(node id, entry, report)` of the installed passes.
     nodes: Vec<(String, String, Rc<RefCell<Report>>)>,
+    /// The node set the lit renderer's interlace signals and jitter period (restored on clear).
+    configured: bool,
 }
 
 fn issue(node: &PlanNode, code: &'static str, port: Option<&str>, message: &str, fix: &str) -> Issue {
@@ -218,6 +271,13 @@ impl ExecExtension for LightingReconstruct {
             prepared.push((node, entry, sources, Settings::from_node(node)));
         }
         self.clear(h);
+        // The forward samples the signals at the node's rates from the next prepare on, with an
+        // odd jitter period (one reconstruct node per graph: the first one's rates).
+        if let (Some(lit), Some((_, _, _, settings))) = (h.lit.as_mut(), prepared.first()) {
+            lit.set_interlace_signals(settings.signals);
+            lit.set_camera_jitter_period(JITTER_PERIOD);
+            self.configured = true;
+        }
         let mut pipeline = h.pipeline.borrow_mut();
         for (node, entry, sources, settings) in prepared {
             let report = Rc::new(RefCell::new(Report::default()));
@@ -244,6 +304,13 @@ impl ExecExtension for LightingReconstruct {
     }
 
     fn clear(&mut self, h: &mut FeatureHandles<'_>) {
+        if self.configured {
+            if let Some(lit) = h.lit.as_mut() {
+                lit.set_interlace_signals(InterlaceSignals::default());
+                lit.set_camera_jitter_period(DEFAULT_JITTER_PERIOD);
+            }
+            self.configured = false;
+        }
         let mut pipeline = h.pipeline.borrow_mut();
         for (_, entry, _) in self.nodes.drain(..) {
             let _ = pipeline.remove(&entry);
@@ -446,9 +513,15 @@ impl ReconstructPass {
     }
 
     /// The params uniform (layout of `Params` in lighting_reconstruct.wgsl).
-    fn param_bytes(&self, size: (u32, u32), real: bool, phase: [u32; 2], jitter_px: [f32; 2]) -> [u8; PARAM_BYTES] {
+    fn param_bytes(
+        &self,
+        size: (u32, u32),
+        interlace: &LightingInterlace,
+        jitter_px: [f32; 2],
+    ) -> [u8; PARAM_BYTES] {
         let s = &self.settings;
-        let flags = u32::from(self.valid) | (u32::from(real) << 1) | (u32::from(s.shadow_full) << 2);
+        let flags = frame_flags(self.valid, interlace);
+        let phase = interlace.phase();
         let words: [u32; 16] = [
             size.0,
             size.1,
@@ -498,8 +571,6 @@ impl FeaturePass for ReconstructPass {
 
     fn prepare(&mut self, _ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         self.report.borrow_mut().ran = false;
-        raa_pipeline::INTERLACE_SHADOW_FULL
-            .store(self.settings.shadow_full, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -556,7 +627,7 @@ impl FeaturePass for ReconstructPass {
         } else {
             [0.0; 2]
         };
-        let bytes = self.param_bytes(size, interlace.real(), interlace.phase(), jitter_px);
+        let bytes = self.param_bytes(size, &interlace, jitter_px);
         ctx.gpu.queue().write_buffer(&self.params, 0, &bytes);
         let depth = self
             .source(ctx, 4)
@@ -625,6 +696,35 @@ impl FeaturePass for ReconstructPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signal_options_and_frame_flags() {
+        let rank1 = signals_of("every", "phase60", false);
+        assert_eq!(
+            rank1,
+            InterlaceSignals {
+                shadow: ShadowRate::Every,
+                irradiance: IrradianceRate::Phase60
+            }
+        );
+        assert_eq!(signals_of("phase", "phase30", true).shadow, ShadowRate::Real);
+        assert_eq!(signals_of("every", "full", true).shadow, ShadowRate::Every);
+        assert_eq!(signals_of("phase", "full", false).irradiance, IrradianceRate::Full);
+        // Default rates: valid | real only, as before the rates existed.
+        let old = LightingInterlace::with_signals(true, 4, InterlaceSignals::default());
+        assert_eq!(frame_flags(true, &old), 0b11);
+        // Rank 1: R frame = valid | real | exact s | separate E; G frame adds E sampled.
+        let r = LightingInterlace::with_signals(true, 4, rank1);
+        assert_eq!(frame_flags(true, &r), 1 | 2 | 8 | 64);
+        let g = LightingInterlace::with_signals(true, 5, rank1);
+        assert_eq!(frame_flags(false, &g), 8 | 16 | 64);
+        let rank2 = signals_of("every", "full", false);
+        let g2 = LightingInterlace::with_signals(true, 5, rank2);
+        assert_eq!(frame_flags(true, &g2), 1 | 8 | 32 | 64);
+        let real = signals_of("real", "phase30", false);
+        assert_eq!(frame_flags(true, &LightingInterlace::with_signals(true, 4, real)), 1 | 2 | 4);
+        assert_eq!(frame_flags(true, &LightingInterlace::with_signals(true, 5, real)), 1);
+    }
 
     #[test]
     fn jitter_correction_is_previous_minus_current_in_pixels() {

@@ -16,6 +16,16 @@ pub const TYPE: &str = "pass.lighting.reconstruct";
 /// The `debug` options, in shader code order (0 = off).
 pub const DEBUG_VIEWS: [&str; 6] = ["off", "shadow", "ao", "irradiance", "confidence", "holes"];
 
+/// The `shadowRate` options (raa-pipeline ShadowRate): s at the phase pixel of R frames, at
+/// every pixel of R frames, at every pixel of every frame.
+pub const SHADOW_RATES: [&str; 3] = ["phase", "real", "every"];
+/// The `irradianceRate` options (raa-pipeline IrradianceRate): E at the phase pixel of R frames
+/// (30 Hz), at the phase pixel of every frame (60 Hz interlaced), at every pixel of every frame.
+pub const IRRADIANCE_RATES: [&str; 3] = ["phase30", "phase60", "full"];
+/// Defaults: the signal-sweep rank 1 (s at every pixel every frame, E 1/2 60 Hz interlaced).
+pub const DEFAULT_SHADOW_RATE: usize = 2;
+pub const DEFAULT_IRRADIANCE_RATE: usize = 1;
+
 /// `(key, label, default, source)` of the number parameters; the defaults are the learned
 /// constants of the analytic ablation (`analytic-constants.json`).
 const NUMBERS: [(&str, &str, f64, &str); 6] = [
@@ -70,17 +80,45 @@ fn params() -> Vec<ParamSpec> {
         "",
         "Adds (previous - current) camera jitter to the history reprojection.",
     ));
+    let mut shadow_rate = node_param(
+        "shadowRate",
+        "Sun visibility sampling",
+        "Signals",
+        ParamKind::Enum,
+        ParamValue::Enum(SHADOW_RATES[DEFAULT_SHADOW_RATE].into()),
+        None,
+        None,
+        None,
+        "",
+        "Where the forward evaluates the sun visibility s: \"phase\" one pixel per 2x2 block on R frames (30 Hz), \"real\" every pixel of R frames, \"every\" every pixel of every frame (G frames sample the R frame's cascade maps; shadow.contact runs every frame).",
+    );
+    shadow_rate.options = &SHADOW_RATES;
+    params.push(shadow_rate);
+    let mut irradiance_rate = node_param(
+        "irradianceRate",
+        "Probe irradiance sampling",
+        "Signals",
+        ParamKind::Enum,
+        ParamValue::Enum(IRRADIANCE_RATES[DEFAULT_IRRADIANCE_RATE].into()),
+        None,
+        None,
+        None,
+        "",
+        "Where the forward evaluates the probe irradiance E: \"phase30\" one pixel per 2x2 block on R frames, \"phase60\" one pixel per block on every frame (G frames take the next unvisited phase; the DDGI screen resolve runs every frame), \"full\" every pixel of every frame (the DDGI screen resolve runs at scale 1 every frame). AO stays at the R-frame phase pixel.",
+    );
+    irradiance_rate.options = &IRRADIANCE_RATES;
+    params.push(irradiance_rate);
     params.push(node_param(
         "shadowFull",
-        "Sun visibility at every pixel",
-        "Reconstruction",
+        "Sun visibility at every pixel (legacy)",
+        "Signals",
         ParamKind::Bool,
         ParamValue::Bool(false),
         None,
         None,
         None,
         "",
-        "Signal-sweep study: R frames evaluate s at every pixel (AO and irradiance stay at the phase pixel).",
+        "Signal-sweep study switch: with shadowRate \"phase\", R frames evaluate s at every pixel (= shadowRate \"real\").",
     ));
     let mut debug = node_param(
         "debug",
@@ -135,7 +173,7 @@ impl NodeFamily for LightingReconstruct {
             // 8 inputs + 2 history images, 3 storage outputs (H0', H1', colour), params and frame.
             vec![stage_budget(ShaderStage::Compute, 10, 1, 3, 0, 2)],
         );
-        node.description = "Accumulates the 30 Hz half-resolution signals of forward lightingOutput \"layers-interlaced\" (s, AO, probe irradiance at one phase pixel per 2x2 block on R frames) into a full-resolution history reprojected by the prepass motion, fills G-frame disocclusions from a 12-tap ring, and composites C = d0*s + (kd*E + s0)*a + em. One full-resolution compute dispatch per frame; feeds pass.taa / ssr / fog / tonemap.";
+        node.description = "Accumulates the signals of forward lightingOutput \"layers-interlaced\" into a full-resolution history reprojected by the prepass motion, fills G-frame disocclusions from a 12-tap ring, and composites C = d0*s + (kd*E + s0)*a + em. The node sets the forward's signal rates: by default s at every pixel of every frame (cascade maps at 30 Hz), probe irradiance E at one phase pixel per 2x2 block on every frame (60 Hz interlaced), AO at one phase pixel per block on R frames (30 Hz); and a camera jitter period of 15 while installed. One full-resolution compute dispatch per frame; feeds pass.taa / ssr / fog / tonemap.";
         vec![node]
     }
 }
@@ -165,6 +203,8 @@ mod tests {
                 "qMiss",
                 "decay",
                 "jitterCorrect",
+                "shadowRate",
+                "irradianceRate",
                 "shadowFull",
                 "debug"
             ]

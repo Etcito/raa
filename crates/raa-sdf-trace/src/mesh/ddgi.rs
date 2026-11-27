@@ -1091,7 +1091,7 @@ impl FeaturePass for DdgiPass {
 
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         self.staged = None;
-        let (settings, view, revision) = {
+        let (mut settings, view, revision) = {
             let state = self.state.borrow();
             if !state.active() {
                 drop(state);
@@ -1100,6 +1100,12 @@ impl FeaturePass for DdgiPass {
             }
             (state.settings, state.view, state.revision)
         };
+        // Forward "layers-interlaced" with E at every pixel (IrradianceRate::Full) reads the
+        // screen resolve at every pixel of every frame: resolve at full resolution.
+        let interlace = ctx.lighting.interlace();
+        if interlace.enabled && interlace.signals.irradiance == raa_pipeline::IrradianceRate::Full {
+            settings.resolve_scale = 1;
+        }
         let Some((_, camera)) = view.filter(|(index, _)| *index == 0) else {
             self.unpublish(ctx.lighting);
             return Ok(());
