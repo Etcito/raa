@@ -63,7 +63,7 @@ impl LocalShadowSettings {
             code: "shadow.local_invalid",
             message,
         };
-        if !(64..=1024).contains(&self.resolution) || self.resolution % WORKGROUP != 0 {
+        if !(64..=1024).contains(&self.resolution) || !self.resolution.is_multiple_of(WORKGROUP) {
             return Err(invalid(format!(
                 "resolution must be a multiple of 8 in 64..=1024 (got {})",
                 self.resolution

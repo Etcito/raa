@@ -138,16 +138,9 @@ fn normalized_direction(direction: [f32; 3]) -> Result<[f32; 3], RaaError> {
 }
 
 impl LocalLight {
-    /// Handoff: `LocalLight::write_gpu(self, out: &mut [u8; LIGHT_GPU_SIZE]) -> ()`
-    /// in `crates/raa-lit/src/local_light.rs` encodes a validated world descriptor.
-    /// `LocalLights::write_gpu` attaches this to its ascending `LightHandle` registry;
-    /// handles, radius and shadows stay outside the S10 record.
-    pub(crate) fn write_gpu(self, out: &mut [u8; raa_shader::LIGHT_GPU_SIZE]) {
-        self.write_gpu_tiered(0.0, None, out);
-    }
-
-    /// As [`LocalLight::write_gpu`] with the forward radius of a tiered point or spot light in
-    /// the width lane (those kinds have no rectangle; 0 = forward everywhere, light_cutoff.rs)
+    /// Encodes a validated world descriptor into its S10 record (`LocalLights::write_gpu`
+    /// packs the registry in ascending `LightHandle` order), with the forward radius of a tiered
+    /// point or spot light in the width lane (those kinds have no rectangle; 0 = forward everywhere, light_cutoff.rs)
     /// and, for a point or spot light, `shadow_slot + 1` in the height lane (0 = unshadowed): the
     /// slot of its cached cube faces in the local shadow array (group 1 binding 22).
     pub(crate) fn write_gpu_tiered(
