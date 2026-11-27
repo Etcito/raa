@@ -117,11 +117,27 @@ fn pixel_offset_to_ndc(offset: [f32; 2], size: (u32, u32)) -> [f32; 2] {
     ]
 }
 
+/// Length of the Halton jitter sequence (default 8). The interlaced lighting visits a pixel every
+/// 8 frames (4 phases x 2): with a period of 8 every visit of a pixel has the SAME sub-pixel
+/// offset, so its lighting samples can never be supersampled in time. An odd period (15 for
+/// `pass.lighting.neural`) gives every pixel all the offsets of the sequence.
+static JITTER_PERIOD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(8);
+
+/// Sets the length of the jitter sequence (clamped to 1..=64).
+pub fn set_jitter_period(period: u32) {
+    JITTER_PERIOD.store(period.clamp(1, 64), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The length of the jitter sequence.
+pub fn jitter_period() -> u32 {
+    JITTER_PERIOD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn frame_jitter(frame_index: u64, size: (u32, u32), jitter_consumer: bool) -> [f32; 2] {
     if !jitter_consumer {
         return [0.0; 2];
     }
-    let sample = (frame_index % 8) as u32 + 1;
+    let sample = (frame_index % u64::from(jitter_period())) as u32 + 1;
     let offset = [halton(sample, 2) - 0.5, halton(sample, 3) - 0.5];
     pixel_offset_to_ndc(offset, size)
 }

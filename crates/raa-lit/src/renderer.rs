@@ -1157,6 +1157,16 @@ impl LitRenderer {
         self.camera_jitter = enabled;
     }
 
+    /// Sets the length of the Halton jitter sequence (default 8, see `frame_history`).
+    pub fn set_camera_jitter_period(&mut self, period: u32) {
+        crate::frame_history::set_jitter_period(period);
+    }
+
+    /// The length of the Halton jitter sequence.
+    pub fn camera_jitter_period(&self) -> u32 {
+        crate::frame_history::jitter_period()
+    }
+
     /// Drops the camera history for a viewport absent from the rendered layout.
     pub fn suspend_scene_view(&mut self, view: usize) {
         if view < MAX_VIEWS {

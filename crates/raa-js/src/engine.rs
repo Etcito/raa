@@ -1573,6 +1573,16 @@ impl Engine {
         })
     }
 
+    /// Sets the length of the camera jitter sequence (default 8; 1..=64). The interlaced
+    /// lighting visits a pixel every 8 frames: an odd period gives every pixel every offset.
+    #[wasm_bindgen(js_name = setCameraJitterPeriod)]
+    pub fn set_camera_jitter_period(&mut self, period: u32) -> Result<(), JsValue> {
+        self.with_state(|_, s| {
+            s.lit.set_camera_jitter_period(period);
+            Ok(())
+        })
+    }
+
     /// Releases the GPU objects and the scene; every later call throws `api.disposed`.
     pub fn dispose(&mut self) {
         self.prediction_real = None;
