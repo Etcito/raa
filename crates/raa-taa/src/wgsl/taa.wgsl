@@ -37,6 +37,7 @@ override RAA_TAA_HISTORY_SHARPNESS: f32 = 0.6;
 override RAA_TAA_BLEND_STATIC: f32 = 0.04;
 override RAA_TAA_CLIP_STATIC: f32 = 1.0;
 override RAA_TAA_UPSAMPLE_CONFIDENCE: f32 = 0.0;
+override RAA_TAA_UPSAMPLE_CLIP_SCENE: f32 = 0.0;
 
 @group(0) @binding(0) var<uniform> raa_taa_frame: RaaTemporalFrame;
 @group(0) @binding(1) var<uniform> raa_taa_params: RaaTaaParams;
@@ -173,7 +174,10 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
                 vec2<i32>(output_size) - vec2<i32>(1),
             );
             var clip_color = color;
-            if scaled {
+            // RAA_TAA_UPSAMPLE_CLIP_SCENE >= 0.5 keeps the 3x3 scene samples around the raster
+            // position as the clipping distribution (a box of nine distinct samples instead of
+            // the display neighbours' nearest samples, which repeat at upscaled extents).
+            if scaled && RAA_TAA_UPSAMPLE_CLIP_SCENE < 0.5 {
                 let clip_position = (vec2<f32>(display_neighbor) + vec2<f32>(0.5)) * scene_extent
                     / display_extent + jitter_pixels;
                 let clip_pixel = clamp(vec2<i32>(floor(clip_position)), vec2<i32>(0), scene_size - vec2<i32>(1));

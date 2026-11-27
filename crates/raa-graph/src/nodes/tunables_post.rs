@@ -34,6 +34,12 @@ const TAA: &[Row] = &[
         "Resolve",
         "Upsample confidence",
     ),
+    (
+        "upsampleClipScene",
+        "pass.taa",
+        "Resolve",
+        "Upsample clip from scene samples",
+    ),
 ];
 const SSR: &[Row] = &[
     ("maxSteps", "pass.ssr", "Trace", "Max steps"),
