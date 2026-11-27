@@ -899,6 +899,30 @@ fn normal_uniform(matrix: &[[f32; 4]; 3]) -> [u8; 48] {
     out
 }
 
+/// The CPU mirror of one `foliage_pack.wgsl` texel: `world_to_root` (the
+/// [`world_to_root_normal`] columns) rotates the reference world normal of
+/// `normal_coverage` into a unit source-root normal (zero when degenerate) and the
+/// reference standard-Z `depth` is clamped to 0..=1 into W. The coverage stays in the
+/// copied albedo/coverage layer, so a covered texel is one whose reference wrote a depth
+/// below the clear depth 1.
+pub fn pack_texel(
+    world_to_root: &[[f32; 4]; 3],
+    normal_coverage: [f32; 4],
+    depth: f32,
+) -> [f32; 4] {
+    let [x, y, z, _] = normal_coverage;
+    let n = [0, 1, 2].map(|row| {
+        world_to_root[0][row] * x + world_to_root[1][row] * y + world_to_root[2][row] * z
+    });
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    let n = if len > 1e-6 {
+        n.map(|v| v / len)
+    } else {
+        [0.0; 3]
+    };
+    [n[0], n[1], n[2], depth.clamp(0.0, 1.0)]
+}
+
 /// Converts the reference views into the packed layers of one native foliage generation:
 /// the albedo/coverage array is copied unchanged, and `foliage_pack.wgsl` rotates the
 /// world normals into source-root space and writes the standard-Z depth into W of a new

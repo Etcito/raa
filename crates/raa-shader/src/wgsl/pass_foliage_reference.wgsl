@@ -81,7 +81,10 @@ fn fs_main(v: RaaReferenceVaryings, @builtin(front_facing) front_facing: bool) -
     if (coverage <= 0.0) {
         discard;
     }
-    let depth = v.clip.z / v.clip.w;
+    // The fragment position z is already the standard-Z depth of the viewport (0..1); its w
+    // is 1 / clip w, so dividing by it gave z * clip w, far above 1 for a tree of metres:
+    // frag_depth clamped to the clear depth 1 failed the Less test and left every layer empty.
+    let depth = v.clip.z;
     var out: RaaReferenceTargets;
     out.normal_coverage = vec4<f32>(normalize(surface.normal), coverage);
     out.depth = vec4<f32>(depth, 0.0, 0.0, 0.0);

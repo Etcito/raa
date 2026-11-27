@@ -126,6 +126,10 @@ fn reference_composes_material_targets_and_reuses_the_vertex_path() {
         "coverage is material opacity"
     );
     assert!(reference.contains("surface.base_color"), "albedo is unlit");
+    assert!(
+        reference.contains("let depth = v.clip.z;") && !reference.contains("v.clip.z / v.clip.w"),
+        "the depth is the fragment position z; its w is 1 / clip w, so z / w is not a depth"
+    );
     assert!(!reference.contains("raa_pass_unlit"));
     assert!(!reference.contains("RaaBakeVaryings"));
     assert_ne!(
