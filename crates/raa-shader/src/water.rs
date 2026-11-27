@@ -29,6 +29,9 @@ pub struct WaterBody {
     /// Artistic bend of the sun under the water (raa_water_sun): 0 straight, 1 physical
     /// refraction, more steeper (bounded at half a straight run past the vertical).
     pub sun_bend: f32,
+    /// Artistic distortion of what is seen through the surface (raa_water_transmit_dir):
+    /// 1 physical refraction, more wobbles more, 0 undistorted.
+    pub distortion: f32,
 }
 
 impl Default for WaterBody {
@@ -43,6 +46,7 @@ impl Default for WaterBody {
             ior: 1.33,
             sigma: [0.0; 3],
             sun_bend: 1.0,
+            distortion: 1.0,
         }
     }
 }
@@ -65,7 +69,7 @@ impl WaterBody {
             self.sigma[2],
             if caustics { 1.0 } else { 0.0 },
             self.sun_bend,
-            0.0,
+            self.distortion,
             1.0,
         ]
     }
@@ -286,6 +290,7 @@ mod tests {
         assert_eq!(lanes[12], 1.0);
         assert_eq!(pool().frame_lanes(false)[12], 0.0);
         assert_eq!(lanes[13], 1.0);
+        assert_eq!(lanes[14], 1.0);
     }
 
     /// Flat-floor check of `raa_water_caustic`: splat the sun refracted through a fine grid of

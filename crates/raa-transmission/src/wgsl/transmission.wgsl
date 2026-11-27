@@ -115,7 +115,11 @@ fn raa_slot_transmission(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let n = s.normal;
     let dir = raa_screen_refract(-c.view_dir, n, 1.0 / s.ior);
     let path = raa_screen_submerged(s, c, dir);
-    let uv = raa_screen_uv(c, dir, select(s.thickness, path.x, path.z > 0.0));
+    // Through the scene's water surface the lookup's refraction is scaled by its distortion
+    // (water.wgsl raa_water_transmit_dir); the path and absorption keep the physical one.
+    let look = raa_water_transmit_dir(raa_water_unpack(raa_frame.reserved), c.position, n,
+        -c.view_dir, dir);
+    let uv = raa_screen_uv(c, look, select(s.thickness, path.x, path.z > 0.0));
     let view_depth = -(raa_frame.view * vec4<f32>(c.position, 1.0)).z;
     let lod = raa_screen_lod(s.roughness, raa_frame.viewport.y, s.thickness, view_depth);
     let max_lod = f32(textureNumLevels(raa_opaque_color) - 1u);

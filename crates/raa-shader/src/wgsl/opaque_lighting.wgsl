@@ -64,6 +64,13 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
     if sun_far < 1.0 {
         shadow = raa_slot_shadow(water_sun.entry,
             select(in.normal, vec3<f32>(0.0, 1.0, 0.0), water_sun.under), in.frag_coord);
+        // The caustic lines bite into the shadow near its edge (water.wgsl RAA_WATER_BITE).
+        let bite = raa_water_bite_weight(water_sun.k);
+        if water_sun.under && shadow < 1.0 && bite > 0.0 {
+            let o = water_sun.bite;
+            shadow = max(shadow, bite * raa_slot_shadow(water_sun.entry + vec3<f32>(o.x, 0.0, o.y),
+                vec3<f32>(0.0, 1.0, 0.0), in.frag_coord));
+        }
     }
     shadow = mix(shadow, raa_spherical_sun_visibility, sun_far);
     var ao = 1.0;

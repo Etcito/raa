@@ -10,7 +10,7 @@
 //   [0] level, rms slope, frequency (1/m), time (s)
 //   [1] footprint lo.x, lo.z, hi.x, hi.z
 //   [2] ior, absorption sigma r, g, b (1/m, Beer-Lambert)
-//   [3] caustics on (0/1), sun bend (1 = physical refraction), unused, water present (0/1)
+//   [3] caustics on (0/1), sun bend (1 = physical refraction), distortion (1 = physical), water present (0/1)
 
 struct RaaWater {
     level: f32,
@@ -23,6 +23,7 @@ struct RaaWater {
     sigma: vec3<f32>,
     caustics: bool,
     sun_bend: f32,
+    distortion: f32,
     present: bool,
 }
 
@@ -33,7 +34,7 @@ const RAA_WATER_ANGLE_STEP: f32 = 2.3999632;
 
 fn raa_water_unpack(r: array<vec4<f32>, 4>) -> RaaWater {
     return RaaWater(r[0].x, r[0].y, r[0].z, r[0].w, r[1].xy, r[1].zw, r[2].x, r[2].yzw, r[3].x > 0.5,
-        r[3].y, r[3].w > 0.5);
+        r[3].y, r[3].z, r[3].w > 0.5);
 }
 
 fn raa_water_inside(w: RaaWater, xz: vec2<f32>) -> bool {
@@ -125,10 +126,12 @@ struct RaaWaterSun {
     transmit: f32,
     k: f32,
     sky: f32,
+    // Offset (world xz, m) of the second shadow tap where the caustics bite into the shadow.
+    bite: vec2<f32>,
 }
 
 fn raa_water_sun(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSun {
-    var o = RaaWaterSun(false, p, -sun_dir, 1.0, 1.0, 1.0);
+    var o = RaaWaterSun(false, p, -sun_dir, 1.0, 1.0, 1.0, vec2<f32>(0.0));
     if !w.present || !w.caustics || p.y >= w.level || !raa_water_inside(w, p.xz) { return o; }
     let t = raa_water_refract(sun_dir, vec3<f32>(0.0, 1.0, 0.0), 1.0 / max(w.ior, 1.0));
     if t.y > -1e-3 { return o; }
@@ -141,6 +144,8 @@ fn raa_water_sun(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSun {
         if tw.y < -1e-3 { refracted = tw.xz / tw.y; }
         o.k = raa_water_caustic_at(w, sun_dir, p, sv);
         o.sky = raa_water_sky_caustic(w, w.level - p.y, sv);
+        o.bite = RAA_WATER_BITE * (1.0 - 1.0 / max(w.ior, 1.0)) * max(w.sun_bend, 1.0)
+            * (w.level - p.y) * sv.g;
     }
     var run = mix(straight, refracted, w.sun_bend);
     // Past the vertical by at most half a straight run (along the sun's azimuth).
@@ -153,6 +158,34 @@ fn raa_water_sun(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSun {
     o.to_sun = -dir;
     o.transmit = raa_water_sun_transmittance(w, sun_dir);
     return o;
+}
+
+// Caustics biting into the shadow: a submerged receiver in the shadow also tests the sun at its
+// entry point moved along the ripple's slope there (RaaWaterSun.bite: RAA_WATER_BITE x the
+// sloped refraction's displacement, (1 - 1/ior) x bend x depth x slope), and takes that light
+// in proportion to its caustic concentration, so near a shadow's edge the bright caustic lines
+// reach into the shadow with the pattern's shape instead of stopping on the line.
+const RAA_WATER_BITE: f32 = 2.0;
+
+// Weight of the bitten light at caustic concentration k: 0 at k <= 1, 1 from k = 3.
+fn raa_water_bite_weight(k: f32) -> f32 {
+    return saturate(0.5 * (k - 1.0));
+}
+
+// Refracted view direction that places the transmitted (opaque copy) lookup through the water's
+// surface: the deviation of the rippled refraction `dir` from the flat one is scaled by the
+// distortion lane (1 = physical), so everything seen through the water wobbles visibly; the
+// lookup's offset also grows with the path below the surface (no shift at the waterline).
+// `dir` unchanged off the water surface, without water or at distortion 1.
+fn raa_water_transmit_dir(w: RaaWater, p: vec3<f32>, n: vec3<f32>, incident: vec3<f32>,
+    dir: vec3<f32>) -> vec3<f32> {
+    if !w.present || w.distortion == 1.0 || abs(n.y) <= 0.5 || abs(p.y - w.level) >= 0.05
+        || !raa_water_inside(w, p.xz) { return dir; }
+    let up = vec3<f32>(0.0, sign(n.y), 0.0);
+    let eta = select(max(w.ior, 1.0), 1.0 / max(w.ior, 1.0), n.y > 0.0);
+    let flat_dir = refract(incident, up, eta);
+    if dot(flat_dir, flat_dir) < 1e-6 { return dir; }
+    return normalize(flat_dir + w.distortion * (dir - flat_dir));
 }
 
 // Soft caustics of the sky on a submerged receiver (the sky is an extended source, so its pattern
