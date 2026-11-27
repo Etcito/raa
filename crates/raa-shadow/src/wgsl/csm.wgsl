@@ -54,7 +54,48 @@ fn raa_csm_cascade(
         (clip.z - blocker_depth) / row2_len * tan_angle / max(texel, 1e-6),
         min_texels, 48.0
     );
-    return raa_shadow_pcf(i32(cascade_idx), uv, clip.z, penumbra_texels, res, raa_csm_frame_rotation(frag.xy));
+    // A jittered camera (TAA, reconstruction) resolves the rotated Poisson noise over frames;
+    // without jitter that per-pixel noise stays as a fixed diagonal hatching, so the kernel is
+    // a noise-free tent-weighted grid of bilinear comparisons instead.
+    if any(raa_frame.camera_jitter.xy != vec2<f32>(0.0)) {
+        return raa_shadow_pcf(i32(cascade_idx), uv, clip.z, penumbra_texels, res, raa_csm_frame_rotation(frag.xy));
+    }
+    return raa_csm_grid_pcf(i32(cascade_idx), uv, clip.z, penumbra_texels, res);
+}
+
+fn raa_csm_grid_tap(layer: i32, uv: vec2<f32>, depth: f32, offset_texels: vec2<f32>, res: f32) -> f32 {
+    let coord = clamp(uv + offset_texels / res, vec2<f32>(0.0), vec2<f32>(1.0));
+    return textureSampleCompareLevel(raa_shadow_map, raa_shadow_cmp, coord, layer, depth);
+}
+
+// Noise-free PCF: an n x n grid (n = 4..8, about one tap per texel) of bilinear comparison
+// taps over [-r, r] texels, tent-weighted. The centre and four corners run first; when they
+// agree (whole kernel lit or in umbra) their value is returned.
+fn raa_csm_grid_pcf(layer: i32, uv: vec2<f32>, depth: f32, radius_texels: f32, res: f32) -> f32 {
+    let r = radius_texels;
+    let probe = raa_csm_grid_tap(layer, uv, depth, vec2<f32>(0.0), res)
+        + raa_csm_grid_tap(layer, uv, depth, vec2<f32>(r, r), res)
+        + raa_csm_grid_tap(layer, uv, depth, vec2<f32>(-r, r), res)
+        + raa_csm_grid_tap(layer, uv, depth, vec2<f32>(r, -r), res)
+        + raa_csm_grid_tap(layer, uv, depth, vec2<f32>(-r, -r), res);
+    if (probe == 0.0 || probe == 5.0) {
+        return probe / 5.0;
+    }
+    let n = u32(clamp(ceil(r) + 2.0, 4.0, 8.0));
+    let step = 2.0 * r / f32(n - 1u);
+    var sum = 0.0;
+    var wsum = 0.0;
+    for (var j = 0u; j < n; j = j + 1u) {
+        let y = -r + step * f32(j);
+        let wy = 1.0 - abs(y) / (r + step);
+        for (var i = 0u; i < n; i = i + 1u) {
+            let x = -r + step * f32(i);
+            let w = wy * (1.0 - abs(x) / (r + step));
+            sum = sum + w * raa_csm_grid_tap(layer, uv, depth, vec2<f32>(x, y), res);
+            wsum = wsum + w;
+        }
+    }
+    return sum / max(wsum, 1e-6);
 }
 
 // Per-pixel PCF rotation; when the camera is jittered (TAA, neural reconstruction) it also
