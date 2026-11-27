@@ -550,7 +550,6 @@ impl DdgiFeature {
             batch_ms: 0.0,
             idle_frames: 0,
             rest_ms: [0.0; 2],
-            prev_cost_ms: 0.0,
             starved: 0,
             headroom_ms: 0.0,
             lighting: LightingTrack::default(),
@@ -657,6 +656,8 @@ const FLOOR_SAFETY_MS: f64 = 2.5;
 /// Largest GPU time one runtime update burst may take, whatever the headroom (a misprediction of
 /// the cost model can then not alone break the floor).
 const MAX_BURST_MS: f64 = 10.0;
+/// The screen resolve and other fixed work of this pass kept out of its update estimate.
+const RESOLVE_MS: f64 = 0.5;
 /// With no headroom the smallest batch still runs every this many frames, so GI keeps moving.
 const STARVED_PERIOD: u32 = 4;
 
@@ -788,11 +789,9 @@ struct DdgiPass {
     /// Smoothed GPU time of one update batch (ms), 0 before the first readback.
     batch_ms: f64,
     idle_frames: u32,
-    /// Frame time (ms) of the last two frames without this pass's update (their wall interval
-    /// less the update estimated for them): the rest of the frame the burst must leave room for.
+    /// GPU time (ms) of the last two samples of the frame without this pass: the rest of the
+    /// frame the burst must leave room for.
     rest_ms: [f64; 2],
-    /// Estimated cost (ms) of the update planned by the previous prepare.
-    prev_cost_ms: f64,
     /// Frames since the last burst that was skipped for lack of headroom.
     starved: u32,
     /// Last headroom (ms) the burst was sized for.
@@ -1258,22 +1257,20 @@ impl FeaturePass for DdgiPass {
             }
             Some(_) => 0,
             None => {
-                // Fill the headroom under the 30 fps floor: what is left of the frame after the
-                // slowest of the last two frames' other work, with a margin, capped.
-                let dt_ms = if ctx.dt_s > 0.0 {
-                    (f64::from(ctx.dt_s) * 1000.0).min(250.0)
-                } else {
-                    1000.0 / 60.0
+                // Fill the headroom under the 30 fps floor: the frame's GPU time without this
+                // pass (measured by the pipeline from pass timestamps, one or two frames late;
+                // the slowest of the last two samples), with a margin, capped. Without timestamps
+                // the configured burst budget applies.
+                let others = ctx.lighting.frame_gpu_time().others_ms(DDGI_GI_NAME);
+                ctx.lighting.request_frame_gpu_time();
+                let headroom = match others {
+                    Some(ms) => {
+                        self.rest_ms = [self.rest_ms[1], ms + RESOLVE_MS];
+                        let rest_est = self.rest_ms[0].max(self.rest_ms[1]);
+                        (FRAME_FLOOR_MS - FLOOR_SAFETY_MS - 1.15 * rest_est).min(MAX_BURST_MS)
+                    }
+                    None => f64::from(settings.burst_ms),
                 };
-                // A long gap is an idle view (frames are drawn on demand), not a slow frame.
-                let rest = if dt_ms > 100.0 {
-                    self.rest_ms[1]
-                } else {
-                    (dt_ms - self.prev_cost_ms).max(0.0)
-                };
-                self.rest_ms = [self.rest_ms[1], rest];
-                let rest_est = self.rest_ms[0].max(self.rest_ms[1]);
-                let headroom = (FRAME_FLOOR_MS - FLOOR_SAFETY_MS - 1.15 * rest_est).min(MAX_BURST_MS);
                 self.headroom_ms = headroom.max(0.0);
                 let min_cost = f64::from(floor) * self.ms_per_probe;
                 if headroom >= min_cost {
@@ -1374,11 +1371,6 @@ impl FeaturePass for DdgiPass {
             }
         }
 
-        self.prev_cost_ms = (jobs.len() / 2) as f64 * self.ms_per_probe
-            + extra_jobs
-                .iter()
-                .map(|(j, _)| (j.len() / 2) as f64 * self.ms_per_probe)
-                .sum::<f64>();
         let rotation = self.random_rotation();
         let gpu = self.gpu.as_mut().expect("DDGI pool");
         let mut flags = settings.debug as u32 * 256;
@@ -2359,7 +2351,6 @@ mod tests {
             batch_ms: 0.0,
             idle_frames: 0,
             rest_ms: [0.0; 2],
-            prev_cost_ms: 0.0,
             starved: 0,
             headroom_ms: 0.0,
             lighting: LightingTrack::default(),

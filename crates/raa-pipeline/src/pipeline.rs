@@ -1122,6 +1122,26 @@ impl Pipeline {
         display: crate::ActiveRect,
     ) -> Result<(), RaaError> {
         let gpu = ctx.gpu;
+        // A pass that sizes its work to the frame asked for the pass GPU times: sample every
+        // frame while one is wanted (read back one or two frames late) and publish them.
+        if std::mem::take(&mut self.lighting.frame_gpu_time_mut().wanted)
+            && self.view_rects.is_empty()
+            && self.only_pass.is_none()
+            && gpu.features().contains(wgpu::Features::TIMESTAMP_QUERY)
+        {
+            let count = self.config.passes.iter().filter(|entry| entry.enabled).count();
+            if (1..=MAX_TIMED_PASSES).contains(&count) {
+                let order = self.enabled_order();
+                if let PassGpuTimings::Sample(sample) = self.pass_timings.request(&order) {
+                    let passes: Vec<(String, f64)> = sample
+                        .passes
+                        .iter()
+                        .filter_map(|(name, ms)| ms.map(|ms| (name.clone(), ms)))
+                        .collect();
+                    self.lighting.frame_gpu_time_mut().passes = passes;
+                }
+            }
+        }
         // Display-sized passes validate their own extents. A display-only resize keeps
         // scene-grid histories when the scene extent and view origin stay the same.
         if self.targets.as_ref().is_some_and(|targets| {
