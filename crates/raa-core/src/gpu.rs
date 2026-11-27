@@ -145,14 +145,21 @@ pub struct GpuContext {
     queue: wgpu::Queue,
     summary: AdapterSummary,
     lost: Arc<LostState>,
+    /// Shared by every clone: the device is destroyed when the LAST clone drops (bakes and
+    /// async tasks hold clones; dropping one of them must not destroy the engine's device).
+    _owner: Arc<DeviceOwner>,
 }
 
+/// Destroys the device when dropped (the last [`GpuContext`] clone).
+#[derive(Debug)]
+struct DeviceOwner(#[allow(dead_code)] wgpu::Device);
+
 #[cfg(target_arch = "wasm32")]
-impl Drop for GpuContext {
+impl Drop for DeviceOwner {
     fn drop(&mut self) {
         // The canvas context owns a dedicated device. Destroy it even if a browser object
         // still references it or initialization failed after the device was created.
-        self.device.destroy();
+        self.0.destroy();
     }
 }
 
@@ -233,12 +240,14 @@ impl GpuContext {
         let lost = Arc::new(LostState::default());
         let report = Arc::clone(&lost);
         device.set_device_lost_callback(move |reason, message| report.report(reason, message));
+        let owner = Arc::new(DeviceOwner(device.clone()));
         Ok(GpuContext {
             adapter,
             device,
             queue,
             summary,
             lost,
+            _owner: owner,
         })
     }
 
