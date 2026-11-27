@@ -183,7 +183,8 @@ not a graph is set.
   keeps the cascades and contact. The DDGI probe update always runs.
   `lightingInterlace()` reports the state of the latest submitted frame; lit shaders read it in
   `FrameGpu.temporal.w` and `compute.wgsl` nodes in `rg_frame.interlace` (bit 0 mode, bit 1 R
-  frame, bits 2 and 3 px and py, bits 4-5 `(n / 2) % 4`).
+  frame, bits 2 and 3 px and py, bits 4-5 `(n / 2) % 4`, bits 6-9 the signal rates of
+  `pass.lighting.reconstruct`).
   In this mode the half-resolution signal passes evaluate the phase pixel itself: with
   `pass.ao.gtao` `scale` 2 the AO texel (x, y) is traced (and denoised with depth taps) at pixel
   `2 (x, y) + phase`, and the full-resolution reconstruction copies that texel unchanged at the
@@ -198,20 +199,33 @@ not a graph is set.
   alphas). Inputs: `color`, `layerKd`, `layerS0`, `layerEm`, `layerE` linked from one
   `pass.forward` in `lightingOutput: "layers-interlaced"` (else `graph.reconstruct_source`),
   `depth`, `normal`, `motion` (prepass defaults). Output `color` (Rgba16Float, scene size) feeds
-  `pass.taa` / `pass.ssr` / `pass.fog` / `pass.tonemap` like any chain colour. It keeps a
-  ping-pong history (E rgb, a) / (s, linear view depth, confidence) reprojected by the motion
-  (depth test `|z_hist - z| <= 0.05 z + 0.02`); an R frame blends the phase-pixel samples
-  (guided 2x2 upsample, quality `qMiss` off the phase pixel) with the history by
-  `alpha*q` against `(1 - alpha)*c`; a G frame reuses the history and fills disocclusions
-  from 12 ring taps. Composite: `C = d0*s + (kd*E + s0*vis)*a + em` (sky: `em`), vis from the
+  `pass.taa` / `pass.ssr` / `pass.fog` / `pass.tonemap` like any chain colour. The node sets
+  the forward's signal rates (`shadowRate`, `irradianceRate`, raa-pipeline `InterlaceSignals`,
+  word bits 6..9) and a camera jitter period of 15 while installed (8 again on removal; the base of the automatic
+  jitter cycle, kept odd when upscaling):
+  `shadowRate` `"phase"` (s at the phase pixel of R frames), `"real"` (every pixel of R frames;
+  the legacy `shadowFull: true` maps `"phase"` to it) or `"every"` (default: every pixel of
+  every frame; a G frame samples the cascade maps and matrices its R frame rendered, and
+  `shadow.contact` runs on G frames); `irradianceRate` `"phase30"` (E at the phase pixel of R
+  frames), `"phase60"` (default: also at the phase pixel of G frames, which take phase
+  `((n / 2) + 2) % 4` so any four frames from an R frame visit a whole block; the DDGI screen
+  resolve runs on G frames) or `"full"` (every pixel of every frame; the DDGI screen resolve
+  runs at scale 1 on every frame). AO stays at the R-frame phase pixel. It keeps a ping-pong
+  history (E rgb, cE) / (s, linear view depth, c, a) reprojected by the motion (depth test
+  `|z_hist - z| <= 0.05 z + 0.02`); a group sampled this frame blends its phase-pixel samples
+  (guided 2x2 upsample, quality `qMiss` off the phase pixel) with the history by `alpha*q`
+  against `(1 - alpha)*c`, a group sampled at every pixel takes the pixel's sample, and a
+  group not sampled reuses the history (G frames fill its disocclusions from 12 ring taps).
+  c is the confidence of s and a (and of E at the default rate), cE that of E otherwise. Composite: `C = d0*s + (kd*E + s0*vis)*a + em` (sky: `em`), vis from the
   `layerS0` alpha and the accumulated (E, a) with w = 1. Params:
   `alphaSHit` 0.5, `alphaSMiss` 0.9803, `alphaEHit` 0.5, `alphaEMiss` 0.9799, `qMiss` 0.3,
   `decay` 0.98 (learned constants), `jitterCorrect` (true; adds `(previous - current)` camera
-  jitter `x (0.5 W, -0.5 H)` pixels to the reprojection), `historyClamp` (true; on an R frame an
-  upsampled pixel keeps its reprojected history clamped to the min/max of the phase samples it
-  would interpolate, weighted by `min(1, c / qMiss)`, instead of the 2-pixel interpolation that
-  drew moving shadow edges as a 2 px staircase), `historyCubic` (true; (E, a) and s are read
-  from the history with a 5-tap Catmull-Rom, z and confidence bilinear), `debug` (`off`, `shadow`, `ao`,
+  jitter `x (0.5 W, -0.5 H)` pixels to the reprojection), `historyClamp` (true; an upsampled
+  pixel of a sampled group keeps its reprojected history clamped to the min/max of the phase
+  samples it would interpolate, weighted by `min(1, hc / qMiss)`, instead of the 2-pixel
+  interpolation that drew moving shadow edges as a 2 px staircase), `historyCubic` (true; E, a
+  and s are read from the history with a 5-tap Catmull-Rom, z and confidences bilinear),
+  `shadowRate`, `irradianceRate`, `shadowFull` (above), `debug` (`off`, `shadow`, `ao`,
   `irradiance`, `confidence`, `holes`). The history is invalid (confidence 0) after a resize, a
   camera cut, at the first frame and on any frame whose forward is not interlaced (the node
   then passes its colour through); it flips only on submitted frames. One viewport only

@@ -55,7 +55,8 @@ fn raa_csm_cascade(
 // describe the main camera. Keep a margin for the normal offset and PCSS taps.
 fn raa_csm_planar(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
     let view_depth = max(-(raa_frame.view * vec4<f32>(world_pos, 1.0)).z, 0.0);
-    for (var index = 0u; index < 4u; index++) {
+    let count = select(4u, u32(raa_shadow.params2.z), raa_shadow.params2.z > 0.5);
+    for (var index = 0u; index < count; index++) {
         let clip = raa_shadow.cascade_view_proj[index] * vec4<f32>(world_pos, 1.0);
         if all(abs(clip.xy) < vec2<f32>(0.95)) && clip.z > 0.0 && clip.z < 1.0 {
             return raa_csm_cascade(world_pos, n, frag, index, view_depth);
@@ -83,10 +84,13 @@ fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
     let view_depth = -(raa_frame.view * vec4<f32>(world_pos, 1.0)).z;
     let s = raa_shadow.splits;
     let band = max(raa_shadow.params2.y, 1e-6);
+    // params2.z = cascade count (1..4; 0 = legacy 4): the last used cascade fades to 1.
+    let last = select(3u, u32(raa_shadow.params2.z) - 1u, raa_shadow.params2.z > 0.5);
     var idx = 0u;
     if (view_depth > s.x) { idx = 1u; }
     if (view_depth > s.y) { idx = 2u; }
     if (view_depth > s.z) { idx = 3u; }
+    idx = min(idx, last);
     var near_split = 0.0;
     var far_split = s.x;
     if (idx == 1u) { near_split = s.x; far_split = s.y; }
@@ -94,7 +98,7 @@ fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
     if (idx == 3u) { near_split = s.z; far_split = s.w; }
     let band_world = max(band * max(far_split - near_split, 1e-6), 1e-6);
     var vis = raa_csm_cascade(world_pos, n, frag, idx, view_depth);
-    if (idx < 3u) {
+    if (idx < last) {
         let blend = clamp((view_depth - (far_split - band_world)) / band_world, 0.0, 1.0);
         // Only the band pixels pay for the next cascade's PCSS: mix(vis, next, 0) is vis.
         // The kernel uses textureLoad / textureSampleCompareLevel, valid in this branch.

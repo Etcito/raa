@@ -36,11 +36,19 @@ pub(crate) const JITTER_PHASES: u32 = 8;
 /// The jitter cycle for a scene rendered at `render` and resolved to `display`: 8 samples per
 /// display pixel, so 8 x (display / render area) phases when upscaling (18 at 0.67), at most 64.
 pub(crate) fn jitter_phases(render: (u32, u32), display: (u32, u32)) -> u32 {
+    jitter_phases_for(jitter_period(), render, display)
+}
+
+/// [`jitter_phases`] for an explicit 1:1 base: `base` x (display / render area), at most 64; an odd
+/// base (the interlaced lighting's coprime period) keeps an odd upscaled cycle.
+pub(crate) fn jitter_phases_for(base: u32, render: (u32, u32), display: (u32, u32)) -> u32 {
+    let base = base.clamp(1, 64);
     if render.0 == 0 || render.1 == 0 || (display.0 <= render.0 && display.1 <= render.1) {
-        return JITTER_PHASES;
+        return base;
     }
     let area = (display.0 as f64 / render.0 as f64) * (display.1 as f64 / render.1 as f64);
-    ((JITTER_PHASES as f64 * area).ceil() as u32).clamp(JITTER_PHASES, 64)
+    let n = ((base as f64 * area).ceil() as u32).clamp(base, 64);
+    if base % 2 == 1 && n % 2 == 0 { if n < 64 { n + 1 } else { 63 } } else { n }
 }
 
 impl FrameHistory {
@@ -133,6 +141,23 @@ fn pixel_offset_to_ndc(offset: [f32; 2], size: (u32, u32)) -> [f32; 2] {
     ]
 }
 
+/// Base length of the Halton jitter sequence at 1:1 (default `JITTER_PHASES` = 8). The interlaced
+/// lighting visits a pixel every 8 frames (4 phases x 2): with a period of 8 every visit of a pixel
+/// has the SAME sub-pixel offset, so its lighting samples can never be supersampled in time. An odd
+/// period (15 while `pass.lighting.reconstruct` is installed) gives every pixel all the offsets of
+/// the sequence. The upscaled cycle of [`jitter_phases`] scales this base.
+static JITTER_PERIOD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(JITTER_PHASES);
+
+/// Sets the base length of the jitter sequence (clamped to 1..=64).
+pub fn set_jitter_period(period: u32) {
+    JITTER_PERIOD.store(period.clamp(1, 64), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The base length of the jitter sequence.
+pub fn jitter_period() -> u32 {
+    JITTER_PERIOD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn frame_jitter(frame_index: u64, size: (u32, u32), jitter_consumer: bool, phases: u32) -> [f32; 2] {
     if !jitter_consumer {
         return [0.0; 2];
@@ -158,6 +183,10 @@ mod tests {
         assert_eq!(jitter_phases((100, 100), (1920, 1080)), 64);
         assert_eq!(frame_jitter(18, S, true, 18), frame_jitter(0, S, true, 18));
         assert_ne!(frame_jitter(8, S, true, 18), frame_jitter(0, S, true, 18));
+        // The reconstruct node's odd base period stays odd (coprime with the 8-frame visit).
+        assert_eq!(jitter_phases_for(15, (1920, 1080), (1920, 1080)), 15);
+        assert_eq!(jitter_phases_for(15, (1286, 724), (1920, 1080)), 35);
+        assert_eq!(jitter_phases_for(15, (100, 100), (1920, 1080)), 63);
     }
 
     fn close(a: [f32; 2], b: [f32; 2]) -> bool {

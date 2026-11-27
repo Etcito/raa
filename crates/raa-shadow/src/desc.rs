@@ -17,6 +17,9 @@ pub struct ShadowDesc {
     /// its slice. `false` restores the plain range `min(far, distance_m)`, past which the
     /// sun is unshadowed.
     pub cover: bool,
+    /// Number of cascades actually used and rendered: 1..=4 (the splits are the practical
+    /// scheme for this count; the array keeps 4 layers, the unused ones are not rendered).
+    pub cascades: u32,
 }
 
 impl Default for ShadowDesc {
@@ -26,6 +29,7 @@ impl Default for ShadowDesc {
             distance_m: 60.0,
             resolution: 2048,
             cover: true,
+            cascades: 4,
         }
     }
 }
@@ -50,6 +54,12 @@ impl ShadowDesc {
             return Err(invalid(format!(
                 "distance_m must be finite and > 0, got {}",
                 self.distance_m
+            )));
+        }
+        if !(1..=4).contains(&self.cascades) {
+            return Err(invalid(format!(
+                "cascades must be 1 to 4, got {}",
+                self.cascades
             )));
         }
         if !matches!(self.resolution, 1024 | 2048 | 4096) {

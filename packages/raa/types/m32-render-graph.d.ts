@@ -94,7 +94,9 @@ export interface RenderGraphResult {
  * ({@link Engine.lightingInterlace}). `frame` is the real-frame counter n (advances only on
  * submitted frames); `real` is true on an R frame (n even: the forward evaluated the signals at
  * the pixels (x, y) with (x & 1, y & 1) = `phase`), false on a G frame (no signal evaluated,
- * the `skipped` signal passes did not record). `phase` is [[0,0],[1,1],[1,0],[0,1]][(n / 2) % 4].
+ * the `skipped` signal passes did not record). `phase` is [[0,0],[1,1],[1,0],[0,1]][(n / 2) % 4],
+ * or [(n / 2 + 2) % 4] on a G frame with `irradianceRate` 'phase60' (E sampled on G frames).
+ * The rates are those set by `pass.lighting.reconstruct` (`shadowRate`, `irradianceRate`).
  */
 export interface LightingInterlaceState {
   mode: boolean;
@@ -102,6 +104,8 @@ export interface LightingInterlaceState {
   real: boolean;
   phase: [number, number];
   skipped: ('shadow.csm' | 'ao.gtao' | 'shadow.contact' | 'gi.ddgi')[];
+  shadowRate: 'phase' | 'real' | 'every';
+  irradianceRate: 'phase30' | 'phase60' | 'full';
 }
 
 /** The per-frame stats of {@link Engine.renderGraphStats}, from the latest rendered frame. */

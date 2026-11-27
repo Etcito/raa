@@ -18,7 +18,9 @@ use std::sync::{Arc, Mutex};
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
 use raa_math::{Aabb, Mat4, Vec3};
 use raa_mesh::AttributedMesh;
-use raa_pipeline::{LightingInterlace, Pipeline, SubmissionState};
+use raa_pipeline::{
+    InterlaceSignals, IrradianceRate, LightingInterlace, Pipeline, ShadowRate, SubmissionState,
+};
 use raa_scene::{Camera, InstanceIndex, RenderList, Scene, frustum_planes};
 use raa_shader::{
     Composer, LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, MaterialFnId, MaterialFnRegistry, SlotProvider,
@@ -153,21 +155,26 @@ impl SignalReaders {
 /// G frame of the mode the signal passes are skipped unless a reader that needs the current
 /// frame's output is on: VG shade keeps all four, sun shafts and the planar reflection capture
 /// (raa_slot_shadow of the mirrored view) keep the cascades, the planar reflection keeps the
-/// contact. The cascade hero layers (local lights) are always rendered, and the DDGI probe
-/// update always runs.
+/// contact. The signal rates keep what a G frame samples: s at every frame
+/// ([`ShadowRate::Every`]) keeps the contact (the cascades stay those of the R frame), E on G
+/// frames ([`IrradianceRate::Phase60`] / `Full`) keeps the DDGI screen resolve. The cascade
+/// hero layers (local lights) are always rendered, and the DDGI probe update always runs.
 fn interlace_state(
     enabled: bool,
     frame: u64,
+    signals: InterlaceSignals,
     readers: SignalReaders,
     planar_reflection: bool,
 ) -> LightingInterlace {
-    let mut state = LightingInterlace::new(enabled, frame);
+    let mut state = LightingInterlace::with_signals(enabled, frame, signals);
     if state.generated() {
         let vg = readers.vg_shade;
+        let shadow_g = state.signals.shadow == ShadowRate::Every;
+        let irradiance_g = state.signals.irradiance != IrradianceRate::Phase30;
         state.skip_cascades = !(vg || readers.shafts || planar_reflection);
-        state.skip_contact = !(vg || planar_reflection);
+        state.skip_contact = !(vg || planar_reflection || shadow_g);
         state.skip_ao = !vg;
-        state.skip_gi_resolve = !vg;
+        state.skip_gi_resolve = !(vg || irradiance_g);
     }
     state
 }
@@ -461,6 +468,8 @@ pub struct LitRenderer {
     /// with an acknowledged submission ([`LitRenderer::lighting_interlace`]).
     interlace_prepared: LightingInterlace,
     interlace_submitted: Option<LightingInterlace>,
+    /// Signal rates of forward "layers-interlaced" ([`LitRenderer::set_interlace_signals`]).
+    interlace_signals: InterlaceSignals,
     /// Bounds last sent to the scene per uploaded sub-mesh; only changes are sent.
     sent_bounds: HashMap<MeshId, Aabb>,
     /// Sub-mesh ids of every uploaded lit mesh, refreshed on upload/update.
@@ -544,6 +553,7 @@ impl LitRenderer {
             pending_background: None,
             interlace_prepared: LightingInterlace::default(),
             interlace_submitted: None,
+            interlace_signals: InterlaceSignals::default(),
             sent_bounds: HashMap::new(),
             submeshes: HashMap::new(),
             visible_slots: Vec::new(),
@@ -1171,9 +1181,33 @@ impl LitRenderer {
     }
 
     /// Fixes the Halton jitter cycle length (1..=64); 0 restores the automatic length
-    /// (8 at 1:1, 8 x the display/render area ratio when upscaling).
+    /// (the base period at 1:1, 8 by default and 15 with pass.lighting.reconstruct, times the
+    /// display/render area ratio when upscaling).
     pub fn set_jitter_phases(&mut self, phases: u32) {
         self.jitter_phases = (phases > 0).then(|| phases.min(64));
+    }
+
+    /// Sets the signal rates of forward "layers-interlaced" from the next prepare on (default:
+    /// s, AO and E at the phase pixel of R frames). Set by pass.lighting.reconstruct while it is
+    /// installed.
+    pub fn set_interlace_signals(&mut self, signals: InterlaceSignals) {
+        self.interlace_signals = signals;
+    }
+
+    /// The signal rates set by [`set_interlace_signals`](Self::set_interlace_signals).
+    pub fn interlace_signals(&self) -> InterlaceSignals {
+        self.interlace_signals
+    }
+
+    /// Sets the 1:1 base length of the Halton jitter sequence (default 8, see `frame_history`);
+    /// the automatic upscaled cycle scales it, an explicit `set_jitter_phases` overrides it.
+    pub fn set_camera_jitter_period(&mut self, period: u32) {
+        crate::frame_history::set_jitter_period(period);
+    }
+
+    /// The length of the Halton jitter sequence.
+    pub fn camera_jitter_period(&self) -> u32 {
+        crate::frame_history::jitter_period()
     }
 
     /// Drops the camera history for a viewport absent from the rendered layout.
@@ -1490,6 +1524,7 @@ impl LitRenderer {
         let interlace = interlace_state(
             s.forward_layers == crate::ForwardLayers::Interlaced && s.msaa() == 1,
             camera.frame_index,
+            self.interlace_signals,
             readers,
             s.planar_reflection.is_some(),
         );
