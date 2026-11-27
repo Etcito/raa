@@ -443,7 +443,11 @@ fn group_two_bindings_are_private_to_their_pass() {
         // Lighting, local lights, light tiles, the GI screen, volume and params (14, 17, 18),
         // the weather texture/uniform (15, 16) and the area stochastic table/mask (19, 20).
         // The spherical cache / DDGI lookup at 21 belongs to the forward and transparent shaders.
-        let last_binding = if matches!(pass, PassKind::Forward | PassKind::Transparent) { 21 } else { 20 };
+        let last_binding = if matches!(pass, PassKind::Forward | PassKind::Transparent) {
+            21
+        } else {
+            20
+        };
         assert_eq!(
             group_bindings(&module, 1),
             (0..=last_binding).collect::<Vec<u32>>(),
@@ -499,7 +503,9 @@ fn local_lighting_composes_with_selected_providers() {
     // The forward pass composes the shared helper with the existing sun and ambient terms
     // and the neutral indirect slot; emissive and the Flat/UNLIT selection stay.
     let forward = raa_shader::PASS_FORWARD_WGSL;
-    assert!(forward.contains("raa_slot_direct(s, c, -raa_frame.sun_dir.xyz"));
+    // The sun direction is the refracted one under the water (raa_water_sun), else -sun_dir.
+    assert!(forward.contains("raa_slot_direct(s, c, water_sun.to_sun, sun_radiance)"));
+    assert!(forward.contains("raa_water_sun(water, raa_frame.sun_dir.xyz, in.position)"));
     assert!(forward.contains("c.ao = min(s.ao, ao);"));
     assert!(forward.contains("raa_slot_ambient(s, c)"));
     assert!(!forward.contains("raa_slot_ambient(s, c) *"));
@@ -528,12 +534,17 @@ fn directional_radiance_is_applied_once_at_each_lit_pass_boundary() {
         );
         // Whitespace-insensitive: the transparent pass binds the term to `let direct` (cb93ca27).
         let flat = source.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
+        // The forward names the term `sun_radiance` (scaled under the water, raa_water_sun).
+        let term = if pass == PassKind::Forward {
             flat.contains(
-                "raa_slot_direct(s, c, -raa_frame.sun_dir.xyz, raa_directional_radiance(raa_frame.sun_color.rgb) * shadow)"
-            ),
-            "{pass:?}"
-        );
+                "var sun_radiance = raa_directional_radiance(raa_frame.sun_color.rgb) * shadow;",
+            ) && flat.contains("raa_slot_direct(s, c, water_sun.to_sun, sun_radiance)")
+        } else {
+            flat.contains(
+                "raa_slot_direct(s, c, -raa_frame.sun_dir.xyz, raa_directional_radiance(raa_frame.sun_color.rgb) * shadow)",
+            )
+        };
+        assert!(term, "{pass:?}");
         assert!(!source.contains("raa_frame.sun_color ="), "{pass:?}");
         // Material ordering: the direct sun term first, then ambient, indirect and local
         // lighting (in any order: the transparent pass keeps `local` and `indirect` apart for

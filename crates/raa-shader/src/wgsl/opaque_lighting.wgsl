@@ -55,9 +55,15 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
                 length(in.position - raa_frame.camera_pos.xyz));
         }
     }
+    // Under the water body (FrameGpu.reserved) the sun comes along its refracted direction: its
+    // visibility is tested where that path enters the water, so the shadow of a wall under water
+    // is shorter and the strip next to the wall is lit (raa_water_sun).
+    let water = raa_water_unpack(raa_frame.reserved);
+    let water_sun = raa_water_sun(water, raa_frame.sun_dir.xyz, in.position);
     var shadow = 1.0;
     if sun_far < 1.0 {
-        shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
+        shadow = raa_slot_shadow(water_sun.entry,
+            select(in.normal, vec3<f32>(0.0, 1.0, 0.0), water_sun.under), in.frag_coord);
     }
     shadow = mix(shadow, raa_spherical_sun_visibility, sun_far);
     var ao = 1.0;
@@ -95,8 +101,14 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
             clamp(vec2<i32>(in.frag_coord.xy), vec2<i32>(0), nrc_size - vec2<i32>(1)), 0);
         c.spherical_diffuse = vec4<f32>(nrc.rgb, select(0.0, 1.0, nrc.a > 0.0));
     }
-    let direct = raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
-            raa_directional_radiance(raa_frame.sun_color.rgb) * shadow);
+    var sun_radiance = raa_directional_radiance(raa_frame.sun_color.rgb) * shadow;
+    if water_sun.under && shadow > 0.0 {
+        // Fresnel transmittance and the caustics of the ripple (raa_water_caustic), full on an
+        // upward receiver (floor), none on a vertical one (wall).
+        let k = raa_water_caustic(water, raa_frame.sun_dir.xyz, in.position);
+        sun_radiance *= water_sun.transmit * mix(1.0, k, saturate(in.normal.y));
+    }
+    let direct = raa_slot_direct(s, c, water_sun.to_sun, sun_radiance);
     let ambient = raa_slot_ambient(s, c);
     var indirect = vec3<f32>(0.0);
     if !capture {

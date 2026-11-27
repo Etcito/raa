@@ -504,11 +504,23 @@ fn ddgi_shade(origin: vec3<f32>, direction: vec3<f32>, limit: f32, groups: u32,
     let v = -direction;
     if (groups & DDGI_SUN) != 0u {
         // White unit sun: its colour and intensity are applied when the groups are composed.
-        let sun = -frame.sun_dir.xyz;
+        // Under the water body (FrameGpu.reserved, raa_water_sun) it arrives along the refracted
+        // direction, is tested from where that path enters the water (the surface is not in this
+        // scene) and is attenuated by the Fresnel transmittance and the absorption of the path,
+        // as the forward's sun (opaque_lighting.wgsl, the caustics excepted: they average 1).
+        let water_sun = raa_water_sun(raa_water_unpack(frame.reserved), frame.sun_dir.xyz, p);
+        let sun = water_sun.to_sun;
         let nl = saturate(dot(n, sun));
+        let origin = select(p + ng * (2.0 * EPS), water_sun.entry + vec3<f32>(0.0, 2.0 * EPS, 0.0),
+            water_sun.under);
         if nl > 0.0 && dot(ng, sun) > 0.0
-            && closest(Ray(p + ng * (2.0 * EPS), sun), frame.clip.y, true).object == MISS {
-            out.texel.direct.sun = direct_brdf(material, n, v, sun, true) * nl;
+            && closest(Ray(origin, -frame.sun_dir.xyz), frame.clip.y, true).object == MISS {
+            var through = vec3<f32>(1.0);
+            if water_sun.under {
+                let w = raa_water_unpack(frame.reserved);
+                through = water_sun.transmit * exp(-w.sigma * distance(water_sun.entry, p));
+            }
+            out.texel.direct.sun = direct_brdf(material, n, v, sun, true) * nl * through;
         }
     }
     if (groups & DDGI_OTHER) != 0u {

@@ -3,8 +3,10 @@
 //! `setWater(desc | null)` sets the body: `{level, lo: [x, z], hi: [x, z], slope?, frequency?,
 //! time?, ior?, sigma?: [r, g, b], caustics?: bool}`. Its 16 lanes go to `FrameGpu.reserved`
 //! (water.wgsl). The water's material shader takes its normal from them, and with `caustics`
-//! (default true) the transmission slot concentrates the sun on the submerged surface it
-//! refracts (raa_water_caustic, computed per pixel: no pass, no texture, nothing without water).
+//! (default true) the forward lights submerged receivers with the refracted sun, tested where
+//! its path enters the water, and concentrates it by the ripple's caustics (raa_water_sun,
+//! raa_water_caustic, per pixel: no pass, no texture, nothing without water); the DDGI update's
+//! sun follows the same refracted path. `caustics: false` keeps the straight, unrefracted sun.
 
 use js_sys::Reflect;
 use raa_core::{GpuContext, RaaError};

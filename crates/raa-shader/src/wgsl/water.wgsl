@@ -1,8 +1,9 @@
 // Shared water surface (caustics-design.md, "une seule fonction de surface"). One still water body
 // per scene: a horizontal surface at `level` over the footprint [lo, hi] (world XZ), its ripple a
 // fixed sum of RAA_WATER_WAVES directional sines whose analytic gradient gives the normal. The
-// water's material shader and the caustics of the transmission slot (raa_water_caustic) evaluate
-// these functions, so the caustics follow the visible ripple. `time` is the animation phase of a
+// water's material shader, the forward's sun of submerged receivers (raa_water_sun, its caustics
+// raa_water_caustic) and the DDGI update's sun evaluate these functions, so the caustics follow
+// the visible ripple. `time` is the animation phase of a
 // later step (0 = static). CPU twin: raa_shader::water (same constants, same order).
 //
 // The body is carried by FrameGpu.reserved[0..4] (zero = no water), unpacked by raa_water_unpack:
@@ -103,6 +104,29 @@ fn raa_water_sun_entry(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> vec3<f3
     let t = raa_water_refract(sun_dir, vec3<f32>(0.0, 1.0, 0.0), 1.0 / max(w.ior, 1.0));
     if t.y > -1e-3 { return p; }
     return p - t.xyz * ((w.level - p.y) / -t.y);
+}
+
+// The sun of a receiver `p` under the water: it arrives along the flat-refracted direction
+// (steeper than the sun), through `entry` where that path crosses the surface, attenuated by the
+// Fresnel transmittance. Outside the water or with caustics off (setWater caustics: false, the
+// unrefracted sun of before): not under, entry p, to_sun -sun_dir, transmit 1.
+struct RaaWaterSun {
+    under: bool,
+    entry: vec3<f32>,
+    to_sun: vec3<f32>,
+    transmit: f32,
+}
+
+fn raa_water_sun(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSun {
+    var o = RaaWaterSun(false, p, -sun_dir, 1.0);
+    if !w.present || !w.caustics || p.y >= w.level || !raa_water_inside(w, p.xz) { return o; }
+    let t = raa_water_refract(sun_dir, vec3<f32>(0.0, 1.0, 0.0), 1.0 / max(w.ior, 1.0));
+    if t.y > -1e-3 { return o; }
+    o.under = true;
+    o.entry = p - t.xyz * ((w.level - p.y) / -t.y);
+    o.to_sun = -t.xyz;
+    o.transmit = raa_water_sun_transmittance(w, sun_dir);
+    return o;
 }
 
 // Flat-surface transmittance of the sun into the water: 1 - F at the sun's incidence.
