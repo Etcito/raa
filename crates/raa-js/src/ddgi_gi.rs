@@ -159,6 +159,8 @@ impl Engine {
                 );
                 put(&result, "convergeAge", stats.converge_age.into());
                 put(&result, "msPerProbe", stats.ms_per_probe.into());
+                put(&result, "restMs", stats.rest_ms.into());
+                put(&result, "headroomMs", stats.headroom_ms.into());
                 put(
                     &result,
                     "updateMs",

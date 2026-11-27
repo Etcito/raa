@@ -971,9 +971,44 @@ pub struct LightingResources {
     state: State<wgpu::TextureView>,
     /// Forward "layers-interlaced" cadence of the frame (raa-lit `set_interlace`).
     interlace: crate::LightingInterlace,
+    frame_gpu: FrameGpuTime,
+}
+
+/// GPU time of the frames the pipeline last measured, for passes that size their work to the
+/// frame (a pass sets `wanted` in its prepare; the pipeline then samples every frame's pass
+/// timestamps and publishes them here, one or two frames late).
+#[derive(Clone, Debug, Default)]
+pub struct FrameGpuTime {
+    pub wanted: bool,
+    /// Milliseconds of each feature pass in pipeline order, from the last completed sample.
+    pub passes: Vec<(String, f64)>,
+}
+
+impl FrameGpuTime {
+    /// Sum of every pass but `except`, or `None` before the first sample.
+    pub fn others_ms(&self, except: &str) -> Option<f64> {
+        if self.passes.is_empty() {
+            return None;
+        }
+        Some(self.passes.iter().filter(|(n, _)| n != except).map(|(_, ms)| ms).sum())
+    }
 }
 
 impl LightingResources {
+    /// Asks the pipeline to measure every frame's pass GPU times (see [`FrameGpuTime`]).
+    pub fn request_frame_gpu_time(&mut self) {
+        self.frame_gpu.wanted = true;
+    }
+
+    /// The last published pass GPU times.
+    pub fn frame_gpu_time(&self) -> &FrameGpuTime {
+        &self.frame_gpu
+    }
+
+    pub(crate) fn frame_gpu_time_mut(&mut self) -> &mut FrameGpuTime {
+        &mut self.frame_gpu
+    }
+
     /// Creates the full and base layouts, samplers, uniforms and dummies, and both bind groups.
     pub fn new(gpu: &GpuContext) -> LightingResources {
         let device = gpu.device();
@@ -1083,6 +1118,7 @@ impl LightingResources {
             transparent_set,
         );
         LightingResources {
+            frame_gpu: FrameGpuTime::default(),
             layout,
             bind_group,
             base_layout,
