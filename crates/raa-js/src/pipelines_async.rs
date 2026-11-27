@@ -56,6 +56,11 @@ impl Engine {
             (s.skipped_dispatches as f64).into(),
         );
         put(&o, "maxCompileMs", s.max_compile_ms.into());
+        let labels = js_sys::Array::new();
+        for label in async_pipelines::skipped_labels() {
+            labels.push(&label.into());
+        }
+        put(&o, "skippedLabels", labels.into());
         o.into()
     }
 

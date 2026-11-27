@@ -25,6 +25,8 @@ use super::webgpu_sys;
 extern "C" {
     #[wasm_bindgen(js_namespace = console, js_name = error)]
     fn console_error(message: &str, error: &JsValue);
+    #[wasm_bindgen(js_namespace = console, js_name = info)]
+    fn console_info(message: &str);
 }
 
 /// Counters of the async pipeline mode, for the host's warm-up and diagnostics.
@@ -109,6 +111,9 @@ pub fn reset_counters() {
     SKIPPED_DRAWS.store(0, Relaxed);
     SKIPPED_DISPATCHES.store(0, Relaxed);
     MAX_COMPILE_MS.store(0, Relaxed);
+    if let Ok(mut labels) = SKIPPED_LABELS.0.try_borrow_mut() {
+        labels.clear();
+    }
 }
 
 pub(crate) fn note_sync() {
@@ -133,6 +138,12 @@ pub(crate) enum SlotState<P, D> {
     Pending {
         device: webgpu_sys::GpuDevice,
         desc: D,
+        /// Its passes may skip while it compiles: a render pipeline made while a frame
+        /// records (a material variant, a lazy per-frame pass). Any other pending pipeline
+        /// (compute, or made outside a frame: install, upload) is built synchronously when a
+        /// pass sets it, so work that runs once (a bake, a mip chain, a probe init) is never lost.
+        skippable: bool,
+        label: String,
     },
     Failed {
         device: webgpu_sys::GpuDevice,
@@ -157,6 +168,8 @@ pub(crate) trait AsyncPipeline:
     Sized + Clone + JsCast + wasm_bindgen::convert::FromWasmAbi + 'static
 {
     type Desc: Clone + 'static;
+    /// Render pipelines may be skipped while compiling; compute work is often run once.
+    const SKIPPABLE: bool;
     fn create_sync(device: &webgpu_sys::GpuDevice, desc: &Self::Desc) -> Self;
     fn create_async(device: &webgpu_sys::GpuDevice, desc: &Self::Desc) -> js_sys::Promise<Self>;
     fn label(desc: &Self::Desc) -> String;
@@ -164,6 +177,7 @@ pub(crate) trait AsyncPipeline:
 
 impl AsyncPipeline for webgpu_sys::GpuRenderPipeline {
     type Desc = webgpu_sys::GpuRenderPipelineDescriptor;
+    const SKIPPABLE: bool = true;
     fn create_sync(device: &webgpu_sys::GpuDevice, desc: &Self::Desc) -> Self {
         device.create_render_pipeline(desc).unwrap()
     }
@@ -177,6 +191,7 @@ impl AsyncPipeline for webgpu_sys::GpuRenderPipeline {
 
 impl AsyncPipeline for webgpu_sys::GpuComputePipeline {
     type Desc = webgpu_sys::GpuComputePipelineDescriptor;
+    const SKIPPABLE: bool = false;
     fn create_sync(device: &webgpu_sys::GpuDevice, desc: &Self::Desc) -> Self {
         device.create_compute_pipeline(desc)
     }
@@ -210,13 +225,15 @@ pub(crate) fn create<P: AsyncPipeline>(
     }
     let promise = P::create_async(device, &desc);
     let label = P::label(&desc);
+    let install = !IN_FRAME.load(Relaxed);
     let slot: Slot<P, P::Desc> = Rc::new(RefCell::new(SlotState::Pending {
         device: device.clone(),
         desc,
+        skippable: P::SKIPPABLE && !install,
+        label: label.clone(),
     }));
     bump(&CREATED_ASYNC);
     PENDING.fetch_add(1, Relaxed);
-    let install = !IN_FRAME.load(Relaxed);
     if install {
         PENDING_INSTALL.fetch_add(1, Relaxed);
     }
@@ -239,7 +256,7 @@ pub(crate) fn create<P: AsyncPipeline>(
         // A dropped handle (or one forced synchronously meanwhile) discards the result.
         let Some(slot) = weak.upgrade() else { return };
         let mut state = slot.borrow_mut();
-        if let SlotState::Pending { device, desc } = &*state {
+        if let SlotState::Pending { device, desc, .. } = &*state {
             let next = match result {
                 Ok(pipeline) => SlotState::Ready(pipeline),
                 Err(_) => SlotState::Failed {
@@ -260,7 +277,7 @@ pub(crate) fn force<P: AsyncPipeline>(slot: &Slot<P, P::Desc>) -> P {
     let mut state = slot.borrow_mut();
     let pipeline = match &*state {
         SlotState::Ready(p) => return p.clone(),
-        SlotState::Pending { device, desc } | SlotState::Failed { device, desc } => {
+        SlotState::Pending { device, desc, .. } | SlotState::Failed { device, desc } => {
             P::create_sync(device, desc)
         }
     };
@@ -269,13 +286,55 @@ pub(crate) fn force<P: AsyncPipeline>(slot: &Slot<P, P::Desc>) -> P {
     pipeline
 }
 
-/// Calls `f` with the pipeline when it is ready; false (and nothing called) while pending or failed.
+/// Calls `f` with the pipeline and returns true, building it synchronously first unless it
+/// is a skippable pending pipeline: then nothing is called, its label is recorded and the
+/// caller skips its draws (false).
 pub(crate) fn with_ready<P: AsyncPipeline>(slot: &Slot<P, P::Desc>, f: impl FnOnce(&P)) -> bool {
-    match &*slot.borrow() {
-        SlotState::Ready(p) => {
-            f(p);
-            true
+    {
+        let state = slot.borrow();
+        match &*state {
+            SlotState::Ready(p) => {
+                f(p);
+                return true;
+            }
+            SlotState::Pending {
+                skippable: true,
+                label,
+                ..
+            } => {
+                note_skipped_label(label);
+                return false;
+            }
+            _ => {}
         }
-        _ => false,
     }
+    let pipeline = force(slot);
+    f(&pipeline);
+    true
+}
+
+/// Single-threaded page: a plain cell behind a `Sync` marker for the label list.
+struct LabelCell(RefCell<alloc::vec::Vec<String>>);
+// SAFETY: the WebGPU backend runs on one thread (wasm32 without shared-memory threads).
+unsafe impl Sync for LabelCell {}
+static SKIPPED_LABELS: LabelCell = LabelCell(RefCell::new(alloc::vec::Vec::new()));
+
+fn note_skipped_label(label: &str) {
+    if let Ok(mut labels) = SKIPPED_LABELS.0.try_borrow_mut() {
+        if labels.len() < 64 && !labels.iter().any(|l| l == label) {
+            labels.push(String::from(label));
+            console_info(&format!(
+                "RAA pipeline '{label}' still compiling: its draws are skipped"
+            ));
+        }
+    }
+}
+
+/// Labels of the pipelines whose passes skipped work since the last [`reset_counters`].
+pub fn skipped_labels() -> alloc::vec::Vec<String> {
+    SKIPPED_LABELS
+        .0
+        .try_borrow()
+        .map(|l| l.clone())
+        .unwrap_or_default()
 }

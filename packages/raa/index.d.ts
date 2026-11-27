@@ -453,6 +453,8 @@ export interface Engine {
     skippedDraws: number;
     skippedDispatches: number;
     maxCompileMs: number;
+    /** Labels of the pipelines whose passes skipped draws (since the last reset). */
+    skippedLabels: string[];
   };
   /** Clears the skip counters and `maxCompileMs` of {@link Engine.pipelineStats}. */
   resetPipelineCounters(): void;

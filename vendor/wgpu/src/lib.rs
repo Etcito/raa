@@ -352,7 +352,8 @@ pub mod webgpu {
     /// RAA patch: pipelines compiled off the frame path (see the module's documentation).
     pub mod async_pipelines {
         pub use crate::backend::webgpu::async_pipelines::{
-            enabled, reset_counters, set_enabled, set_in_frame, stats, AsyncPipelineStats,
+            enabled, reset_counters, set_enabled, set_in_frame, skipped_labels, stats,
+            AsyncPipelineStats,
         };
     }
 }
