@@ -172,6 +172,11 @@ fn raa_water_bite_weight(k: f32) -> f32 {
     return saturate(0.5 * (k - 1.0));
 }
 
+// True when p lies on the water's horizontal surface (either side, normal n).
+fn raa_water_on_surface(w: RaaWater, p: vec3<f32>, n: vec3<f32>) -> bool {
+    return w.present && abs(n.y) > 0.5 && abs(p.y - w.level) < 0.05 && raa_water_inside(w, p.xz);
+}
+
 // Refracted view direction that places the transmitted (opaque copy) lookup through the water's
 // surface: the deviation of the rippled refraction `dir` from the flat one is scaled by the
 // distortion lane (1 = physical), so everything seen through the water wobbles visibly; the
@@ -179,8 +184,7 @@ fn raa_water_bite_weight(k: f32) -> f32 {
 // `dir` unchanged off the water surface, without water or at distortion 1.
 fn raa_water_transmit_dir(w: RaaWater, p: vec3<f32>, n: vec3<f32>, incident: vec3<f32>,
     dir: vec3<f32>) -> vec3<f32> {
-    if !w.present || w.distortion == 1.0 || abs(n.y) <= 0.5 || abs(p.y - w.level) >= 0.05
-        || !raa_water_inside(w, p.xz) { return dir; }
+    if w.distortion == 1.0 || !raa_water_on_surface(w, p, n) { return dir; }
     let up = vec3<f32>(0.0, sign(n.y), 0.0);
     let eta = select(max(w.ior, 1.0), 1.0 / max(w.ior, 1.0), n.y > 0.0);
     let flat_dir = refract(incident, up, eta);

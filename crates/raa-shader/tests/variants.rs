@@ -539,6 +539,12 @@ fn directional_radiance_is_applied_once_at_each_lit_pass_boundary() {
             flat.contains(
                 "var sun_radiance = raa_directional_radiance(raa_frame.sun_color.rgb) * shadow;",
             ) && flat.contains("raa_slot_direct(s, c, water_sun.to_sun, sun_radiance)")
+        } else if pass == PassKind::Transparent {
+            // `sun_radiance` also lights the water's diffuse by the seen floor's sun.
+            flat.contains("let sun_radiance = raa_directional_radiance(raa_frame.sun_color.rgb);")
+                && flat.contains(
+                    "raa_slot_direct(s, c, -raa_frame.sun_dir.xyz, sun_radiance * shadow)",
+                )
         } else {
             flat.contains(
                 "raa_slot_direct(s, c, -raa_frame.sun_dir.xyz, raa_directional_radiance(raa_frame.sun_color.rgb) * shadow)",
