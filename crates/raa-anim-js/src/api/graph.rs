@@ -472,7 +472,7 @@ mod tests {
             let frame = graph.runtime.frame(&mut mirror, &params).unwrap();
             assert_eq!(out.skin.len(), bones * 16);
             assert_eq!(out.skin, frame.skin.concat());
-            for m in out.skin.chunks_exact(16) {
+            for m in out.skin.as_chunks::<16>().0 {
                 assert_eq!([m[3], m[7], m[11], m[15]], [0.0, 0.0, 0.0, 1.0]);
             }
             // Column-major: hips (bone 1) translation is m[12..15], offset from rest.

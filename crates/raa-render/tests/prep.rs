@@ -11,7 +11,10 @@ fn u32_at(bytes: &[u8], off: usize) -> u32 {
 
 fn f32s_at(bytes: &[u8], off: usize, n: usize) -> Vec<f32> {
     bytes[off..off + 4 * n]
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| c.as_slice())
         .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
         .collect()
 }

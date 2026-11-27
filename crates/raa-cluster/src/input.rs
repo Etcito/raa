@@ -591,7 +591,7 @@ mod tests {
 
     fn assert_closed(mesh: &MeshData) {
         let mut directed: BTreeMap<(u32, u32), u32> = BTreeMap::new();
-        for triangle in mesh.indices.chunks_exact(3) {
+        for triangle in mesh.indices.as_chunks::<3>().0 {
             for (a, b) in [
                 (triangle[0], triangle[1]),
                 (triangle[1], triangle[2]),

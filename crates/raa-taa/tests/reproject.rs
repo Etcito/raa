@@ -279,7 +279,7 @@ mod reject_flag {
         let mapped = slice.get_mapped_range().expect("mapped range");
         mapped
             .chunks_exact(padded)
-            .flat_map(|r| r[..row].chunks_exact(8))
+            .flat_map(|r| r[..row].as_chunks::<8>().0.iter().map(|c| c.as_slice()))
             .map(|px| {
                 std::array::from_fn(|c| f16_to_f32(u16::from_le_bytes([px[2 * c], px[2 * c + 1]])))
             })

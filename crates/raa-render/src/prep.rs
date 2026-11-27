@@ -60,7 +60,9 @@ impl FramePrep {
 
         for (chunk, item) in self
             .instances
-            .chunks_exact_mut(INSTANCE_STRIDE)
+            .as_chunks_mut::<INSTANCE_STRIDE>()
+            .0
+            .iter_mut()
             .zip(list.items.iter())
         {
             write_instance(chunk, &item.world, item.material.0);
@@ -103,7 +105,7 @@ impl FramePrep {
 
 /// Writes `values` as consecutive f32 LE into `out`.
 fn put_f32s(out: &mut [u8], values: &[f32]) {
-    for (chunk, v) in out.chunks_exact_mut(4).zip(values) {
+    for (chunk, v) in out.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         chunk.copy_from_slice(&v.to_le_bytes());
     }
 }
@@ -129,7 +131,12 @@ fn write_frame_uniform(out: &mut [u8; FRAME_UNIFORM_SIZE], scene: &Scene, surfac
     let (c, i) = (scene.ambient.color, scene.ambient.intensity);
     put_f32s(&mut out[112..128], &[c[0] * i, c[1] * i, c[2] * i, 0.0]);
     let encode = u32::from(!surface_is_srgb);
-    for (chunk, v) in out[128..144].chunks_exact_mut(4).zip([encode, 0, 0, 0]) {
+    for (chunk, v) in out[128..144]
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip([encode, 0, 0, 0])
+    {
         chunk.copy_from_slice(&v.to_le_bytes());
     }
 }
@@ -166,7 +173,10 @@ mod tests {
 
     fn f32s_at(bytes: &[u8], off: usize, n: usize) -> Vec<f32> {
         bytes[off..off + 4 * n]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| c.as_slice())
             .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
             .collect()
     }

@@ -112,7 +112,7 @@ type SharedShadow = Rc<RefCell<ShadowState>>;
 
 /// Writes one `vec4<f32>` into `out[..16]`.
 fn write_vec4(out: &mut [u8], v: [f32; 4]) {
-    for (chunk, x) in out.chunks_exact_mut(4).zip(v) {
+    for (chunk, x) in out.as_chunks_mut::<4>().0.iter_mut().zip(v) {
         chunk.copy_from_slice(&x.to_le_bytes());
     }
 }

@@ -10,7 +10,14 @@ pub fn parse(bytes: &[u8]) -> Result<TraceProgram, TraceError> {
             bytes.len()
         );
     }
-    let header: Vec<u32> = bytes.chunks_exact(4).take(HEADER_WORDS).map(word).collect();
+    let header: Vec<u32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| c.as_slice())
+        .take(HEADER_WORDS)
+        .map(word)
+        .collect();
     if header.len() != HEADER_WORDS {
         refuse!(FORMAT, "header", "the program ends inside the header");
     }
@@ -47,7 +54,10 @@ pub fn parse(bytes: &[u8]) -> Result<TraceProgram, TraceError> {
     let body: Vec<u32> = bytes
         .get(HEADER_WORDS * 4..)
         .unwrap_or(&[])
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| c.as_slice())
         .map(word)
         .collect();
     let (source_words, rest) = cut(&body, header[2] as usize * SOURCE_WORDS, "sources")?;
@@ -56,7 +66,10 @@ pub fn parse(bytes: &[u8]) -> Result<TraceProgram, TraceError> {
     let (material_words, rest) = cut(rest, header[6] as usize * MATERIAL_WORDS, "materials")?;
     let (instance_words, bend_words) = cut(rest, header[3] as usize * INSTANCE_WORDS, "instances")?;
     let mut instances: Vec<Instance> = instance_words
-        .chunks_exact(INSTANCE_WORDS)
+        .as_chunks::<INSTANCE_WORDS>()
+        .0
+        .iter()
+        .map(|c| c.as_slice())
         .map(read_instance)
         .collect();
     if header[7] as usize != instances.iter().filter(|i| i.deform_kind == 1).count() {
@@ -66,7 +79,7 @@ pub fn parse(bytes: &[u8]) -> Result<TraceProgram, TraceError> {
             "the bend records do not match the bent instances"
         );
     }
-    let mut records = bend_words.chunks_exact(16);
+    let mut records = bend_words.as_chunks::<16>().0.iter().map(|c| c.as_slice());
     instances
         .iter_mut()
         .filter(|i| i.deform_kind == 1)
@@ -74,13 +87,19 @@ pub fn parse(bytes: &[u8]) -> Result<TraceProgram, TraceError> {
 
     let program = TraceProgram {
         sources: source_words
-            .chunks_exact(SOURCE_WORDS)
+            .as_chunks::<SOURCE_WORDS>()
+            .0
+            .iter()
+            .map(|c| c.as_slice())
             .map(read_source)
             .collect(),
         code: code.to_vec(),
         data: data_words.iter().map(|w| f32::from_bits(*w)).collect(),
         materials: material_words
-            .chunks_exact(MATERIAL_WORDS)
+            .as_chunks::<MATERIAL_WORDS>()
+            .0
+            .iter()
+            .map(|c| c.as_slice())
             .map(read_material)
             .collect(),
         instances,

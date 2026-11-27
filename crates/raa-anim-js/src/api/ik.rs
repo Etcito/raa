@@ -28,7 +28,7 @@ pub fn local_pose(rig: &Rig, values: &[f32]) -> Result<Vec<LocalPose>, AnimError
         return Err(invalid(format!("expected {expected} local values, got {}", values.len())));
     }
     Ok(values
-        .chunks_exact(10)
+        .as_chunks::<10>().0.iter()
         .map(|v| LocalPose {
             t: [v[0], v[1], v[2]],
             r: [v[3], v[4], v[5], v[6]],

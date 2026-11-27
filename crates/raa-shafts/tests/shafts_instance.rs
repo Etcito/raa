@@ -239,7 +239,7 @@ fn bound_chain_two_frames_composite_into_bound_dst() {
         let expected = 2.0 + frame as f32;
         {
             let mapped = slice.get_mapped_range().unwrap();
-            for px in mapped.chunks_exact(8).take(SIZE as usize) {
+            for px in mapped.as_chunks::<8>().0.iter().take(SIZE as usize) {
                 let r = f16_to_f32(u16::from_le_bytes([px[0], px[1]]));
                 assert!((r - expected).abs() < 1e-2, "frame {frame}: got {r}");
             }

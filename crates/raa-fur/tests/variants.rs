@@ -326,7 +326,12 @@ fn group2_uniform_matches_the_contributor_slots() {
         slots.len() as u64,
         SHELL_UNIFORM_SIZE * u64::from(FUR_SHELLS_MAX)
     );
-    for (i, slot) in slots.chunks_exact(SHELL_UNIFORM_SIZE as usize).enumerate() {
+    for (i, slot) in slots
+        .as_chunks::<{ SHELL_UNIFORM_SIZE as usize }>()
+        .0
+        .iter()
+        .enumerate()
+    {
         assert_eq!(&slot[..4], &(i as u32).to_le_bytes());
         assert!(slot[4..].iter().all(|b| *b == 0), "slot {i}");
     }

@@ -28,7 +28,7 @@ pub fn generate_tangents(
     // Accumulators in f64: [tangent, bitangent] per vertex.
     let mut acc = vec![[[0.0f64; 3]; 2]; vertex_count];
 
-    for tri in indices.chunks_exact(3) {
+    for tri in indices.as_chunks::<3>().0 {
         let [i0, i1, i2] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
         let (Some(p0), Some(p1), Some(p2)) =
             (positions.get(i0), positions.get(i1), positions.get(i2))

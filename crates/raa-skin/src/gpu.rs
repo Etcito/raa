@@ -23,7 +23,7 @@ impl SkinVertexInputs {
         gpu.ensure_live()?;
         let bytes = Self::bytes(mesh);
         let mut set = BTreeSet::new();
-        for tri in mesh.rest.base.indices.chunks_exact(3) {
+        for tri in mesh.rest.base.indices.as_chunks::<3>().0 {
             for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
                 set.insert((a.min(b), a.max(b)));
             }

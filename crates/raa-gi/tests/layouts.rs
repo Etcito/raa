@@ -63,9 +63,9 @@ fn check(wgsl: &str, name: &str, size: usize, members: &[Member], bytes: &[u8]) 
 
 fn mat(base: f32) -> Mat4 {
     let mut m = Mat4::default();
-    for c in 0..4 {
-        for r in 0..4 {
-            m.cols[c][r] = base + (c * 4 + r) as f32;
+    for (c, col) in m.cols.iter_mut().enumerate() {
+        for (r, value) in col.iter_mut().enumerate() {
+            *value = base + (c * 4 + r) as f32;
         }
     }
     m

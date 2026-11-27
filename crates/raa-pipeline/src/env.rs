@@ -84,7 +84,7 @@ impl EnvGpu {
         ];
         let mut out = [0u8; Self::SIZE];
         let values = fields.iter().flat_map(|field| field.iter());
-        for (chunk, value) in out.chunks_exact_mut(4).zip(values) {
+        for (chunk, value) in out.as_chunks_mut::<4>().0.iter_mut().zip(values) {
             chunk.copy_from_slice(&value.to_le_bytes());
         }
         out

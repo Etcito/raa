@@ -21,7 +21,7 @@ use raa_geom::MeshData;
 fn cut_area(mesh: &ClusterMesh, error_m: f32) -> f64 {
     let cut = cut_triangles(mesh, &select_cut(mesh, error_m));
     let mut area = 0.0;
-    for triangle in cut.indices.chunks_exact(3) {
+    for triangle in cut.indices.as_chunks::<3>().0 {
         let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
         let (Some(pa), Some(pb), Some(pc)) = (
             cut.positions.get(a as usize),
@@ -88,7 +88,7 @@ fn read_fixture(text: &str) -> OwnedClusterInput {
     let indices = fixture_array(text, "indices");
     let place = |i: usize| [positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]];
     let mut normals = vec![[0.0f32; 3]; positions.len() / 3];
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let [a, b, c] = [
             triangle[0] as usize,
             triangle[1] as usize,
@@ -119,13 +119,21 @@ fn read_fixture(text: &str) -> OwnedClusterInput {
     OwnedClusterInput {
         mesh: MeshData {
             positions: positions
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|p| [p[0], p[1], p[2]])
                 .collect(),
             normals,
             indices: indices.iter().map(|index| *index as u32).collect(),
         },
-        uvs: uvs.map(|flat| flat.chunks_exact(2).map(|uv| [uv[0], uv[1]]).collect()),
+        uvs: uvs.map(|flat| {
+            flat.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|uv| [uv[0], uv[1]])
+                .collect()
+        }),
     }
 }
 
@@ -469,7 +477,7 @@ fn seam_mesh_cuts_are_closed_on_the_grid() {
 fn cut_normals(mesh: &ClusterMesh, error_m: f32) -> Vec<[f64; 3]> {
     let cut = cut_triangles(mesh, &select_cut(mesh, error_m));
     let mut normals = Vec::new();
-    for triangle in cut.indices.chunks_exact(3) {
+    for triangle in cut.indices.as_chunks::<3>().0 {
         let corner = |i: usize| triangle.get(i).and_then(|&v| cut.positions.get(v as usize));
         let (Some(a), Some(b), Some(c)) = (corner(0), corner(1), corner(2)) else {
             continue;
@@ -509,7 +517,7 @@ fn covered_cells(
         (at >= 0.0 && at < cells as f64).then_some(at as usize)
     };
     let mut covered = BTreeSet::new();
-    for triangle in cut.indices.chunks_exact(3) {
+    for triangle in cut.indices.as_chunks::<3>().0 {
         let corner = |i: usize| triangle.get(i).and_then(|&v| cut.positions.get(v as usize));
         let (Some(a), Some(b), Some(c)) = (corner(0), corner(1), corner(2)) else {
             continue;
@@ -780,7 +788,11 @@ fn monument_input() -> OwnedClusterInput {
     let uvs = fixture_array(text, "uvs");
     let indices = fixture_array(text, "indices");
     let triple = |flat: &[f32]| -> Vec<[f32; 3]> {
-        flat.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect()
+        flat.as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| [p[0], p[1], p[2]])
+            .collect()
     };
     OwnedClusterInput {
         mesh: MeshData {
@@ -788,7 +800,13 @@ fn monument_input() -> OwnedClusterInput {
             normals: triple(&normals),
             indices: indices.iter().map(|index| *index as u32).collect(),
         },
-        uvs: Some(uvs.chunks_exact(2).map(|uv| [uv[0], uv[1]]).collect()),
+        uvs: Some(
+            uvs.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|uv| [uv[0], uv[1]])
+                .collect(),
+        ),
     }
 }
 
@@ -888,7 +906,9 @@ fn monument_clusters_shade_within_their_lod_error() {
     let source: Vec<([usize; 3], D3, D3, f64)> = input
         .mesh
         .indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|t| {
             let corners = [t[0], t[1], t[2]].map(|i| i as usize);
             let p = corners.map(|i| source_positions[i]);
@@ -928,7 +948,7 @@ fn monument_clusters_shade_within_their_lod_error() {
         }
         let cut = cut_triangles(&mesh, &[index as u32]);
         let mut errors = Vec::new();
-        for triangle in cut.indices.chunks_exact(3) {
+        for triangle in cut.indices.as_chunks::<3>().0 {
             let corners = [triangle[0], triangle[1], triangle[2]].map(|i| i as usize);
             let p = corners.map(|i| d3(cut.positions[i]));
             let n = corners.map(|i| d3(cut.normals[i]));

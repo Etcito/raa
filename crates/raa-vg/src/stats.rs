@@ -56,7 +56,10 @@ pub struct VgCullTotals {
 /// counts past `sw_base` / `hw_base`).
 pub fn parse_state(bytes: &[u8; 64]) -> CullSample {
     let mut words = [0u32; 16];
-    for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
+    for (word, chunk) in words
+        .iter_mut()
+        .zip(bytes.as_chunks::<4>().0.iter().map(|c| c.as_slice()))
+    {
         *word = u32::from_le_bytes(chunk.try_into().unwrap_or([0; 4]));
     }
     let [

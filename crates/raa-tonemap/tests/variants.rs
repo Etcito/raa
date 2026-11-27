@@ -127,7 +127,7 @@ fn expected(run: &Run) -> [u8; 4] {
 
 fn assert_all_pixels(pixels: &[u8], want: [u8; 4], tolerance: u8, what: &str) {
     assert_eq!(pixels.len(), (SIZE * SIZE * 4) as usize);
-    for (i, px) in pixels.chunks_exact(4).enumerate() {
+    for (i, px) in pixels.as_chunks::<4>().0.iter().enumerate() {
         for c in 0..4 {
             assert!(
                 px[c].abs_diff(want[c]) <= tolerance,

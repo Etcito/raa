@@ -986,7 +986,7 @@ fn write_params(queue: &wgpu::Queue, buffer: &wgpu::Buffer, kind: &ViewKind) {
 
 /// Writes `words` into `out` from its start, four little-endian bytes each.
 fn put_words(out: &mut [u8], words: &[u32]) {
-    for (chunk, word) in out.chunks_exact_mut(4).zip(words) {
+    for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
 }
@@ -1571,7 +1571,7 @@ mod tests {
         let long: String = (0..40u8).map(|i| char::from(b'A' + i % 26)).collect();
         pack_label(&long, &mut out);
         assert_eq!(out[7] >> 24, u32::from(long.as_bytes()[31]));
-        assert_eq!(out[0], u32::from_le_bytes([b'A', b'B', b'C', b'D']));
+        assert_eq!(out[0], u32::from_le_bytes(*b"ABCD"));
         pack_label("\u{e9}", &mut out);
         assert_eq!(out, [0x3f, 0, 0, 0, 0, 0, 0, 0]);
     }

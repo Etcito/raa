@@ -236,7 +236,9 @@ fn from_mesh_is_one_submesh_without_attributes() {
     let base = MeshData {
         positions: q
             .positions
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| [c[0], c[1], c[2]])
             .collect(),
         normals: vec![[0.0, 0.0, 1.0]; 4],

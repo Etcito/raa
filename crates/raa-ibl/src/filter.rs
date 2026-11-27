@@ -224,7 +224,11 @@ fn decode_sh(bytes: &[u8]) -> Option<Sh9> {
         return None;
     }
     let mut sh = [[0.0; 4]; 9];
-    for (c, chunk) in sh.iter_mut().flatten().zip(bytes.chunks_exact(4)) {
+    for (c, chunk) in sh
+        .iter_mut()
+        .flatten()
+        .zip(bytes.as_chunks::<4>().0.iter().map(|c| c.as_slice()))
+    {
         *c = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     Some(sh)
@@ -1275,7 +1279,7 @@ mod tests {
     #[test]
     fn decode_sh_reads_nine_little_endian_vec4() {
         let mut bytes = [0u8; SH_BYTES as usize];
-        for (i, chunk) in bytes.chunks_exact_mut(4).enumerate() {
+        for (i, chunk) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             chunk.copy_from_slice(&(i as f32).to_le_bytes());
         }
         let sh = decode_sh(&bytes).expect("144 bytes decode");

@@ -197,7 +197,7 @@ fn decode_counter(bytes: &[u8]) -> Option<u32> {
 /// (a, b, c, 0) as 16 little-endian bytes.
 fn uvec4_bytes(a: u32, b: u32, c: u32) -> [u8; 16] {
     let mut out = [0u8; 16];
-    for (chunk, v) in out.chunks_exact_mut(4).zip([a, b, c, 0]) {
+    for (chunk, v) in out.as_chunks_mut::<4>().0.iter_mut().zip([a, b, c, 0]) {
         chunk.copy_from_slice(&v.to_le_bytes());
     }
     out
