@@ -110,6 +110,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                         "resolution".to_string(),
                         crate::catalog::ParamValue::Int(2048),
                     ),
+                    ("cascades".to_string(), crate::catalog::ParamValue::Int(4)),
                 ],
                 inputs: vec![],
                 compute: None,
@@ -160,6 +161,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                     ),
                     ("slices".to_string(), crate::catalog::ParamValue::Int(4)),
                     ("steps".to_string(), crate::catalog::ParamValue::Int(8)),
+                    ("scale".to_string(), crate::catalog::ParamValue::Int(1)),
+                    ("upsample".to_string(), crate::catalog::ParamValue::Int(1)),
                 ],
                 inputs: vec![
                     crate::plan::PlanInput {

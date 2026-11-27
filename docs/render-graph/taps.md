@@ -72,6 +72,11 @@ Each row names the Rust field or accessor that holds the view or buffer a pass p
 | trace.sdf | trace | TraceTargets::color_view | crates/raa-sdf-trace/src/pass.rs |
 | sky.cloud-screen | cloudScreen | CloudViews::screen | crates/raa-sky/src/cloud_backend.rs |
 | forward | color | Targets::hdr().src() | crates/raa-pipeline/src/targets.rs |
+| forward | layerKd | ForwardPass::layers[0] (lightingOutput layers modes; unpublished in combined) | crates/raa-lit/src/passes.rs |
+| forward | layerS0 | ForwardPass::layers[1] (lightingOutput layers modes; unpublished in combined) | crates/raa-lit/src/passes.rs |
+| forward | layerEm | ForwardPass::layers[2] (lightingOutput layers modes; unpublished in combined) | crates/raa-lit/src/passes.rs |
+| forward | layerE | ForwardPass::layers[3] (lightingOutput layers modes; unpublished in combined) | crates/raa-lit/src/passes.rs |
+| forward | layerR | ForwardPass::layers[4] (lightingOutput layers modes; unpublished in combined) | crates/raa-lit/src/passes.rs |
 | gi.history | color | Targets::hdr().src() | crates/raa-pipeline/src/targets.rs |
 | gi.history | history | GiCore::history | crates/raa-gi/src/feature.rs |
 | ssr | color | Targets::hdr().src() | crates/raa-pipeline/src/targets.rs |

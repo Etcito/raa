@@ -37,7 +37,8 @@
         "softness": 1,
         "distance": 60,
         "cover": true,
-        "resolution": 2048
+        "resolution": 2048,
+        "cascades": 4
       }
     },
     {
@@ -76,7 +77,9 @@
         "power": 1,
         "indirectDiffuse": false,
         "slices": 4,
-        "steps": 8
+        "steps": 8,
+        "scale": 1,
+        "upsample": 1
       }
     },
     {
@@ -243,12 +246,18 @@
       "id": "taa",
       "type": "pass.taa",
       "params": {
-        "filterSharpness": 2.3,
+        "filterSharpness": 8,
         "clipTolerance": 1.25,
-        "blendBase": 0.06,
-        "blendMotionGain": 0.012,
+        "blendBase": 0.04,
+        "blendMotionGain": 0.03,
         "blendMin": 0.04,
-        "blendMax": 0.3
+        "blendMax": 0.5,
+        "historySharpness": 0.6,
+        "blendStatic": 0.015,
+        "clipStatic": 3,
+        "upsampleConfidence": 3,
+        "upsampleClipScene": 1,
+        "upsampleKernel": 1
       }
     },
     {

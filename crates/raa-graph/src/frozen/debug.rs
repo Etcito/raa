@@ -103,6 +103,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                         "resolution".to_string(),
                         crate::catalog::ParamValue::Int(2048),
                     ),
+                    ("cascades".to_string(), crate::catalog::ParamValue::Int(4)),
                 ],
                 inputs: vec![],
                 compute: None,
@@ -205,6 +206,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                     ),
                     ("slices".to_string(), crate::catalog::ParamValue::Int(4)),
                     ("steps".to_string(), crate::catalog::ParamValue::Int(8)),
+                    ("scale".to_string(), crate::catalog::ParamValue::Int(1)),
+                    ("upsample".to_string(), crate::catalog::ParamValue::Int(1)),
                 ],
                 inputs: vec![
                     crate::plan::PlanInput {
@@ -911,7 +914,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 params: vec![
                     (
                         "filterSharpness".to_string(),
-                        crate::catalog::ParamValue::Number(2.3),
+                        crate::catalog::ParamValue::Number(8.0),
                     ),
                     (
                         "clipTolerance".to_string(),
@@ -919,11 +922,11 @@ pub fn plan() -> crate::plan::GraphPlan {
                     ),
                     (
                         "blendBase".to_string(),
-                        crate::catalog::ParamValue::Number(0.06),
+                        crate::catalog::ParamValue::Number(0.04),
                     ),
                     (
                         "blendMotionGain".to_string(),
-                        crate::catalog::ParamValue::Number(0.012),
+                        crate::catalog::ParamValue::Number(0.03),
                     ),
                     (
                         "blendMin".to_string(),
@@ -931,7 +934,31 @@ pub fn plan() -> crate::plan::GraphPlan {
                     ),
                     (
                         "blendMax".to_string(),
-                        crate::catalog::ParamValue::Number(0.3),
+                        crate::catalog::ParamValue::Number(0.5),
+                    ),
+                    (
+                        "historySharpness".to_string(),
+                        crate::catalog::ParamValue::Number(0.6),
+                    ),
+                    (
+                        "blendStatic".to_string(),
+                        crate::catalog::ParamValue::Number(0.015),
+                    ),
+                    (
+                        "clipStatic".to_string(),
+                        crate::catalog::ParamValue::Number(3.0),
+                    ),
+                    (
+                        "upsampleConfidence".to_string(),
+                        crate::catalog::ParamValue::Number(3.0),
+                    ),
+                    (
+                        "upsampleClipScene".to_string(),
+                        crate::catalog::ParamValue::Number(1.0),
+                    ),
+                    (
+                        "upsampleKernel".to_string(),
+                        crate::catalog::ParamValue::Number(1.0),
                     ),
                 ],
                 inputs: vec![

@@ -119,7 +119,7 @@ fn generate_module_writes_the_full_text_and_its_offset() {
         "}\n",
     );
     assert_eq!(text.as_str(), expected);
-    assert_eq!(offset, 22);
+    assert_eq!(offset, 23);
     raa_shader::Composer::validate(&text).expect("the generated module validates");
 }
 
@@ -133,7 +133,7 @@ fn no_params_writes_the_placeholder_member_and_offset() {
     );
     let (text, offset) = generate_module(&node).expect("the module generates");
     assert!(text.contains("struct RgParams {\n  rg_unused: vec4<f32>,\n}\n"));
-    assert_eq!(offset, 20);
+    assert_eq!(offset, 21);
 }
 
 #[test]

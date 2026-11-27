@@ -6,11 +6,14 @@ use raa_gtao::{AoQuality, tunables};
 fn keys_defaults_and_ranges_follow_the_table() {
     let t = tunables();
     let keys: Vec<&str> = t.iter().map(|s| s.key).collect();
-    assert_eq!(keys, ["slices", "steps"]);
+    assert_eq!(keys, ["slices", "steps", "scale", "upsample"]);
     assert_eq!(t[0].default, 4.0);
     assert_eq!(t[1].default, 8.0);
+    assert_eq!((t[2].default, t[3].default), (1.0, 1.0));
     assert_eq!((t[0].min, t[0].max), (Some(1.0), Some(8.0)));
     assert_eq!((t[1].min, t[1].max), (Some(1.0), Some(16.0)));
+    assert_eq!((t[2].min, t[2].max), (Some(1.0), Some(8.0)));
+    assert_eq!((t[3].min, t[3].max), (Some(0.0), Some(1.0)));
     assert!(t.iter().all(|s| s.integer && s.rebuild == "none"));
     let q = AoQuality::default();
     assert_eq!((q.slices, q.steps), (4, 8));

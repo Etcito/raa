@@ -30,6 +30,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                         "resolution".to_string(),
                         crate::catalog::ParamValue::Int(2048),
                     ),
+                    ("cascades".to_string(), crate::catalog::ParamValue::Int(4)),
                 ],
                 inputs: vec![],
                 compute: None,

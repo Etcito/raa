@@ -48,7 +48,7 @@ fn compute_modules_validate_and_are_standalone() {
         (
             "denoise",
             shaders::DENOISE_WGSL,
-            &["denoise_h", "denoise_v"][..],
+            &["denoise_h", "denoise_v", "upsample"][..],
             5,
         ),
     ] {
