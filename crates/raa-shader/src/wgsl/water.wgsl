@@ -124,10 +124,11 @@ struct RaaWaterSun {
     to_sun: vec3<f32>,
     transmit: f32,
     k: f32,
+    sky: f32,
 }
 
 fn raa_water_sun(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSun {
-    var o = RaaWaterSun(false, p, -sun_dir, 1.0, 1.0);
+    var o = RaaWaterSun(false, p, -sun_dir, 1.0, 1.0, 1.0);
     if !w.present || !w.caustics || p.y >= w.level || !raa_water_inside(w, p.xz) { return o; }
     let t = raa_water_refract(sun_dir, vec3<f32>(0.0, 1.0, 0.0), 1.0 / max(w.ior, 1.0));
     if t.y > -1e-3 { return o; }
@@ -139,6 +140,7 @@ fn raa_water_sun(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSun {
             1.0 / max(w.ior, 1.0));
         if tw.y < -1e-3 { refracted = tw.xz / tw.y; }
         o.k = raa_water_caustic_at(w, sun_dir, p, sv);
+        o.sky = raa_water_sky_caustic(w, w.level - p.y, sv);
     }
     var run = mix(straight, refracted, w.sun_bend);
     // Past the vertical by at most half a straight run (along the sun's azimuth).
@@ -151,6 +153,18 @@ fn raa_water_sun(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSun {
     o.to_sun = -dir;
     o.transmit = raa_water_sun_transmittance(w, sun_dir);
     return o;
+}
+
+// Soft caustics of the sky on a submerged receiver (the sky is an extended source, so its pattern
+// through the ripple is faint and broad): the zenith's caustics at the receiver's solved surface
+// point, for 0.6 x the depth (broader, less focused cells), capped at 4 and scaled to 0.35 of
+// their contrast. A linear contrast scale keeps the mean near 1 (the floor's average ambient
+// light is unchanged); the shadowed floor under water shows faint moving light, not a flat tone.
+const RAA_WATER_SKY_CAUSTIC_STRENGTH: f32 = 0.35;
+
+fn raa_water_sky_caustic(w: RaaWater, depth: f32, sv: RaaWaterSolve) -> f32 {
+    let k = raa_water_caustic_depth(w, vec3<f32>(0.0, -1.0, 0.0), 0.6 * depth, sv);
+    return 1.0 + RAA_WATER_SKY_CAUSTIC_STRENGTH * (min(k, 4.0) - 1.0);
 }
 
 // Flat-surface transmittance of the sun into the water: 1 - F at the sun's incidence.
@@ -210,7 +224,11 @@ fn raa_water_solve(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSol
 
 // 1 / |det| of the landing map's first-order Jacobian at the solved point (raa_water_caustic).
 fn raa_water_caustic_at(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>, sv: RaaWaterSolve) -> f32 {
-    let depth = w.level - p.y;
+    return raa_water_caustic_depth(w, sun_dir, w.level - p.y, sv);
+}
+
+// The same for light arriving along `dir` from `depth` metres above the receiver.
+fn raa_water_caustic_depth(w: RaaWater, sun_dir: vec3<f32>, depth: f32, sv: RaaWaterSolve) -> f32 {
     let eta = 1.0 / max(w.ior, 1.0);
     let e = 0.01;
     let g = sv.g;

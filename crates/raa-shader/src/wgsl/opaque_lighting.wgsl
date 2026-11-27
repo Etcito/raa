@@ -108,13 +108,20 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
         sun_radiance *= water_sun.transmit * mix(1.0, water_sun.k, saturate(in.normal.y));
     }
     let direct = raa_slot_direct(s, c, water_sun.to_sun, sun_radiance);
-    let ambient = raa_slot_ambient(s, c);
+    var ambient = raa_slot_ambient(s, c);
     var indirect = vec3<f32>(0.0);
     if !capture {
         indirect = raa_slot_indirect(s, c);
         if c.spherical_diffuse.w > 0.0 {
             indirect *= 1.0 - c.spherical_diffuse.w;
         }
+    }
+    if water_sun.under {
+        // The sky's soft caustics (raa_water_sky_caustic) on the ambient and probe light, full on
+        // an upward receiver: no flat tone on the shadowed floor under the water.
+        let sky = mix(1.0, water_sun.sky, saturate(in.normal.y));
+        ambient *= sky;
+        indirect *= sky;
     }
     var local = vec3<f32>(0.0);
     if !sphere_direct {
