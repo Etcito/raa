@@ -96,7 +96,12 @@ mod gpu {
         assert_eq!(prepared.layer_views.len(), 4);
         assert_eq!(
             prepared.splits,
-            raa_shadow::cascade_splits(NEAR, FAR.min(DISTANCE), 0.75, 4)
+            raa_shadow::cascade_splits(
+                NEAR,
+                FAR.min(DISTANCE),
+                raa_shadow::ShadowDesc::default().split_lambda,
+                4
+            )
         );
         assert_eq!(prepared.sun_dir, sun());
 

@@ -13,7 +13,11 @@ use crate::cascades::{CascadeFit, cascade_fit, ladder_up};
 /// Number of cascades (CSM).
 const CASCADES: usize = 4;
 /// Practical split lambda (CSM).
-const SPLIT_LAMBDA: f32 = 0.75;
+pub(crate) const SPLIT_LAMBDA: f32 = 0.75;
+
+/// With `spread`, the split range is at most this multiple of the shadow distance (a huge
+/// scene keeps its near cascades; the last one still reaches the cover distance).
+const SPREAD_CAP: f32 = 4.0;
 
 /// The cascades the `shadow.csm` pass prepared this frame: their count and resolution, the
 /// four view-projections, the view-space splits, the four single-layer `Depth32Float` views of
@@ -127,13 +131,27 @@ pub fn cascade_frame_covered(
     scene: Option<&Aabb>,
 ) -> CoveredFrame {
     cascade_frame_covered_n(
-        view, fov_y_rad, aspect, near, far, distance_m, sun_dir, resolution, scene, CASCADES,
+        view,
+        fov_y_rad,
+        aspect,
+        near,
+        far,
+        distance_m,
+        sun_dir,
+        resolution,
+        scene,
+        CASCADES,
+        SPLIT_LAMBDA,
+        false,
     )
 }
 
 /// [`cascade_frame_covered`] with `n` (1..=4) cascades: the practical splits for `n`, the
 /// cover reach applied to cascade `n - 1`; entries past `n` repeat the last used split and
 /// matrix (they are never rendered nor selected: the shader clamps to cascade `n - 1`).
+/// `lambda` is the practical split weight (0 uniform, 1 logarithmic; [`cascade_frame_covered`]
+/// uses 0.75). `spread` (with a scene) runs the practical splits over
+/// `[near, min(far, cover distance, 4 x distance)]` instead of `[near, min(far, distance)]`.
 #[allow(
     clippy::too_many_arguments,
     reason = "the contract signature mirrors the pass's inputs"
@@ -149,10 +167,22 @@ pub fn cascade_frame_covered_n(
     resolution: u32,
     scene: Option<&Aabb>,
     n: usize,
+    lambda: f32,
+    spread: bool,
 ) -> CoveredFrame {
     let n = n.clamp(1, CASCADES);
-    let mut splits = crate::cascade_splits(near, far.min(distance_m), SPLIT_LAMBDA, n);
     let cover_m = scene.and_then(|b| cover_distance(view, b));
+    // `spread`: the practical splits run over the part of the scene the camera can see,
+    // min(far, cover distance, SPREAD_CAP x distance), instead of [near, min(far, distance)],
+    // so no cascade is spent past the scene and the middle cascades reach the far side.
+    let range = match cover_m {
+        Some(cover) if spread => far
+            .min(cover)
+            .min(SPREAD_CAP * distance_m)
+            .max(near + 1e-3),
+        _ => far.min(distance_m),
+    };
+    let mut splits = crate::cascade_splits(near, range, lambda, n);
     if let Some(cover) = cover_m {
         let reach = cover.min(far);
         if reach > splits[n - 1] {

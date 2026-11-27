@@ -31,6 +31,15 @@ pub fn plan() -> crate::plan::GraphPlan {
                         crate::catalog::ParamValue::Int(2048),
                     ),
                     ("cascades".to_string(), crate::catalog::ParamValue::Int(4)),
+                    (
+                        "filter".to_string(),
+                        crate::catalog::ParamValue::Number(0.015625),
+                    ),
+                    (
+                        "split".to_string(),
+                        crate::catalog::ParamValue::Number(0.875),
+                    ),
+                    ("spread".to_string(), crate::catalog::ParamValue::Bool(true)),
                 ],
                 inputs: vec![],
                 compute: None,

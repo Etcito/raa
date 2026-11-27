@@ -36,6 +36,22 @@ export interface ShadowSettings {
    * unused layers are not rendered and the shader clamps to the last used cascade). Default 4.
    */
   cascades?: 1 | 2 | 3 | 4;
+  /**
+   * Minimum PCF filter radius in metres, 0..0.5: the same world size in every cascade (at
+   * least 1.5 texels of each), widened by the sun penumbra. Default 0.015625 (1/64).
+   */
+  filter?: number;
+  /**
+   * Practical split weight of the cascades, 0..1 (0 uniform, 1 logarithmic); higher values
+   * give the near cascades more texels per metre. Default 0.875.
+   */
+  split?: number;
+  /**
+   * With `cover`: spread the cascade splits over the part of the scene the camera can see,
+   * `[near, min(far, cover distance, 4 x distance)]`, instead of `[near, distance]`, so the
+   * middle cascades reach the far side of the scene. Default true.
+   */
+  spread?: boolean;
 }
 
 /** What the last `shadow.csm` frame computed, from {@link Engine.shadowStats}. */

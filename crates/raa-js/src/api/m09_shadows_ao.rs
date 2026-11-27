@@ -122,7 +122,7 @@ fn require_object(settings: &JsValue, method: &str) -> Result<(), RaaError> {
 
 #[wasm_bindgen(js_class = Engine)]
 impl Engine {
-    /// Sets the cascaded sun shadows: `{softness?, distance?, resolution?: 1024|2048|4096}`
+    /// Sets the cascaded sun shadows: `{softness?, distance?, cover?, filter?, split?, spread?, resolution?: 1024|2048|4096}`
     /// merged over the current settings. Out-of-range values throw `shadow.invalid` naming
     /// the field; nothing changes on a refusal.
     #[wasm_bindgen(js_name = setShadows)]
@@ -133,6 +133,13 @@ impl Engine {
             let mut d = shadow.get();
             read_f32(&settings, "softness", &mut d.softness)?;
             read_f32(&settings, "distance", &mut d.distance_m)?;
+            read_f32(&settings, "filter", &mut d.filter_m)?;
+            read_f32(&settings, "split", &mut d.split_lambda)?;
+            if let Some(v) = get(&settings, "spread")? {
+                d.spread = v
+                    .as_bool()
+                    .ok_or_else(|| api_error("shadow.invalid", "spread must be a boolean"))?;
+            }
             if let Some(v) = get(&settings, "cover")? {
                 d.cover = v
                     .as_bool()

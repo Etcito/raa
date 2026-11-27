@@ -45,15 +45,20 @@ interface ShadowSettings {
   softness?: number;                    // > 0 and <= 16, multiplier of the sun angular radius
   distance?: number;                    // metres, > 0
   resolution?: 1024 | 2048 | 4096;      // texels, edge length of one cascade
+  filter?: number;                      // metres, 0..0.5, minimum PCF radius
+  split?: number;                       // 0..1, practical split weight
+  spread?: boolean;                     // with cover: splits over the visible scene
 }
 ```
 
 The argument of `setShadows`. Every field is optional and merged over the current values. The
 algorithm is a **4-cascade stable cascaded shadow map (CSM) with percentage-closer soft shadows
-(PCSS)**: the view frustum is split with the practical split scheme (lambda 0.75), each cascade
+(PCSS)**: the view frustum is split with the practical split scheme (`split`, default 0.875; with `cover` and `spread` the splits run over `[near, min(far, cover distance, 4 x distance)]`), each cascade
 renders into one slice of a `Depth32Float` array, and the sampled cascade is snapped to whole
 texels in light space so the map does not swim as the camera moves. PCSS widens the penumbra with
-occluder distance (16 blocker + 32 PCF samples, slope bias 2.0, constant bias 2, normal offset
+occluder distance, never narrower than `filter` metres (and 1.5 texels of the cascade), so the
+edge keeps one world softness across cascades (16 blocker + 32 bilinear-comparison PCF samples
+in a per-pixel rotated Poisson disk, turned with the camera jitter under TAA, slope bias 2.0, constant bias 2, normal offset
 1.5 texels) and a 10% blend band hides the cascade boundary.
 
 | field | unit | default | valid range | meaning |
@@ -61,6 +66,9 @@ occluder distance (16 blocker + 32 PCF samples, slope bias 2.0, constant bias 2,
 | `softness` | - | `1` | > 0 and <= 16 | Multiplier of the sun's angular radius used as the PCSS penumbra; 1 matches the real sun (0.0047 rad), larger values widen the soft shadow. |
 | `distance` | metres | `60` | > 0 | Distance from the camera to the far cascade split. |
 | `resolution` | texels | `2048` | `1024`, `2048` or `4096` | Edge length of one cascade's shadow map. |
+| `filter` | metres | `0.015625` | 0 to 0.5 | Minimum PCF radius, the same world size in every cascade (at least 1.5 texels of each). |
+| `split` | - | `0.875` | 0 to 1 | Practical split weight (0 uniform, 1 logarithmic). |
+| `spread` | - | `true` | boolean | With `cover`: spread the splits over the scene the camera can see instead of `[near, distance]`. |
 
 A wrong type, a non-finite number or a value outside its range throws `shadow.invalid` naming the
 field.

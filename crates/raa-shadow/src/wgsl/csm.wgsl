@@ -10,7 +10,8 @@
 // sampler, not this file.
 
 // Shadow of one cascade: normal-offset receiver, then the prelude's 16-sample blocker
-// search and 32-sample rotated Poisson PCF. 1 when unshadowed or outside the cascade.
+// search and 32-sample rotated Poisson PCF (bilinear comparison taps), the kernel at least
+// the world filter floor (params2.x). 1 when unshadowed or outside the cascade.
 // `view_depth` sizes the blocker search region from the light angle.
 fn raa_csm_cascade(
     world_pos: vec3<f32>,
@@ -36,18 +37,74 @@ fn raa_csm_cascade(
     }
     let sun_angle = raa_frame.sun_dir.w * raa_shadow.params.x;
     let tan_angle = max(tan(sun_angle), 0.0);
-    let search_texels = clamp(tan_angle * view_depth / max(texel, 1e-6), 1.0, 64.0);
+    // Filter floor in world metres (params2.x), the same size in every cascade so the edge
+    // does not change at a cascade boundary; at least 1.5 texels of this cascade.
+    let min_texels = max(1.5, raa_shadow.params2.x / max(texel, 1e-6));
+    // The blocker search covers at least the filter, so the penumbra is never cut short.
+    let search_texels = clamp(max(tan_angle * view_depth / max(texel, 1e-6), min_texels + 1.0),
+        1.0, 64.0);
     let b = raa_shadow_blockers(i32(cascade_idx), uv, clip.z, search_texels, res);
     if (b.y < 0.5) {
         return 1.0;
     }
     let blocker_depth = b.x;
-    // Penumbra: light-depth delta / |row 2| in metres x tan(angle), in texels, min 1.5.
-    let penumbra_texels = max(
-        1.5,
-        (clip.z - blocker_depth) / row2_len * tan_angle / max(texel, 1e-6)
+    // Penumbra: light-depth delta / |row 2| in metres x tan(angle), in texels, at least the
+    // filter floor.
+    let penumbra_texels = clamp(
+        (clip.z - blocker_depth) / row2_len * tan_angle / max(texel, 1e-6),
+        min_texels, 48.0
     );
-    return raa_shadow_pcf(i32(cascade_idx), uv, clip.z, penumbra_texels, res, raa_csm_rotation(frag.xy));
+    // A jittered camera (TAA, reconstruction) resolves the rotated Poisson noise over frames;
+    // without jitter that per-pixel noise stays as a fixed diagonal hatching, so the kernel is
+    // a noise-free tent-weighted grid of bilinear comparisons instead.
+    if any(raa_frame.camera_jitter.xy != vec2<f32>(0.0)) {
+        return raa_shadow_pcf(i32(cascade_idx), uv, clip.z, penumbra_texels, res, raa_csm_frame_rotation(frag.xy));
+    }
+    return raa_csm_grid_pcf(i32(cascade_idx), uv, clip.z, penumbra_texels, res);
+}
+
+fn raa_csm_grid_tap(layer: i32, uv: vec2<f32>, depth: f32, offset_texels: vec2<f32>, res: f32) -> f32 {
+    let coord = clamp(uv + offset_texels / res, vec2<f32>(0.0), vec2<f32>(1.0));
+    return textureSampleCompareLevel(raa_shadow_map, raa_shadow_cmp, coord, layer, depth);
+}
+
+// Noise-free PCF: an n x n grid (n = 4..8, about one tap per texel) of bilinear comparison
+// taps over [-r, r] texels, tent-weighted. The centre and four corners run first; when they
+// agree (whole kernel lit or in umbra) their value is returned.
+fn raa_csm_grid_pcf(layer: i32, uv: vec2<f32>, depth: f32, radius_texels: f32, res: f32) -> f32 {
+    let r = radius_texels;
+    let probe = raa_csm_grid_tap(layer, uv, depth, vec2<f32>(0.0), res)
+        + raa_csm_grid_tap(layer, uv, depth, vec2<f32>(r, r), res)
+        + raa_csm_grid_tap(layer, uv, depth, vec2<f32>(-r, r), res)
+        + raa_csm_grid_tap(layer, uv, depth, vec2<f32>(r, -r), res)
+        + raa_csm_grid_tap(layer, uv, depth, vec2<f32>(-r, -r), res);
+    if (probe == 0.0 || probe == 5.0) {
+        return probe / 5.0;
+    }
+    let n = u32(clamp(ceil(r) + 2.0, 4.0, 8.0));
+    let step = 2.0 * r / f32(n - 1u);
+    var sum = 0.0;
+    var wsum = 0.0;
+    for (var j = 0u; j < n; j = j + 1u) {
+        let y = -r + step * f32(j);
+        let wy = 1.0 - abs(y) / (r + step);
+        for (var i = 0u; i < n; i = i + 1u) {
+            let x = -r + step * f32(i);
+            let w = wy * (1.0 - abs(x) / (r + step));
+            sum = sum + w * raa_csm_grid_tap(layer, uv, depth, vec2<f32>(x, y), res);
+            wsum = wsum + w;
+        }
+    }
+    return sum / max(wsum, 1e-6);
+}
+
+// Per-pixel PCF rotation; when the camera is jittered (TAA, neural reconstruction) it also
+// turns with the jitter, so the history averages the rotated taps instead of keeping a
+// fixed per-pixel pattern. Without jitter the pattern is fixed (no shimmer).
+fn raa_csm_frame_rotation(p: vec2<f32>) -> f32 {
+    let j = raa_frame.camera_jitter.xy;
+    let turn = fract(dot(j, vec2<f32>(4093.1, 7919.7)));
+    return raa_csm_rotation(p) + turn * 6.28318530718;
 }
 
 // The reflected view can see surfaces outside the main camera's frustum.
