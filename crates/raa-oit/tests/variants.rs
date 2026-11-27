@@ -273,10 +273,11 @@ fn shared_lighting_preserves_transmission_fog_and_oit() {
 /// and fragment storage buffers, including the declared shared weather and area stochastic
 /// bindings 19 and 20, and the DDGI probe buffer (group 1 binding 21) of the transparent DDGI
 /// lookup: 9 storage buffers, which the pipeline layout (group 0's five, binding 21 and the
-/// three OIT lists) already counted before the module read binding 21.
+/// three OIT lists) already counted before the module read binding 21. The 14th sampled
+/// texture is the local-light cube shadow array (group 1 binding 22) of raa_local_lighting.
 #[cfg(not(target_arch = "wasm32"))]
 const TRANSPARENT_FRAGMENT_BUDGET: Counts = Counts {
-    textures: 13,
+    textures: 14,
     samplers: 3,
     uniforms: 9,
     storages: 9,

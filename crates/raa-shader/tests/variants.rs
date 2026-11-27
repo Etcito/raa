@@ -442,11 +442,12 @@ fn group_two_bindings_are_private_to_their_pass() {
         );
         // Lighting, local lights, light tiles, the GI screen, volume and params (14, 17, 18),
         // the weather texture/uniform (15, 16) and the area stochastic table/mask (19, 20).
-        // The spherical cache / DDGI lookup at 21 belongs to the forward and transparent shaders.
+        // The spherical cache / DDGI lookup at 21 belongs to the forward and transparent shaders;
+        // the prelude declares the local-light cube shadow array (22) for every pass.
         let last_binding = if matches!(pass, PassKind::Forward | PassKind::Transparent) { 21 } else { 20 };
         assert_eq!(
             group_bindings(&module, 1),
-            (0..=last_binding).collect::<Vec<u32>>(),
+            (0..=last_binding).chain([22]).collect::<Vec<u32>>(),
             "{pass:?}"
         );
         let expected: &[u32] = match pass {
@@ -520,10 +521,13 @@ fn directional_radiance_is_applied_once_at_each_lit_pass_boundary() {
         (PassKind::FurShell, raa_shader::PASS_FURSHELL_WGSL),
     ] {
         // The dominant sun term carries the single atmospheric boundary: raw frame
-        // radiance is the helper's input and the shadow scales the transmitted result.
+        // radiance is the helper's input and the shadow scales the transmitted result. The
+        // forward's diffuse transmission back term (raa_dt_direct, opaque_lighting.wgsl) reads
+        // the same boundary for -N: a second call, after the front term.
+        let calls = if pass == PassKind::Forward { 2 } else { 1 };
         assert_eq!(
             source.matches("raa_directional_radiance(").count(),
-            1,
+            calls,
             "{pass:?}"
         );
         // Whitespace-insensitive: the transparent pass binds the term to `let direct` (cb93ca27).
@@ -574,7 +578,8 @@ fn directional_radiance_is_applied_once_at_each_lit_pass_boundary() {
             flags: 0,
         };
         let wgsl = composer.compose(&reg, &key).expect("compose");
-        // The prelude declares the boundary once and the pass calls it once.
+        // The prelude declares the boundary once and the pass calls it once (the forward twice:
+        // its diffuse transmission back term, raa_dt_direct).
         assert_eq!(
             wgsl.matches("fn raa_directional_radiance(").count(),
             1,
@@ -583,7 +588,7 @@ fn directional_radiance_is_applied_once_at_each_lit_pass_boundary() {
         assert_eq!(
             wgsl.matches("raa_directional_radiance(raa_frame.sun_color.rgb)")
                 .count(),
-            1,
+            if pass == PassKind::Forward { 2 } else { 1 },
             "{pass:?}"
         );
         assert_eq!(Composer::validate(&wgsl), Ok(()));

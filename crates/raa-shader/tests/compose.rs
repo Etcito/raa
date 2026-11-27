@@ -205,7 +205,13 @@ fn directional_boundary_is_declared_once_and_called_by_the_lit_passes() {
             PassKind::Forward | PassKind::VgShade | PassKind::Transparent | PassKind::FurShell
         );
         let call = "raa_directional_radiance(raa_frame.sun_color.rgb)";
-        assert_eq!(wgsl.matches(call).count(), usize::from(lit), "{pass:?}");
+        // Forward and VgShade compose opaque_lighting.wgsl, whose diffuse transmission back term
+        // (raa_dt_direct) reads the sun boundary a second time for -N.
+        let calls = match pass {
+            PassKind::Forward | PassKind::VgShade => 2,
+            _ => usize::from(lit),
+        };
+        assert_eq!(wgsl.matches(call).count(), calls, "{pass:?}");
         if lit {
             // The raw frame radiance stays the only input, before the Flat/UNLIT select.
             assert!(
