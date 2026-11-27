@@ -412,6 +412,8 @@ pub struct LitRenderer {
     /// Logical `FrameGpu` feature ids set through [`LitRenderer::set_frame_feature`], one
     /// bit each; id 24 (tiling) and ids >= 64 are never stored.
     frame_features: u64,
+    /// FrameGpu.reserved water lanes for every later `prepare` (zero = no water).
+    water: [f32; 16],
     /// Area-light soft-shadow settings; `AreaShadowSettings::default()` until set.
     area_shadow_settings: AreaShadowSettings,
     /// One hero selector per viewport, created once so prepare allocates nothing.
@@ -485,6 +487,7 @@ impl LitRenderer {
             visible_bits: Vec::new(),
             virtual_set: VirtualSet::new(),
             frame_features: 0,
+            water: [0.0; 16],
             area_shadow_settings: AreaShadowSettings::default(),
             hero_selectors: std::array::from_fn(|_| HeroSelector::new()),
             active_area_heroes: 0,
@@ -1031,6 +1034,17 @@ impl LitRenderer {
 
     /// Sets logical `FrameGpu` feature `id` (S10) for every later `prepare`, after its own
     /// tiling bit. Ignores reserved ids 24 (tiling) and 40 (planar capture) and ids >= 64.
+    /// Sets the water body lanes written to `FrameGpu.reserved` by every later `prepare`
+    /// (raa_shader::WaterBody::frame_lanes; all zero = no water).
+    pub fn set_water_frame(&mut self, lanes: [f32; 16]) {
+        self.water = lanes;
+    }
+
+    /// The water lanes of the next frames.
+    pub fn water_frame(&self) -> [f32; 16] {
+        self.water
+    }
+
     pub fn set_frame_feature(&mut self, id: u32, on: bool) {
         if matches!(
             id,
@@ -1402,6 +1416,7 @@ impl LitRenderer {
             tile_columns,
             tile_rows,
             tile_stride,
+            water: self.water,
             ..FrameParams::default()
         };
         use raa_shader::{RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE};

@@ -907,6 +907,8 @@ pub struct LightingResources {
     opaque_layout: wgpu::BindGroupLayout,
     opaque_bind_group: wgpu::BindGroup,
     transparent_layout: wgpu::BindGroupLayout,
+    /// Full (with 21) when the device allows 9 fragment storage buffers, else Transparent.
+    transparent_set: GroupSet,
     transparent_bind_group: wgpu::BindGroup,
     shadow_cmp: wgpu::Sampler,
     linear_clamp: wgpu::Sampler,
@@ -967,10 +969,21 @@ impl LightingResources {
             label: Some("raa-pipeline.lighting.opaque"),
             entries: &opaque_layout_entries(),
         });
+        // A device with 9+ fragment storage buffers keeps 21 in the transparent set (the water's
+        // DDGI lookup in pass_transparent reads it); otherwise the full set without 21.
+        let transparent_set = if device.limits().max_storage_buffers_per_shader_stage >= 9 {
+            GroupSet::Full
+        } else {
+            GroupSet::Transparent
+        };
         let transparent_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("raa-pipeline.lighting.transparent"),
-                entries: &transparent_layout_entries(),
+                entries: &if transparent_set == GroupSet::Full {
+                    layout_entries().to_vec()
+                } else {
+                    transparent_layout_entries()
+                },
             });
         let spherical_dummy = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raa-pipeline.dummy.spherical_gi"),
@@ -1019,7 +1032,7 @@ impl LightingResources {
             &state.views,
             samplers,
             uniforms,
-            GroupSet::Transparent,
+            transparent_set,
         );
         LightingResources {
             layout,
@@ -1030,6 +1043,7 @@ impl LightingResources {
             opaque_bind_group,
             transparent_layout,
             transparent_bind_group,
+            transparent_set,
             shadow_cmp,
             linear_clamp,
             shadow_buffer,
@@ -1575,7 +1589,7 @@ impl LightingResources {
                 &self.state.views,
                 samplers,
                 uniforms,
-                GroupSet::Transparent,
+                self.transparent_set,
             );
         }
     }
