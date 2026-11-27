@@ -243,8 +243,6 @@ impl Engine {
                 .require_mut::<ContactHandle>("contact shadows")?;
             let mut d = contact.get();
             read_f32(&settings, "distance", &mut d.distance_m)?;
-            read_f32(&settings, "filter", &mut d.filter_m)?;
-            read_f32(&settings, "split", &mut d.split_lambda)?;
             read_f32(&settings, "thickness", &mut d.thickness_m)?;
             read_f32(&settings, "intensity", &mut d.intensity)?;
             contact.set(d)
