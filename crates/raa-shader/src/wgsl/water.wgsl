@@ -10,7 +10,7 @@
 //   [0] level, rms slope, frequency (1/m), time (s)
 //   [1] footprint lo.x, lo.z, hi.x, hi.z
 //   [2] ior, absorption sigma r, g, b (1/m, Beer-Lambert)
-//   [3] caustics on (0/1), unused x 2, water present (0/1)
+//   [3] caustics on (0/1), sun bend (1 = physical refraction), unused, water present (0/1)
 
 struct RaaWater {
     level: f32,
@@ -22,6 +22,7 @@ struct RaaWater {
     ior: f32,
     sigma: vec3<f32>,
     caustics: bool,
+    sun_bend: f32,
     present: bool,
 }
 
@@ -32,7 +33,7 @@ const RAA_WATER_ANGLE_STEP: f32 = 2.3999632;
 
 fn raa_water_unpack(r: array<vec4<f32>, 4>) -> RaaWater {
     return RaaWater(r[0].x, r[0].y, r[0].z, r[0].w, r[1].xy, r[1].zw, r[2].x, r[2].yzw, r[3].x > 0.5,
-        r[3].w > 0.5);
+        r[3].y, r[3].w > 0.5);
 }
 
 fn raa_water_inside(w: RaaWater, xz: vec2<f32>) -> bool {
@@ -108,7 +109,10 @@ fn raa_water_sun_entry(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> vec3<f3
 
 // The sun of a receiver `p` under the water: it arrives along the flat-refracted direction
 // (steeper than the sun), through `entry` where that path crosses the surface, attenuated by the
-// Fresnel transmittance. Outside the water or with caustics off (setWater caustics: false, the
+// Fresnel transmittance. `sun_bend` is artistic: the horizontal run per metre of depth is
+// straight + sun_bend x (refracted - straight), so 0 keeps the straight sun, 1 is physical and
+// more bends it further, toward and at most half a straight run past the vertical; the strip
+// of floor lit next to a wall grows by depth x sun_bend x (tan(incidence) - tan(refraction)). Outside the water or with caustics off (setWater caustics: false, the
 // unrefracted sun of before): not under, entry p, to_sun -sun_dir, transmit 1.
 struct RaaWaterSun {
     under: bool,
@@ -122,9 +126,14 @@ fn raa_water_sun(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSun {
     if !w.present || !w.caustics || p.y >= w.level || !raa_water_inside(w, p.xz) { return o; }
     let t = raa_water_refract(sun_dir, vec3<f32>(0.0, 1.0, 0.0), 1.0 / max(w.ior, 1.0));
     if t.y > -1e-3 { return o; }
+    let straight = sun_dir.xz / min(sun_dir.y, -1e-3);
+    var run = mix(straight, t.xz / t.y, w.sun_bend);
+    // Collinear with `straight` (refraction keeps the azimuth): clamp to -0.5 x straight.
+    if dot(run, straight) < -0.5 * dot(straight, straight) { run = -0.5 * straight; }
+    let dir = normalize(vec3<f32>(-run.x, -1.0, -run.y));
     o.under = true;
-    o.entry = p - t.xyz * ((w.level - p.y) / -t.y);
-    o.to_sun = -t.xyz;
+    o.entry = vec3<f32>(p.x + run.x * (w.level - p.y), w.level, p.z + run.y * (w.level - p.y));
+    o.to_sun = -dir;
     o.transmit = raa_water_sun_transmittance(w, sun_dir);
     return o;
 }

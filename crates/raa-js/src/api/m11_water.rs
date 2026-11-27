@@ -1,12 +1,14 @@
 //! m11 water API: one still water body per scene (caustics-design.md).
 //!
 //! `setWater(desc | null)` sets the body: `{level, lo: [x, z], hi: [x, z], slope?, frequency?,
-//! time?, ior?, sigma?: [r, g, b], caustics?: bool}`. Its 16 lanes go to `FrameGpu.reserved`
+//! time?, ior?, sigma?: [r, g, b], caustics?: bool, sunBend?}`. Its 16 lanes go to `FrameGpu.reserved`
 //! (water.wgsl). The water's material shader takes its normal from them, and with `caustics`
 //! (default true) the forward lights submerged receivers with the refracted sun, tested where
 //! its path enters the water, and concentrates it by the ripple's caustics (raa_water_sun,
 //! raa_water_caustic, per pixel: no pass, no texture, nothing without water); the DDGI update's
-//! sun follows the same refracted path. `caustics: false` keeps the straight, unrefracted sun.
+//! sun follows the same refracted path. `caustics: false` keeps the straight, unrefracted sun;
+//! `sunBend` (default 1 = physical) is the artistic bend of that path: 0 straight, more steeper,
+//! so the strip of floor lit next to a wall under water widens (water.wgsl raa_water_sun).
 
 use js_sys::Reflect;
 use raa_core::{GpuContext, RaaError};
@@ -91,6 +93,7 @@ impl Engine {
                     sigma: array::<3>(&desc, "sigma")?
                         .unwrap_or([0.0; 3])
                         .map(|s| s.max(0.0)),
+                    sun_bend: number(&desc, "sunBend", 1.0)?.clamp(0.0, 16.0),
                 };
                 body.frame_lanes(js::optional_bool(&desc, "caustics")?.unwrap_or(true))
             };
