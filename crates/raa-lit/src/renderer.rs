@@ -1440,6 +1440,10 @@ impl LitRenderer {
                 *word |= 1u64 << (slot % 64);
             }
         }
+        let select_all = s.select_all.get();
+        if select_all {
+            self.visible_bits.fill(u64::MAX);
+        }
         let bits = &self.visible_bits;
         let virtual_bits = &s.virtual_bits;
         let vp = scene.camera.view_proj();
@@ -1461,7 +1465,7 @@ impl LitRenderer {
                 };
                 let pose = skins.joints(tag);
                 let bounds = crate::skin_draw::instance_bounds(info.bounds, pose.is_some(), pose);
-                return crate::skin_bounds::visible(bounds, item.world, vp);
+                return select_all || crate::skin_bounds::visible(bounds, item.world, vp);
             }
             bits.get(slot / 64)
                 .is_some_and(|word| word & (1u64 << (slot % 64)) != 0)

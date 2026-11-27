@@ -21,6 +21,8 @@ mod spherical_gi;
 #[cfg(target_arch = "wasm32")]
 mod ddgi_gi;
 #[cfg(target_arch = "wasm32")]
+mod pipelines_async;
+#[cfg(target_arch = "wasm32")]
 mod nrc_gi;
 #[cfg(target_arch = "wasm32")]
 mod local_shadow;

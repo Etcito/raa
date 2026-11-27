@@ -542,6 +542,9 @@ impl Engine {
     ) -> Result<(), RaaError> {
         self.prediction_real = None;
         self.begin_scene_invocation()?;
+        // Pipelines made while a frame records are frame-path ones (lazy passes, material
+        // variants): the async mode lets their passes skip while they compile.
+        wgpu::webgpu::async_pipelines::set_in_frame(true);
         let result = self
             .runtime
             .as_mut()
@@ -550,6 +553,7 @@ impl Engine {
                 Some(timing) => runtime.frame_with_timing(now_ms, timing),
                 None => runtime.frame(now_ms),
             });
+        wgpu::webgpu::async_pipelines::set_in_frame(false);
         self.finish_scene_invocation(result.is_ok());
         result
     }

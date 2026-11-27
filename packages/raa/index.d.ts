@@ -433,6 +433,35 @@ export interface Engine {
   /** Resolves after all previously submitted GPU work completes. */
   submittedWorkDone(): Promise<void>;
 
+  /** Same switch as {@link RaaModule.setAsyncPipelines}. */
+  setAsyncPipelines(on: boolean): void;
+  /**
+   * Async pipeline counters. `pending`: still compiling; `pendingInstall`: the part made
+   * outside a frame (render graph / feature install) — do not render while it is above 0, a
+   * pass may use such a pipeline only once (a bake). Frame-path pipelines (lazy passes,
+   * material variants) only make their pass skip draws/dispatches while they compile.
+   * The skip counters and `maxCompileMs` count since {@link Engine.resetPipelineCounters}.
+   */
+  pipelineStats(): {
+    enabled: boolean;
+    pending: number;
+    pendingInstall: number;
+    createdAsync: number;
+    createdSync: number;
+    forcedSync: number;
+    failed: number;
+    skippedDraws: number;
+    skippedDispatches: number;
+    maxCompileMs: number;
+  };
+  /** Clears the skip counters and `maxCompileMs` of {@link Engine.pipelineStats}. */
+  resetPipelineCounters(): void;
+  /**
+   * Pipeline warm-up: while on, the camera draws every instance (no frustum test), so a frame
+   * requests the pipeline variants of every material of the scene. Render such frames hidden.
+   */
+  setPipelineWarmup(on: boolean): void;
+
   /**
    * Renders one frame through the same path as render() and returns its timing record.
    * A rendering failure returns the partial record with its error.
@@ -501,6 +530,13 @@ export interface RaaModule {
    *   `core.request_device`, `core.surface`.
    */
   readonly createEngine: (canvas: HTMLCanvasElement, options?: EngineOptions) => Promise<Engine>;
+  /**
+   * Creates new render/compute pipelines with createRenderPipelineAsync /
+   * createComputePipelineAsync (true) instead of the synchronous calls (false, the default),
+   * for every engine of the page. Call it before createEngine so install-time pipelines are
+   * asynchronous too. See {@link Engine.pipelineStats}.
+   */
+  readonly setAsyncPipelines: (on: boolean) => void;
 }
 
 /**

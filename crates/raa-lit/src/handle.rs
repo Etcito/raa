@@ -439,6 +439,9 @@ pub(crate) struct LitShared {
     msaa: u32,
     pub(crate) skin_source: crate::skin_views::SkinDrawSource,
     bound_skin: Cell<bool>,
+    /// Pipeline warm-up: the camera selects every instance (no frustum test), so a frame
+    /// requests the variant of every material of the scene ([`LitHandle::set_select_all`]).
+    pub(crate) select_all: Cell<bool>,
     pub(crate) meshes: MeshStore,
     pub(crate) editor: crate::editor::EditorState,
     /// The camera and cascade id sections and their draw lists.
@@ -645,6 +648,7 @@ impl LitShared {
             msaa,
             skin_source: Default::default(),
             bound_skin: Cell::new(false),
+            select_all: Cell::new(false),
             meshes: MeshStore::new(),
             editor: crate::editor::EditorState::default(),
             select: IdPrep::new(max_instances, max_materials),
@@ -1797,6 +1801,18 @@ impl LitHandle {
 
     /// True when the latest [`LitRenderer::prepare`] saw the enabled pipeline entry `taa`
     /// (S43); the prepass then adds `raa_shader::VARIANT_FLAG_MOTION_DEFORM` to its keys.
+    /// Pipeline warm-up: while on, the camera selection of each prepare skips the frustum
+    /// test (every non-virtual instance is drawn), so one frame builds the forward, prepass
+    /// and shadow variants of every material in the scene, on screen or not.
+    pub fn set_select_all(&self, on: bool) {
+        self.shared.borrow().select_all.set(on);
+    }
+
+    /// Whether [`set_select_all`](Self::set_select_all) is on.
+    pub fn select_all(&self) -> bool {
+        self.shared.borrow().select_all.get()
+    }
+
     pub(crate) fn temporal_consumer(&self) -> bool {
         self.shared.borrow().temporal_consumer
     }

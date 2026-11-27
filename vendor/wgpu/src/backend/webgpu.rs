@@ -4,6 +4,8 @@ mod defined_non_null_js_value;
 mod ext_bindings;
 // RAA patch: destroy textures and buffers when their last handle is dropped.
 mod retire;
+// RAA patch: pipelines compiled off the frame path (createRenderPipelineAsync).
+pub(crate) mod async_pipelines;
 #[allow(clippy::allow_attributes)]
 pub(crate) mod webgpu_sys;
 
@@ -1447,14 +1449,22 @@ pub struct WebPipelineLayout {
 
 #[derive(Debug, Clone)]
 pub struct WebRenderPipeline {
-    pub(crate) inner: webgpu_sys::GpuRenderPipeline,
+    /// RAA patch: ready, or still compiling asynchronously (see `async_pipelines`).
+    pub(crate) inner: async_pipelines::Slot<
+        webgpu_sys::GpuRenderPipeline,
+        webgpu_sys::GpuRenderPipelineDescriptor,
+    >,
     /// Unique identifier for this RenderPipeline.
     ident: crate::cmp::Identifier,
 }
 
 #[derive(Debug, Clone)]
 pub struct WebComputePipeline {
-    pub(crate) inner: webgpu_sys::GpuComputePipeline,
+    /// RAA patch: ready, or still compiling asynchronously (see `async_pipelines`).
+    pub(crate) inner: async_pipelines::Slot<
+        webgpu_sys::GpuComputePipeline,
+        webgpu_sys::GpuComputePipelineDescriptor,
+    >,
     /// Unique identifier for this ComputePipeline.
     ident: crate::cmp::Identifier,
 }
@@ -1480,6 +1490,8 @@ pub struct WebComputePassEncoder {
     pub(crate) inner: webgpu_sys::GpuComputePassEncoder,
     /// Unique identifier for this ComputePassEncoder.
     ident: crate::cmp::Identifier,
+    /// RAA patch: the last set pipeline is still compiling; dispatches are skipped.
+    skip: bool,
 }
 
 #[derive(Debug)]
@@ -1487,6 +1499,8 @@ pub struct WebRenderPassEncoder {
     pub(crate) inner: webgpu_sys::GpuRenderPassEncoder,
     /// Unique identifier for this RenderPassEncoder.
     ident: crate::cmp::Identifier,
+    /// RAA patch: the last set pipeline is still compiling; draws are skipped.
+    skip: bool,
 }
 
 #[derive(Debug)]
@@ -1503,6 +1517,8 @@ pub struct WebRenderBundleEncoder {
     pub(crate) inner: webgpu_sys::GpuRenderBundleEncoder,
     /// Unique identifier for this RenderBundleEncoder.
     ident: crate::cmp::Identifier,
+    /// RAA patch: the last set pipeline is still compiling; draws are skipped.
+    skip: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2421,7 +2437,9 @@ impl dispatch::DeviceInterface for WebDevice {
         let mapped_primitive = map_primitive_state(&desc.primitive);
         mapped_desc.set_primitive(&mapped_primitive);
 
-        let render_pipeline = self.inner.create_render_pipeline(&mapped_desc).unwrap();
+        // RAA patch: compiled asynchronously when the mode is on (explicit layout, no scope).
+        let may_defer = desc.layout.is_some() && self.error_scope_count.get() == 0;
+        let render_pipeline = async_pipelines::create(&self.inner, mapped_desc, may_defer);
 
         WebRenderPipeline {
             inner: render_pipeline,
@@ -2462,7 +2480,9 @@ impl dispatch::DeviceInterface for WebDevice {
             mapped_desc.set_label(label);
         }
 
-        let compute_pipeline = self.inner.create_compute_pipeline(&mapped_desc);
+        // RAA patch: compiled asynchronously when the mode is on (explicit layout, no scope).
+        let may_defer = desc.layout.is_some() && self.error_scope_count.get() == 0;
+        let compute_pipeline = async_pipelines::create(&self.inner, mapped_desc, may_defer);
 
         WebComputePipeline {
             inner: compute_pipeline,
@@ -2652,6 +2672,7 @@ impl dispatch::DeviceInterface for WebDevice {
         WebRenderBundleEncoder {
             inner: render_bundle_encoder,
             ident: crate::cmp::Identifier::create(),
+            skip: false,
         }
         .into()
     }
@@ -3121,7 +3142,7 @@ impl Drop for WebPipelineLayout {
 
 impl dispatch::RenderPipelineInterface for WebRenderPipeline {
     fn get_bind_group_layout(&self, index: u32) -> dispatch::DispatchBindGroupLayout {
-        let bind_group_layout = self.inner.get_bind_group_layout(index);
+        let bind_group_layout = async_pipelines::force(&self.inner).get_bind_group_layout(index);
 
         WebBindGroupLayout {
             inner: bind_group_layout,
@@ -3138,7 +3159,7 @@ impl Drop for WebRenderPipeline {
 
 impl dispatch::ComputePipelineInterface for WebComputePipeline {
     fn get_bind_group_layout(&self, index: u32) -> dispatch::DispatchBindGroupLayout {
-        let bind_group_layout = self.inner.get_bind_group_layout(index);
+        let bind_group_layout = async_pipelines::force(&self.inner).get_bind_group_layout(index);
 
         WebBindGroupLayout {
             inner: bind_group_layout,
@@ -3258,6 +3279,7 @@ impl dispatch::CommandEncoderInterface for WebCommandEncoder {
         WebComputePassEncoder {
             inner: compute_pass,
             ident: crate::cmp::Identifier::create(),
+            skip: false,
         }
         .into()
     }
@@ -3376,6 +3398,7 @@ impl dispatch::CommandEncoderInterface for WebCommandEncoder {
         WebRenderPassEncoder {
             inner: render_pass,
             ident: crate::cmp::Identifier::create(),
+            skip: false,
         }
         .into()
     }
@@ -3511,8 +3534,9 @@ impl Drop for WebPipelineCache {
 
 impl dispatch::ComputePassInterface for WebComputePassEncoder {
     fn set_pipeline(&mut self, pipeline: &dispatch::DispatchComputePipeline) {
-        let pipeline = &pipeline.as_webgpu().inner;
-        self.inner.set_pipeline(pipeline);
+        let inner = &self.inner;
+        self.skip =
+            !async_pipelines::with_ready(&pipeline.as_webgpu().inner, |p| inner.set_pipeline(p));
     }
 
     fn set_bind_group(
@@ -3571,6 +3595,10 @@ impl dispatch::ComputePassInterface for WebComputePassEncoder {
     }
 
     fn dispatch_workgroups(&mut self, x: u32, y: u32, z: u32) {
+        if self.skip {
+            async_pipelines::note_skipped_dispatch();
+            return;
+        }
         self.inner
             .dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(x, y, z);
     }
@@ -3580,6 +3608,10 @@ impl dispatch::ComputePassInterface for WebComputePassEncoder {
         indirect_buffer: &dispatch::DispatchBuffer,
         indirect_offset: crate::BufferAddress,
     ) {
+        if self.skip {
+            async_pipelines::note_skipped_dispatch();
+            return;
+        }
         let indirect_buffer = indirect_buffer.as_webgpu();
 
         self.inner
@@ -3606,9 +3638,9 @@ impl Drop for WebComputePassEncoder {
 
 impl dispatch::RenderPassInterface for WebRenderPassEncoder {
     fn set_pipeline(&mut self, pipeline: &dispatch::DispatchRenderPipeline) {
-        let pipeline = &pipeline.as_webgpu().inner;
-
-        self.inner.set_pipeline(pipeline);
+        let inner = &self.inner;
+        self.skip =
+            !async_pipelines::with_ready(&pipeline.as_webgpu().inner, |p| inner.set_pipeline(p));
     }
 
     fn set_bind_group(
@@ -3711,6 +3743,10 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
+        if self.skip {
+            async_pipelines::note_skipped_draw();
+            return;
+        }
         self.inner
             .draw_with_instance_count_and_first_vertex_and_first_instance(
                 vertices.end - vertices.start,
@@ -3721,6 +3757,10 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
     }
 
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        if self.skip {
+            async_pipelines::note_skipped_draw();
+            return;
+        }
         self.inner
             .draw_indexed_with_instance_count_and_first_index_and_base_vertex_and_first_instance(
                 indices.end - indices.start,
@@ -3740,6 +3780,10 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         indirect_buffer: &dispatch::DispatchBuffer,
         indirect_offset: crate::BufferAddress,
     ) {
+        if self.skip {
+            async_pipelines::note_skipped_draw();
+            return;
+        }
         let buffer = indirect_buffer.as_webgpu();
         self.inner
             .draw_indirect_with_f64(&buffer.inner, indirect_offset as f64);
@@ -3750,6 +3794,10 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         indirect_buffer: &dispatch::DispatchBuffer,
         indirect_offset: crate::BufferAddress,
     ) {
+        if self.skip {
+            async_pipelines::note_skipped_draw();
+            return;
+        }
         let buffer = indirect_buffer.as_webgpu();
         self.inner
             .draw_indexed_indirect_with_f64(&buffer.inner, indirect_offset as f64);
@@ -3769,6 +3817,10 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         indirect_offset: crate::BufferAddress,
         count: u32,
     ) {
+        if self.skip {
+            async_pipelines::note_skipped_draw();
+            return;
+        }
         let buffer = indirect_buffer.as_webgpu();
 
         for i in 0..count {
@@ -3784,6 +3836,10 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         indirect_offset: crate::BufferAddress,
         count: u32,
     ) {
+        if self.skip {
+            async_pipelines::note_skipped_draw();
+            return;
+        }
         let buffer = indirect_buffer.as_webgpu();
 
         for i in 0..count {
@@ -3810,6 +3866,10 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         _count_buffer_offset: crate::BufferAddress,
         _max_count: u32,
     ) {
+        if self.skip {
+            async_pipelines::note_skipped_draw();
+            return;
+        }
         panic!(
             "MULTI_DRAW_INDIRECT_COUNT feature must be enabled to call multi_draw_indirect_count"
         )
@@ -3823,6 +3883,10 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         _count_buffer_offset: crate::BufferAddress,
         _max_count: u32,
     ) {
+        if self.skip {
+            async_pipelines::note_skipped_draw();
+            return;
+        }
         panic!("MULTI_DRAW_INDIRECT_COUNT feature must be enabled to call multi_draw_indexed_indirect_count")
     }
 
@@ -3898,8 +3962,9 @@ impl Drop for WebCommandBuffer {
 
 impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
     fn set_pipeline(&mut self, pipeline: &dispatch::DispatchRenderPipeline) {
-        let pipeline = &pipeline.as_webgpu().inner;
-        self.inner.set_pipeline(pipeline);
+        let inner = &self.inner;
+        self.skip =
+            !async_pipelines::with_ready(&pipeline.as_webgpu().inner, |p| inner.set_pipeline(p));
     }
 
     fn set_bind_group(
@@ -3975,6 +4040,10 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
+        if self.skip {
+            async_pipelines::note_skipped_draw();
+            return;
+        }
         self.inner
             .draw_with_instance_count_and_first_vertex_and_first_instance(
                 vertices.end - vertices.start,
@@ -3985,6 +4054,10 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
     }
 
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        if self.skip {
+            async_pipelines::note_skipped_draw();
+            return;
+        }
         self.inner
             .draw_indexed_with_instance_count_and_first_index_and_base_vertex_and_first_instance(
                 indices.end - indices.start,
@@ -4000,6 +4073,10 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
         indirect_buffer: &dispatch::DispatchBuffer,
         indirect_offset: crate::BufferAddress,
     ) {
+        if self.skip {
+            async_pipelines::note_skipped_draw();
+            return;
+        }
         let buffer = indirect_buffer.as_webgpu();
         self.inner
             .draw_indirect_with_f64(&buffer.inner, indirect_offset as f64);
@@ -4010,6 +4087,10 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
         indirect_buffer: &dispatch::DispatchBuffer,
         indirect_offset: crate::BufferAddress,
     ) {
+        if self.skip {
+            async_pipelines::note_skipped_draw();
+            return;
+        }
         let buffer = indirect_buffer.as_webgpu();
         self.inner
             .draw_indexed_indirect_with_f64(&buffer.inner, indirect_offset as f64);
