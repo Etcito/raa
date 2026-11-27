@@ -53,7 +53,7 @@ interface ShadowSettings {
 
 The argument of `setShadows`. Every field is optional and merged over the current values. The
 algorithm is a **4-cascade stable cascaded shadow map (CSM) with percentage-closer soft shadows
-(PCSS)**: the view frustum is split with the practical split scheme (`split`, default 0.85; with `cover` and `spread` the splits run over `[near, min(far, cover distance, 4 x distance)]`), each cascade
+(PCSS)**: the view frustum is split with the practical split scheme (`split`, default 0.875; with `cover` and `spread` the splits run over `[near, min(far, cover distance, 4 x distance)]`), each cascade
 renders into one slice of a `Depth32Float` array, and the sampled cascade is snapped to whole
 texels in light space so the map does not swim as the camera moves. PCSS widens the penumbra with
 occluder distance, never narrower than `filter` metres (and 1.5 texels of the cascade), so the
@@ -66,8 +66,8 @@ in a per-pixel rotated Poisson disk, turned with the camera jitter under TAA, sl
 | `softness` | - | `1` | > 0 and <= 16 | Multiplier of the sun's angular radius used as the PCSS penumbra; 1 matches the real sun (0.0047 rad), larger values widen the soft shadow. |
 | `distance` | metres | `60` | > 0 | Distance from the camera to the far cascade split. |
 | `resolution` | texels | `2048` | `1024`, `2048` or `4096` | Edge length of one cascade's shadow map. |
-| `filter` | metres | `0.015` | 0 to 0.5 | Minimum PCF radius, the same world size in every cascade (at least 1.5 texels of each). |
-| `split` | - | `0.85` | 0 to 1 | Practical split weight (0 uniform, 1 logarithmic). |
+| `filter` | metres | `0.015625` | 0 to 0.5 | Minimum PCF radius, the same world size in every cascade (at least 1.5 texels of each). |
+| `split` | - | `0.875` | 0 to 1 | Practical split weight (0 uniform, 1 logarithmic). |
 | `spread` | - | `true` | boolean | With `cover`: spread the splits over the scene the camera can see instead of `[near, distance]`. |
 
 A wrong type, a non-finite number or a value outside its range throws `shadow.invalid` naming the

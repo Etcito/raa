@@ -36,10 +36,10 @@ pub struct ShadowDesc {
 
 /// Default practical split weight: more logarithmic than the plain 0.75, the near cascades
 /// keep their density once `spread` widens the split range.
-pub const SHADOW_SPLIT_DEFAULT: f32 = 0.85;
+pub const SHADOW_SPLIT_DEFAULT: f32 = 0.875;
 
 /// Default minimum filter radius (m).
-pub const SHADOW_FILTER_DEFAULT_M: f32 = 0.015;
+pub const SHADOW_FILTER_DEFAULT_M: f32 = 0.015625;
 
 impl Default for ShadowDesc {
     fn default() -> Self {
