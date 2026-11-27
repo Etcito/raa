@@ -10,7 +10,7 @@
 //   [0] level, rms slope, frequency (1/m), time (s)
 //   [1] footprint lo.x, lo.z, hi.x, hi.z
 //   [2] ior, absorption sigma r, g, b (1/m, Beer-Lambert)
-//   [3] caustics on (0/1), sun bend (1 = physical refraction), unused, water present (0/1)
+//   [3] caustics on (0/1), sun bend (1 = physical refraction), sky caustic strength, water present (0/1)
 
 struct RaaWater {
     level: f32,
@@ -23,6 +23,7 @@ struct RaaWater {
     sigma: vec3<f32>,
     caustics: bool,
     sun_bend: f32,
+    sky_caustics: f32,
     present: bool,
 }
 
@@ -33,7 +34,7 @@ const RAA_WATER_ANGLE_STEP: f32 = 2.3999632;
 
 fn raa_water_unpack(r: array<vec4<f32>, 4>) -> RaaWater {
     return RaaWater(r[0].x, r[0].y, r[0].z, r[0].w, r[1].xy, r[1].zw, r[2].x, r[2].yzw, r[3].x > 0.5,
-        r[3].y, r[3].w > 0.5);
+        r[3].y, r[3].z, r[3].w > 0.5);
 }
 
 fn raa_water_inside(w: RaaWater, xz: vec2<f32>) -> bool {
@@ -140,7 +141,7 @@ fn raa_water_sun(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSun {
             1.0 / max(w.ior, 1.0));
         if tw.y < -1e-3 { refracted = tw.xz / tw.y; }
         o.k = raa_water_caustic_at(w, sun_dir, p, sv);
-        o.sky = raa_water_sky_caustic(w, w.level - p.y, sv);
+        o.sky = raa_water_sky_caustic(w, p);
     }
     var run = mix(straight, refracted, w.sun_bend);
     // Past the vertical by at most half a straight run (along the sun's azimuth).
@@ -155,16 +156,46 @@ fn raa_water_sun(w: RaaWater, sun_dir: vec3<f32>, p: vec3<f32>) -> RaaWaterSun {
     return o;
 }
 
-// Soft caustics of the sky on a submerged receiver (the sky is an extended source, so its pattern
-// through the ripple is faint and broad): the zenith's caustics at the receiver's solved surface
-// point, for 0.6 x the depth (broader, less focused cells), capped at 4 and scaled to 0.35 of
-// their contrast. A linear contrast scale keeps the mean near 1 (the floor's average ambient
-// light is unchanged); the shadowed floor under water shows faint moving light, not a flat tone.
-const RAA_WATER_SKY_CAUSTIC_STRENGTH: f32 = 0.35;
+// Radius (m, in the water plane) of the disk of entry points whose sun visibility a submerged
+// receiver averages: the ripple spreads the refracted sun by about (1 - 1/ior) x 2 slope per
+// metre of depth (exaggerated with the sun bend like the path itself), plus the sun disk
+// (0.0093 rad), so the shadow of a wall under the water ends on a wide wavy penumbra.
+const RAA_WATER_SHADOW_TAPS: u32 = 6u;
 
-fn raa_water_sky_caustic(w: RaaWater, depth: f32, sv: RaaWaterSolve) -> f32 {
-    let k = raa_water_caustic_depth(w, vec3<f32>(0.0, -1.0, 0.0), 0.6 * depth, sv);
-    return 1.0 + RAA_WATER_SKY_CAUSTIC_STRENGTH * (min(k, 4.0) - 1.0);
+fn raa_water_penumbra(w: RaaWater, p: vec3<f32>) -> f32 {
+    let spread = max(w.sun_bend, 1.0) * (1.0 - 1.0 / max(w.ior, 1.0)) * 2.0 * w.slope + 0.0093;
+    return max(w.level - p.y, 0.0) * spread;
+}
+
+// Tap i of RAA_WATER_SHADOW_TAPS on the unit disk (Vogel spiral), rotated by seed in [0, 1).
+fn raa_water_penumbra_tap(i: u32, seed: f32) -> vec2<f32> {
+    let a = RAA_WATER_ANGLE_STEP * f32(i) + 6.28318531 * seed;
+    let r = sqrt((f32(i) + 0.5) / f32(RAA_WATER_SHADOW_TAPS));
+    return r * vec2<f32>(cos(a), sin(a));
+}
+
+// Soft caustics of the sky on a submerged receiver (the sky is an extended source, so its pattern
+// through the ripple is faint and broad): the first-order area ratio of zenith light refracted by
+// the ripple straight above p and spread over 0.6 x the depth (broader cells),
+// 1 - (1 - 1/ior) * 0.6 depth * laplacian(h), its contrast clamped to +-1 and scaled by the
+// strength (lane sky_caustics, 0 = off). The surface point is p's own xz, not the sun's solved
+// preimage: those preimages crowd where the ripple diverges the sun, which biased the zenith
+// pattern 5 to 13 % dark; a symmetric function of the Laplacian at uniform points averages 1.
+fn raa_water_sky_caustic(w: RaaWater, p: vec3<f32>) -> f32 {
+    if w.sky_caustics <= 0.0 { return 1.0; }
+    let norm = raa_water_norm();
+    var lap = 0.0;
+    for (var i = 0u; i < RAA_WATER_WAVES; i++) {
+        let fi = f32(i);
+        let angle = 0.4 + RAA_WATER_ANGLE_STEP * fi;
+        let d = vec2<f32>(cos(angle), sin(angle));
+        let k = 3.14159265 * w.frequency * pow(RAA_WATER_RATIO, fi);
+        let s = w.slope * pow(RAA_WATER_RATIO, -0.5 * fi) / norm;
+        let phase = 6.28318531 * fract(0.618034 * (fi + 1.0)) - sqrt(9.81 * k) * w.time;
+        lap -= s * k * sin(k * dot(d, p.xz) + phase);
+    }
+    let c = -(1.0 - 1.0 / max(w.ior, 1.0)) * 0.6 * (w.level - p.y) * lap;
+    return 1.0 + w.sky_caustics * clamp(c, -1.0, 1.0);
 }
 
 // Flat-surface transmittance of the sun into the water: 1 - F at the sun's incidence.

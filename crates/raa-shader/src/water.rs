@@ -29,6 +29,9 @@ pub struct WaterBody {
     /// Artistic bend of the sun under the water (raa_water_sun): 0 straight, 1 physical
     /// refraction, more steeper (bounded at half a straight run past the vertical).
     pub sun_bend: f32,
+    /// Strength of the sky's soft caustics on submerged receivers (raa_water_sky_caustic):
+    /// 0 off, 0.35 by default.
+    pub sky_caustics: f32,
 }
 
 impl Default for WaterBody {
@@ -43,6 +46,7 @@ impl Default for WaterBody {
             ior: 1.33,
             sigma: [0.0; 3],
             sun_bend: 1.0,
+            sky_caustics: 0.35,
         }
     }
 }
@@ -65,7 +69,7 @@ impl WaterBody {
             self.sigma[2],
             if caustics { 1.0 } else { 0.0 },
             self.sun_bend,
-            0.0,
+            self.sky_caustics,
             1.0,
         ]
     }
@@ -154,6 +158,26 @@ impl WaterBody {
         let a = [e + h1[0] - h0[0], h1[1] - h0[1]];
         let b = [h2[0] - h0[0], e + h2[1] - h0[1]];
         1.0 / ((a[0] * b[1] - a[1] * b[0]).abs() / (e * e)).max(0.15)
+    }
+
+    /// The sky's soft caustics on the submerged point `p`, as `raa_water_sky_caustic`.
+    pub fn sky_caustic(&self, p: [f32; 3]) -> f32 {
+        if self.sky_caustics <= 0.0 {
+            return 1.0;
+        }
+        let norm = norm();
+        let mut lap = 0.0f32;
+        for i in 0..WATER_WAVES {
+            let fi = i as f32;
+            let (dz, dx) = (0.4 + ANGLE_STEP * fi).sin_cos();
+            let k = std::f32::consts::PI * self.frequency * RATIO.powf(fi);
+            let s = self.slope * RATIO.powf(-0.5 * fi) / norm;
+            let phase = std::f32::consts::TAU * (0.618_034 * (fi + 1.0)).fract()
+                - (9.81 * k).sqrt() * self.time;
+            lap -= s * k * (k * (dx * p[0] + dz * p[2]) + phase).sin();
+        }
+        let c = -(1.0 - 1.0 / self.ior.max(1.0)) * 0.6 * (self.level - p[1]) * lap;
+        1.0 + self.sky_caustics * c.clamp(-1.0, 1.0)
     }
 
     /// Mean (flat-water) horizontal run per metre of depth from a submerged receiver up to where the sun's path
@@ -350,6 +374,28 @@ mod tests {
 
     /// The strip lit next to a wall under 1 m of water at a 75 degree sun: tan 15 - tan(refracted)
     /// = 0.07 m when physical, 6x that bent (0.42, clamped to 1.5 x tan 15 = 0.40), none straight.
+    #[test]
+    fn sky_caustics_average_one_and_vary() {
+        let w = pool();
+        for depth in [0.3f32, 1.0, 2.0] {
+            let (mut sum, mut sq, n) = (0.0f64, 0.0f64, 160);
+            for i in 0..n {
+                for j in 0..n {
+                    let p = [i as f32 * 0.025, w.level - depth, j as f32 * 0.025];
+                    let v = w.sky_caustic(p) as f64;
+                    sum += v;
+                    sq += v * v;
+                }
+            }
+            let mean = sum / (n * n) as f64;
+            let std = (sq / (n * n) as f64 - mean * mean).sqrt();
+            assert!((mean - 1.0).abs() < 0.02, "depth {depth}: mean {mean}");
+            assert!(std > 0.01, "depth {depth}: std {std}");
+        }
+        let off = WaterBody { sky_caustics: 0.0, ..pool() };
+        assert_eq!(off.sky_caustic([1.0, off.level - 1.0, 1.0]), 1.0);
+    }
+
     #[test]
     fn sun_bend_widens_the_lit_strip() {
         let e = 75f32.to_radians();
