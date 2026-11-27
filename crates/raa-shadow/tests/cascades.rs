@@ -324,3 +324,27 @@ fn cover_distance_is_laddered() {
     let e = cover_distance(&camera(Vec3::new(-9.1, 1.6, -0.9), -1.5), &atrium()).unwrap();
     assert_eq!(d, e);
 }
+
+#[test]
+fn spread_runs_the_splits_over_the_visible_scene() {
+    let scene = atrium();
+    let view = camera(Vec3::new(-9.0, 1.6, -0.9), -1.5);
+    let plain = cascade_frame_covered(&view, FOV, ASPECT, 0.1, 60.0, 20.0, sun(), RES, Some(&scene));
+    let spread = raa_shadow::cascade_frame_covered_n(
+        &view, FOV, ASPECT, 0.1, 60.0, 20.0, sun(), RES, Some(&scene), 4, 0.85, true,
+    );
+    let cover = spread.cover_m.unwrap();
+    // The last split still reaches the cover distance; the middle ones move out with it.
+    assert_eq!(spread.splits[3], cover.min(60.0));
+    assert!(spread.splits[2] > plain.splits[2], "{spread:?} {plain:?}");
+    // A shadow distance past the scene is capped by the cover distance (no split wasted).
+    let far = raa_shadow::cascade_frame_covered_n(
+        &view, FOV, ASPECT, 0.1, 60.0, 200.0, sun(), RES, Some(&scene), 4, 0.85, true,
+    );
+    assert_eq!(far.splits, spread.splits);
+    // Without a scene, spread changes nothing.
+    let none = raa_shadow::cascade_frame_covered_n(
+        &view, FOV, ASPECT, 0.1, 60.0, 20.0, sun(), RES, None, 4, 0.85, true,
+    );
+    assert_eq!(none.splits, raa_shadow::cascade_splits(0.1, 20.0, 0.85, 4));
+}

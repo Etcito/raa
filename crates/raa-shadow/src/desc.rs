@@ -27,7 +27,16 @@ pub struct ShadowDesc {
     /// Practical split weight of the cascades in [0, 1]: 0 uniform, 1 logarithmic. Higher
     /// values give the near cascades more texels per metre (sharper close shadows).
     pub split_lambda: f32,
+    /// With `cover`: spread the cascade splits over the scene the camera can see
+    /// (`[near, min(far, cover distance, 4 x distance)]`) instead of `[near, distance]`, so the
+    /// middle cascades reach the far side of the scene instead of leaving it to the coarse
+    /// scene-wide last cascade, and no split is spent past the scene.
+    pub spread: bool,
 }
+
+/// Default practical split weight: more logarithmic than the plain 0.75, the near cascades
+/// keep their density once `spread` widens the split range.
+pub const SHADOW_SPLIT_DEFAULT: f32 = 0.85;
 
 /// Default minimum filter radius (m).
 pub const SHADOW_FILTER_DEFAULT_M: f32 = 0.015;
@@ -41,7 +50,8 @@ impl Default for ShadowDesc {
             cover: true,
             cascades: 4,
             filter_m: SHADOW_FILTER_DEFAULT_M,
-            split_lambda: crate::cascade_access::SPLIT_LAMBDA,
+            split_lambda: SHADOW_SPLIT_DEFAULT,
+            spread: true,
         }
     }
 }

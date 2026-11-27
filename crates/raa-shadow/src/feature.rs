@@ -260,6 +260,7 @@ impl FeaturePass for ShadowPass {
             scene.as_ref(),
             desc.cascades as usize,
             desc.split_lambda,
+            desc.spread,
         );
         // A G frame of forward "layers-interlaced" that skips the cascades keeps the matrices
         // and splits the cascade layers were last rendered with (OIT, fur shells and opaque
@@ -510,6 +511,7 @@ mod tests {
             cascades: 4,
             filter_m: 0.02,
             split_lambda: 0.75,
+            spread: true,
         };
         let mut out = [0u8; SHADOW_GPU_SIZE];
         pack_shadow(&mut out, &matrices, &splits, &desc);

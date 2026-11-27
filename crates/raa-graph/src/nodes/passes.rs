@@ -1218,6 +1218,16 @@ fn shadow_gi_types() -> Vec<NodeTypeSpec> {
                     &[],
                     "raa-shadow/src/desc.rs:30",
                 ),
+                value(
+                    Fid::Shadow,
+                    "spread",
+                    "Spread over scene",
+                    "Shadows",
+                    ParamValue::Bool(shadow.spread),
+                    OPEN,
+                    &[],
+                    "raa-shadow/src/desc.rs:34",
+                ),
             ],
             // raa-shadow/src/caster.rs:177 (group 2 uniform) over the lit group 0 vertex
             // bindings (raa-lit/src/handle.rs:207: atlas, sampler, 6 storage + palette, frame).

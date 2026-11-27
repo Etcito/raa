@@ -43,9 +43,15 @@ export interface ShadowSettings {
   filter?: number;
   /**
    * Practical split weight of the cascades, 0..1 (0 uniform, 1 logarithmic); higher values
-   * give the near cascades more texels per metre. Default 0.75.
+   * give the near cascades more texels per metre. Default 0.85.
    */
   split?: number;
+  /**
+   * With `cover`: spread the cascade splits over the part of the scene the camera can see,
+   * `[near, min(far, cover distance, 4 x distance)]`, instead of `[near, distance]`, so the
+   * middle cascades reach the far side of the scene. Default true.
+   */
+  spread?: boolean;
 }
 
 /** What the last `shadow.csm` frame computed, from {@link Engine.shadowStats}. */
