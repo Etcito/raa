@@ -122,7 +122,7 @@ fn require_object(settings: &JsValue, method: &str) -> Result<(), RaaError> {
 
 #[wasm_bindgen(js_class = Engine)]
 impl Engine {
-    /// Sets the cascaded sun shadows: `{softness?, distance?, resolution?: 1024|2048|4096}`
+    /// Sets the cascaded sun shadows: `{softness?, distance?, filter?, split?, resolution?: 1024|2048|4096}`
     /// merged over the current settings. Out-of-range values throw `shadow.invalid` naming
     /// the field; nothing changes on a refusal.
     #[wasm_bindgen(js_name = setShadows)]
@@ -133,6 +133,8 @@ impl Engine {
             let mut d = shadow.get();
             read_f32(&settings, "softness", &mut d.softness)?;
             read_f32(&settings, "distance", &mut d.distance_m)?;
+            read_f32(&settings, "filter", &mut d.filter_m)?;
+            read_f32(&settings, "split", &mut d.split_lambda)?;
             if let Some(v) = get(&settings, "cover")? {
                 d.cover = v
                     .as_bool()
@@ -241,6 +243,8 @@ impl Engine {
                 .require_mut::<ContactHandle>("contact shadows")?;
             let mut d = contact.get();
             read_f32(&settings, "distance", &mut d.distance_m)?;
+            read_f32(&settings, "filter", &mut d.filter_m)?;
+            read_f32(&settings, "split", &mut d.split_lambda)?;
             read_f32(&settings, "thickness", &mut d.thickness_m)?;
             read_f32(&settings, "intensity", &mut d.intensity)?;
             contact.set(d)

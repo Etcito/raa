@@ -20,7 +20,17 @@ pub struct ShadowDesc {
     /// Number of cascades actually used and rendered: 1..=4 (the splits are the practical
     /// scheme for this count; the array keeps 4 layers, the unused ones are not rendered).
     pub cascades: u32,
+    /// Minimum PCF filter radius in metres (>= 0, <= 0.5): the same world size in every
+    /// cascade (at least 1.5 texels of each), so the shadow edge stays smooth where a cascade
+    /// is coarse and does not change at a cascade boundary. The sun penumbra widens it.
+    pub filter_m: f32,
+    /// Practical split weight of the cascades in [0, 1]: 0 uniform, 1 logarithmic. Higher
+    /// values give the near cascades more texels per metre (sharper close shadows).
+    pub split_lambda: f32,
 }
+
+/// Default minimum filter radius (m).
+pub const SHADOW_FILTER_DEFAULT_M: f32 = 0.015;
 
 impl Default for ShadowDesc {
     fn default() -> Self {
@@ -30,6 +40,8 @@ impl Default for ShadowDesc {
             resolution: 2048,
             cover: true,
             cascades: 4,
+            filter_m: SHADOW_FILTER_DEFAULT_M,
+            split_lambda: crate::cascade_access::SPLIT_LAMBDA,
         }
     }
 }
@@ -54,6 +66,18 @@ impl ShadowDesc {
             return Err(invalid(format!(
                 "distance_m must be finite and > 0, got {}",
                 self.distance_m
+            )));
+        }
+        if !(self.filter_m.is_finite() && (0.0..=0.5).contains(&self.filter_m)) {
+            return Err(invalid(format!(
+                "filter_m must be finite and in [0, 0.5], got {}",
+                self.filter_m
+            )));
+        }
+        if !(self.split_lambda.is_finite() && (0.0..=1.0).contains(&self.split_lambda)) {
+            return Err(invalid(format!(
+                "split_lambda must be finite and in [0, 1], got {}",
+                self.split_lambda
             )));
         }
         if !(1..=4).contains(&self.cascades) {
@@ -114,6 +138,19 @@ mod tests {
                     ..Default::default()
                 },
                 "distance_m",
+            );
+        }
+    }
+
+    #[test]
+    fn filter_refused() {
+        for v in [-0.01, 0.6, f32::NAN, f32::INFINITY] {
+            refused(
+                ShadowDesc {
+                    filter_m: v,
+                    ..Default::default()
+                },
+                "filter_m",
             );
         }
     }

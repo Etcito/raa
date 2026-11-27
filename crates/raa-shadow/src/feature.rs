@@ -158,7 +158,7 @@ fn write_vec4(out: &mut [u8], v: [f32; 4]) {
 
 /// Packs `ShadowGpu` (S10): `cascade_view_proj` @0, `splits` @256, `params` @272
 /// (softness, normal-offset texels, 1/resolution, enabled 1) and `params2` @288
-/// (0, blend band, cascade count, 0). `FrameGpu.sun_dir.w` supplies the sun angular radius.
+/// (minimum filter radius m, blend band, cascade count, 0). `FrameGpu.sun_dir.w` supplies the sun angular radius.
 fn pack_shadow(
     out: &mut [u8; SHADOW_GPU_SIZE],
     matrices: &[Mat4; CASCADES],
@@ -180,7 +180,7 @@ fn pack_shadow(
     );
     write_vec4(
         &mut out[OFF_PARAMS2..OFF_PARAMS2 + 16],
-        [0.0, BLEND_BAND, desc.cascades as f32, 0.0],
+        [desc.filter_m, BLEND_BAND, desc.cascades as f32, 0.0],
     );
 }
 
@@ -259,6 +259,7 @@ impl FeaturePass for ShadowPass {
             desc.resolution,
             scene.as_ref(),
             desc.cascades as usize,
+            desc.split_lambda,
         );
         // A G frame of forward "layers-interlaced" that skips the cascades keeps the matrices
         // and splits the cascade layers were last rendered with (OIT, fur shells and opaque
@@ -507,6 +508,8 @@ mod tests {
             resolution: 1024,
             cover: true,
             cascades: 4,
+            filter_m: 0.02,
+            split_lambda: 0.75,
         };
         let mut out = [0u8; SHADOW_GPU_SIZE];
         pack_shadow(&mut out, &matrices, &splits, &desc);
@@ -522,8 +525,8 @@ mod tests {
         assert_eq!(f32_at(&out, OFF_PARAMS + 4), NORMAL_OFFSET_TEXELS);
         assert_eq!(f32_at(&out, OFF_PARAMS + 8), 1.0 / 1024.0);
         assert_eq!(f32_at(&out, OFF_PARAMS + 12), 1.0);
-        // params2 @288 = (0, blend band, 0, 0).
-        assert_eq!(f32_at(&out, OFF_PARAMS2), 0.0);
+        // params2 @288 = (filter m, blend band, cascades, 0).
+        assert_eq!(f32_at(&out, OFF_PARAMS2), 0.02);
         assert_eq!(f32_at(&out, OFF_PARAMS2 + 4), BLEND_BAND);
         assert_eq!(f32_at(&out, OFF_PARAMS2 + 8), 4.0);
         assert_eq!(f32_at(&out, OFF_PARAMS2 + 12), 0.0);
