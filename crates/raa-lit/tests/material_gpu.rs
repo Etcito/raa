@@ -1,5 +1,5 @@
 use raa_lit::{
-    DrawClass, FLAG_DOUBLE_SIDED, FLAG_FUR, FLAG_NO_SHADOW, FLAG_TRANSMISSIVE, FLAG_TRANSPARENT,
+    DrawClass, FLAG_DIFFUSE_TRANSMISSION, FLAG_DOUBLE_SIDED, FLAG_FUR, FLAG_NO_SHADOW, FLAG_TRANSMISSIVE, FLAG_TRANSPARENT,
     FLAG_UNLIT, FLAG_VERTEX_FN, MaterialFnId, SURFACE_MATERIAL_GPU_SIZE, SurfaceMaterial,
     SurfaceModel,
 };
@@ -45,6 +45,8 @@ fn distinct() -> SurfaceMaterial {
         thickness: 0.53,
         attenuation_color: [0.61, 0.62, 0.63],
         attenuation_distance: 0.64,
+        diffuse_transmission: 0.55,
+        diffuse_transmission_color: [1.0, 0.5, 0.0],
         flags: FLAG_DOUBLE_SIDED | FLAG_NO_SHADOW,
         params,
         fur: [0.71, 0.72, 0.73, 32.0],
@@ -62,10 +64,11 @@ fn write_gpu_lays_out_every_256_byte_offset() {
     assert_eq!(&out[..4], &[0xAA; 4], "write_gpu appends");
     let b = &out[4..];
     assert_eq!(vec4_at(b, 0), [0.11, 0.12, 0.13, 0.14]);
-    assert_eq!(vec4_at(b, 16), [0.21, 0.22, 0.23, 0.0]);
+    // emissive.w: the diffuse transmission colour, 255 + 256 x 128 (0.5 x 255 rounds up) + 0.
+    assert_eq!(vec4_at(b, 16), [0.21, 0.22, 0.23, 33023.0]);
     assert_eq!(vec4_at(b, 32), [0.31, 0.32, 0.33, 0.34]);
     assert_eq!(vec4_at(b, 48), [0.41, 0.42, 0.43, 0.44]);
-    assert_eq!(vec4_at(b, 64), [0.51, 1.52, 0.53, 0.0]);
+    assert_eq!(vec4_at(b, 64), [0.51, 1.52, 0.53, 0.55]);
     assert_eq!(vec4_at(b, 80), [0.61, 0.62, 0.63, 0.64]);
     assert_eq!(
         [
@@ -74,7 +77,12 @@ fn write_gpu_lays_out_every_256_byte_offset() {
             u32_at(b, 104),
             u32_at(b, 108)
         ],
-        [2, 7, FLAG_DOUBLE_SIDED | FLAG_NO_SHADOW, 4097]
+        [
+            2,
+            7,
+            FLAG_DOUBLE_SIDED | FLAG_NO_SHADOW | FLAG_DIFFUSE_TRANSMISSION,
+            4097
+        ]
     );
     for i in 0..8 {
         let base = 100.0 + (i * 4) as f32;
@@ -209,6 +217,7 @@ fn validate_refuses_each_field_by_name() {
         ("clearcoat", |m, v| m.clearcoat = v),
         ("sheen_roughness", |m, v| m.sheen_roughness = v),
         ("transmission", |m, v| m.transmission = v),
+        ("diffuse_transmission", |m, v| m.diffuse_transmission = v),
     ] {
         for bad in [-0.01, 1.01, f32::NAN, f32::INFINITY] {
             let mut m = d();
@@ -240,6 +249,11 @@ fn validate_refuses_each_field_by_name() {
             "attenuation_distance",
         );
     }
+    for bad in [-0.01, 1.01, f32::NAN] {
+        let mut m = d();
+        m.diffuse_transmission_color[2] = bad;
+        assert_refused(m, "diffuse_transmission_color[2]");
+    }
     let mut m = d();
     m.params[5][2] = f32::NAN;
     assert_refused(m, "params[5][2]");
@@ -266,4 +280,39 @@ fn class_maps_flags() {
         with(FLAG_FUR | FLAG_TRANSPARENT).class(),
         DrawClass::Transparent
     );
+}
+
+#[test]
+fn diffuse_transmission_defaults_off_and_sets_its_flag_only_when_positive() {
+    let d = SurfaceMaterial::default();
+    assert_eq!((d.diffuse_transmission, d.diffuse_transmission_color), (0.0, [1.0; 3]));
+    let mut out = Vec::new();
+    d.write_gpu(&mut out);
+    // Off: transmission.w 0, no flag; the colour word of white is 0xFFFFFF.
+    assert_eq!(f32_at(&out, 76), 0.0);
+    assert_eq!(f32_at(&out, 28), 16_777_215.0);
+    assert_eq!(u32_at(&out, 104) & FLAG_DIFFUSE_TRANSMISSION, 0);
+    // A caller-set bit without a weight is dropped; a weight sets it whatever the caller flags.
+    let stale = SurfaceMaterial {
+        flags: FLAG_DIFFUSE_TRANSMISSION | FLAG_DOUBLE_SIDED,
+        ..SurfaceMaterial::default()
+    };
+    assert_eq!(stale.gpu_flags(), FLAG_DOUBLE_SIDED);
+    let on = SurfaceMaterial {
+        diffuse_transmission: 0.8,
+        diffuse_transmission_color: [1.0, 0.6, 0.2],
+        ..SurfaceMaterial::default()
+    };
+    assert_eq!(on.gpu_flags(), FLAG_DIFFUSE_TRANSMISSION);
+    assert!(on.validate().is_ok());
+    // Still the opaque class: drawn by the prepass and forward, never by OIT.
+    assert_eq!(on.class(), DrawClass::Opaque);
+    let mut out = Vec::new();
+    on.write_gpu(&mut out);
+    assert_eq!(f32_at(&out, 76), 0.8);
+    assert_eq!(u32_at(&out, 104), FLAG_DIFFUSE_TRANSMISSION);
+    // 0.6 x 255 = 153, 0.2 x 255 = 51: the WGSL decode u32(w) & 255, >> 8, >> 16.
+    let word = f32_at(&out, 28) as u32;
+    assert_eq!(f32_at(&out, 28), word as f32, "exact integer float");
+    assert_eq!([word & 255, (word >> 8) & 255, (word >> 16) & 255], [255, 153, 51]);
 }
