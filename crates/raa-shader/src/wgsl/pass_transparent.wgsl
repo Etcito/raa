@@ -166,21 +166,113 @@ fn raa_pass_oit_append(frag: vec4<f32>, color: vec3<f32>, alpha: f32) {
     );
 }
 
-// S11 final colour plus transmission, then fog; alpha is the material opacity.
+// Screen reflection of a smooth transmissive fragment (water, glass): the reflected ray is
+// marched in world space against the opaque depth copy (group 1 binding 10) and the opaque
+// colour copy (binding 9) is read where it passes behind the copy's surface. The result feeds
+// ShadeCtx.screen_reflection: the ambient providers use it in place of the environment (sky
+// cube occluded by the probes) by its weight, so the Fresnel split-sum weighting is unchanged.
+// The weight fades with the roughness, at the screen borders and towards the march distance;
+// a ray that leaves the screen, goes behind the camera or meets nothing has weight 0.
+const RAA_TRANSPARENT_SSR_STEPS: u32 = 48u;
+const RAA_TRANSPARENT_SSR_REFINE: u32 = 6u;
+const RAA_TRANSPARENT_SSR_MAX_ROUGHNESS: f32 = 0.3;
+const RAA_TRANSPARENT_SSR_DISTANCE: f32 = 40.0;
+
+// View depth (metres in front of the camera) of the opaque copy at `uv`; 1e30 for the far plane.
+fn raa_transparent_opaque_depth(uv: vec2<f32>, size: vec2<u32>) -> f32 {
+    let px = min(vec2<u32>(uv * vec2<f32>(size)), size - vec2<u32>(1u));
+    let depth = textureLoad(raa_opaque_depth, px, 0).r;
+    if depth >= 1.0 { return 1e30; }
+    let v = raa_frame.inv_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    return -v.z / v.w;
+}
+
+// Screen uv and view depth of world point p: (u, v, depth, 0), or w = -1 when p is behind the camera.
+fn raa_transparent_project(p: vec3<f32>) -> vec4<f32> {
+    let clip = raa_frame.view_proj * vec4<f32>(p, 1.0);
+    if clip.w <= 1e-4 { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+    let ndc = clip.xy / clip.w;
+    let depth = -(raa_frame.view * vec4<f32>(p, 1.0)).z;
+    return vec4<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5, depth, 0.0);
+}
+
+fn raa_transparent_screen_reflection(c: ShadeCtx, s: MaterialOutput, geometric: vec3<f32>) -> vec4<f32> {
+    let size = textureDimensions(raa_opaque_depth);
+    if size.x <= 1u || s.roughness >= RAA_TRANSPARENT_SSR_MAX_ROUGHNESS { return vec4<f32>(0.0); }
+    var r = reflect(-c.view_dir, s.normal);
+    // A perturbed normal near grazing can send the ray under the surface: keep it above.
+    let lift = dot(r, geometric);
+    if lift < 0.02 { r = normalize(r + geometric * (0.02 - lift)); }
+    let origin = c.position + geometric * 0.01;
+    // Interleaved gradient noise: a per-pixel offset of the march samples (no banding).
+    let dither = fract(52.9829189 * fract(dot(c.frag.xy, vec2<f32>(0.06711056, 0.00583715))));
+    var prev = 0.0;
+    var hit = -1.0;
+    for (var i = 0u; i < RAA_TRANSPARENT_SSR_STEPS; i++) {
+        let k = (f32(i) + dither) / f32(RAA_TRANSPARENT_SSR_STEPS);
+        let t = RAA_TRANSPARENT_SSR_DISTANCE * k * k + 0.02;
+        let q = raa_transparent_project(origin + r * t);
+        if q.w < 0.0 || any(q.xy < vec2<f32>(0.0)) || any(q.xy > vec2<f32>(1.0)) { break; }
+        let behind = q.z - raa_transparent_opaque_depth(q.xy, size);
+        if behind > 0.0 && behind < max(0.12, t - prev) + 0.02 * t {
+            // Bisect between the last sample in front and this one.
+            var lo = prev;
+            var hi = t;
+            for (var j = 0u; j < RAA_TRANSPARENT_SSR_REFINE; j++) {
+                let mid = 0.5 * (lo + hi);
+                let m = raa_transparent_project(origin + r * mid);
+                if m.z - raa_transparent_opaque_depth(m.xy, size) > 0.0 { hi = mid; } else { lo = mid; }
+            }
+            hit = hi;
+            break;
+        }
+        prev = t;
+    }
+    if hit < 0.0 { return vec4<f32>(0.0); }
+    let q = raa_transparent_project(origin + r * hit);
+    let edge = smoothstep(0.0, 0.08, min(min(q.x, q.y), min(1.0 - q.x, 1.0 - q.y)));
+    let far = 1.0 - smoothstep(0.7 * RAA_TRANSPARENT_SSR_DISTANCE, RAA_TRANSPARENT_SSR_DISTANCE, hit);
+    let gloss = 1.0 - smoothstep(0.5 * RAA_TRANSPARENT_SSR_MAX_ROUGHNESS, RAA_TRANSPARENT_SSR_MAX_ROUGHNESS, s.roughness);
+    let max_lod = f32(textureNumLevels(raa_opaque_color) - 1u);
+    let color = textureSampleLevel(raa_opaque_color, raa_linear_clamp, q.xy, min(s.roughness * 16.0, max_lod)).rgb;
+    return vec4<f32>(color, edge * far * gloss);
+}
+
+// S11 final colour plus transmission, then fog; alpha is the material opacity. A transmissive
+// fragment takes no screen AO (the AO texture holds the opaque surface behind it) and reflects
+// the opaque copy (raa_transparent_screen_reflection). With DDGI the fragment's own probe lookup
+// (eight probes, raa_ddgi_sample: the screen resolve holds the opaque surface behind) blends the
+// diffuse ambient and occludes the environment specular, as raa_opaque_lighting does.
 @fragment
 fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) {
     let in = raa_pass_material_input(v, front_facing);
     let s = raa_pass_material(in, v.instance_index);
+    let unlit = raa_pass_unlit(in.record);
+    let transmissive = s.transmission > 0.0;
     let shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
-    let ao = raa_slot_ao(in.frag_coord);
-    let c = raa_pass_shade_ctx(s, in, ao, shadow);
+    let ao = select(raa_slot_ao(in.frag_coord), 1.0, transmissive);
+    var c = raa_pass_shade_ctx(s, in, ao, shadow);
+    if transmissive {
+        // raa_sky_sun_peak: the environment's sun follows this fragment's sun visibility.
+        c.material_flags |= RAA_FLAG_TRANSMISSIVE;
+    }
+    if !unlit && raa_feature_enabled(RAA_DDGI_GI_FEATURE) && !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE)
+        && raa_ddgi_active() {
+        c.spherical_diffuse = raa_ddgi_sample(c.position, s.normal, c.view_dir);
+    }
+    if transmissive && !unlit {
+        c.screen_reflection = raa_transparent_screen_reflection(c, s, in.normal);
+    }
     let direct = raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
         raa_directional_radiance(raa_frame.sun_color.rgb) * shadow);
     let local = raa_local_lighting(s, c);
-    let indirect = raa_slot_ambient(s, c) + raa_slot_indirect(s, c);
+    var indirect = raa_slot_indirect(s, c);
+    if c.spherical_diffuse.w > 0.0 {
+        indirect *= 1.0 - c.spherical_diffuse.w;
+    }
+    indirect += raa_slot_ambient(s, c);
     let lit = s.emissive + direct + local + indirect + raa_slot_transmission(s, c);
     let shaded = raa_slot_fog(lit, in.position, c);
-    let unlit = raa_pass_unlit(in.record);
     var color = select(shaded, s.base_color + s.emissive, unlit);
     if raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
         color = select(s.emissive + direct + local, s.base_color + s.emissive, unlit);

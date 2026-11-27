@@ -271,13 +271,15 @@ fn shared_lighting_preserves_transmission_fog_and_oit() {
 
 /// S10 Transparent conservative fragment budget: sampled textures, samplers, uniform buffers
 /// and fragment storage buffers, including the declared shared weather and area stochastic
-/// bindings 19 and 20.
+/// bindings 19 and 20, and the DDGI probe buffer (group 1 binding 21) of the transparent DDGI
+/// lookup: 9 storage buffers, which the pipeline layout (group 0's five, binding 21 and the
+/// three OIT lists) already counted before the module read binding 21.
 #[cfg(not(target_arch = "wasm32"))]
 const TRANSPARENT_FRAGMENT_BUDGET: Counts = Counts {
     textures: 13,
     samplers: 3,
     uniforms: 9,
-    storages: 8,
+    storages: 9,
     storage_textures: 0,
 };
 
@@ -348,7 +350,12 @@ fn check_resources(source: &str) {
     let info = valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
         .validate(&module)
         .expect("validate resources");
-    let limits = wgpu::Limits::default();
+    // raa-js requests the adapter's limits; Dawn's lowest tier above the WebGPU default exposes
+    // 10 storage buffers per stage, which the transparent layout (9) needs.
+    let limits = wgpu::Limits {
+        max_storage_buffers_per_shader_stage: 10,
+        ..wgpu::Limits::default()
+    };
     let globals: Vec<_> = module.global_variables.iter().collect();
     let mut fragment = Counts::default();
     let mut vertex_storage = 0u32;

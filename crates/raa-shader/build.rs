@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/wgsl/near_mirror.wgsl");
     println!("cargo:rerun-if-changed=src/wgsl/ibl_specular_response.wgsl");
     println!("cargo:rerun-if-changed=src/wgsl/weather_lighting.wgsl");
+    println!("cargo:rerun-if-changed=src/wgsl/water.wgsl");
     let out = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     let constants = [
         ("FRAME_GPU_SIZE", "usize", 768),
@@ -61,10 +62,11 @@ fn raa_feature_enabled(id: u32) -> bool {{\n\
         fs::read_to_string("src/wgsl/ibl_specular_response.wgsl").expect("read IBL response");
     let weather =
         fs::read_to_string("src/wgsl/weather_lighting.wgsl").expect("read weather lighting");
+    let water = fs::read_to_string("src/wgsl/water.wgsl").expect("read water surface");
     fs::write(out.join("gpu_constants.rs"), rust).expect("write Rust constants");
     fs::write(
         out.join("prelude.wgsl"),
-        format!("{prelude}\n{weather}\n{mirror}\n{specular}\n{wgsl}"),
+        format!("{prelude}\n{weather}\n{mirror}\n{specular}\n{wgsl}\n{water}"),
     )
     .expect("write prelude");
 }

@@ -11,6 +11,7 @@ mod gpu_constants;
 mod ids;
 mod registry;
 mod vg;
+pub mod water;
 
 pub use composer::{Composer, SlotProvider};
 pub use error::ShaderError;
@@ -18,6 +19,7 @@ pub use gpu_constants::*;
 pub use ids::{MaterialFnId, PassKind, SlotId, VariantKey};
 pub use registry::{MaterialFnEntry, MaterialFnRegistry};
 pub use vg::VG_SURFACE_WGSL;
+pub use water::{WATER_WGSL, WaterBody};
 
 /// S10 structs and bindings of groups 0-1, S11 material structs, flag constants,
 /// `raa_default_output` and the tint helper. Self-contained: no slot definitions or calls.

@@ -54,6 +54,9 @@ pub struct FrameParams {
     /// `raa_texture_grad`. Zero unless camera jitter is active and the scene renders below the
     /// display size; see [`taau_texture_lod_bias`].
     pub texture_lod_bias: f32,
+    /// The water body lanes of `reserved` @448..512 (raa_shader::WaterBody::frame_lanes); zero
+    /// = no water.
+    pub water: [f32; 16],
 }
 
 /// Negative mip bias that keeps material textures as sharp as the display resolution while a
@@ -94,6 +97,7 @@ impl Default for FrameParams {
             accumulation_enabled: false,
             history_valid: false,
             texture_lod_bias: 0.0,
+            water: [0.0; 16],
         }
     }
 }
@@ -141,7 +145,8 @@ fn jittered_projection(proj: Mat4, jitter: [f32; 2]) -> Mat4 {
 /// sun_dir @336 (normalised travel direction, w = angular radius), sun_color @352 (rgb x
 /// intensity), ambient @368 (rgb x intensity), viewport @384 (w, h, 1/w, 1/h), clip @400
 /// (near, far, frame index, dt), flags @416 (encode sRGB, msaa, feature bits 0-31,
-/// feature bits 32-63), exposure @432 (TONEMAP_DEFAULT), reserved @448..512 zero,
+/// feature bits 32-63), exposure @432 (TONEMAP_DEFAULT), reserved @448..512 (the water body,
+/// zero without water),
 /// previous_view_proj @512, unjittered_view_proj @576, camera_jitter @640 (current NDC
 /// xy, previous NDC xy), light_info @656 (active count, tile columns, tile rows, tile
 /// stride in words), temporal @672 (parity, accumulation enabled, history valid, interlace
@@ -200,7 +205,7 @@ pub(crate) fn write_camera_frame_gpu(
     );
     write_frame_flags(out, p);
     put_f32s(&mut out[432..448], &EXPOSURE_DEFAULT);
-    out[448..512].fill(0);
+    put_f32s(&mut out[448..512], &p.water);
     p.previous_view_proj.write_le_bytes(&mut out[512..576]);
     (proj * view).write_le_bytes(&mut out[576..640]);
     put_f32s(

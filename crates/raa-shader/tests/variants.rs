@@ -442,8 +442,8 @@ fn group_two_bindings_are_private_to_their_pass() {
         );
         // Lighting, local lights, light tiles, the GI screen, volume and params (14, 17, 18),
         // the weather texture/uniform (15, 16) and the area stochastic table/mask (19, 20).
-        // The spherical cache lookup at 21 belongs to the forward shader.
-        let last_binding = if pass == PassKind::Forward { 21 } else { 20 };
+        // The spherical cache / DDGI lookup at 21 belongs to the forward and transparent shaders.
+        let last_binding = if matches!(pass, PassKind::Forward | PassKind::Transparent) { 21 } else { 20 };
         assert_eq!(
             group_bindings(&module, 1),
             (0..=last_binding).collect::<Vec<u32>>(),

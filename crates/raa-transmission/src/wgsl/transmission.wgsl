@@ -50,13 +50,13 @@ fn raa_screen_fresnel(f0: vec3<f32>, cos_theta: f32) -> vec3<f32> {
 }
 
 // Screen uv of the opaque copy where the refracted ray leaves the medium. The exit point
-// is position + dir x thickness: the material thickness is in world metres and the
-// instance scale is approximated by 1. When the exit point is behind the camera, or the
-// opaque depth there is in front of the surface itself (the ray would pick up an object
-// that occludes the surface), the unrefracted fragment position is used.
-fn raa_screen_uv(c: ShadeCtx, dir: vec3<f32>, thickness: f32) -> vec2<f32> {
+// is position + dir x exit: the caller passes the material thickness (world metres, instance
+// scale approximated by 1), or the submerged path of raa_screen_submerged. When the exit point
+// is behind the camera, or the opaque depth there is in front of the surface itself (the ray
+// would pick up an object that occludes the surface), the unrefracted fragment position is used.
+fn raa_screen_uv(c: ShadeCtx, dir: vec3<f32>, exit_length: f32) -> vec2<f32> {
     let straight = c.frag.xy * raa_frame.viewport.zw;
-    let exit = c.position + dir * thickness;
+    let exit = c.position + dir * exit_length;
     let clip = raa_frame.view_proj * vec4<f32>(exit, 1.0);
     if (clip.w <= 1e-6) {
         return straight;
@@ -70,18 +70,79 @@ fn raa_screen_uv(c: ShadeCtx, dir: vec3<f32>, thickness: f32) -> vec2<f32> {
     return select(uv, straight, depth < c.frag.z);
 }
 
+// Distance from the fragment to the opaque surface seen behind it at its own pixel (the depth
+// copy, unprojected through the inverse projection and view), 1e30 for the far plane and for
+// the 1x1 dummy copy (depth 1).
+fn raa_screen_behind(c: ShadeCtx) -> f32 {
+    let size = textureDimensions(raa_opaque_depth);
+    let px = min(vec2<u32>(max(c.frag.xy, vec2<f32>(0.0))), size - vec2<u32>(1u));
+    let depth = textureLoad(raa_opaque_depth, px, 0).r;
+    if (depth >= 1.0) {
+        return RAA_SCREEN_NO_ABSORPTION;
+    }
+    let uv = c.frag.xy * raa_frame.viewport.zw;
+    let view = raa_frame.inv_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    let world = (raa_frame.inv_view * vec4<f32>(view.xyz / view.w, 1.0)).xyz;
+    return distance(world, c.position);
+}
+
+// Submerged opaque surface (pool floor, a column standing in water): the medium depth below the
+// fragment along its normal, h = behind x n.v, is less than the material thickness. Then the
+// thickness is a depth cap, not the path: the refracted ray crosses h / cos_t (cos_t =
+// max(dot(-dir, n), 0.2)) and leaves the medium on the submerged surface, and the light that lit
+// that surface crossed the medium too, h / cos_l with cos_l the cosine of the sun refracted into
+// the medium (>= sqrt(1 - 1/ior^2)). Returns (view path, light path, submerged 0/1); outside
+// that case (glass, a slab over a distant background, no opaque copy) the old
+// thickness / cos_t path, no light path and 0, so every non-submerged result is unchanged.
+fn raa_screen_submerged(s: MaterialOutput, c: ShadeCtx, dir: vec3<f32>) -> vec3<f32> {
+    let n = s.normal;
+    let cos_t = max(dot(-dir, n), RAA_SCREEN_MIN_COS);
+    let behind = raa_screen_behind(c);
+    let h = behind * c.n_dot_v;
+    if (behind >= RAA_SCREEN_NO_ABSORPTION || h >= s.thickness) {
+        return vec3<f32>(raa_screen_path_length(s.thickness, dir, n), 0.0, 0.0);
+    }
+    let l = raa_screen_refract(raa_frame.sun_dir.xyz, n, 1.0 / max(s.ior, 1.0));
+    let cos_l = max(dot(-l, n), RAA_SCREEN_MIN_COS);
+    return vec3<f32>(h / cos_t, h / cos_l, 1.0);
+}
+
+// Share of the opaque colour of a sunlit submerged surface that is direct sun: the opaque copy
+// mixes direct and ambient light and the caustics concentrate only the former.
+const RAA_SCREEN_CAUSTIC_SUN_SHARE: f32 = 0.8;
+
+// Caustics of the water body (FrameGpu.reserved, raa_water_caustic) on the submerged surface
+// seen at `floor`: 1 + (concentration - 1) x the direct-sun share x the sun visibility tested
+// where the refracted sun path enters the water. 1 without a water body or outside it, so a
+// scene without water pays one branch.
+fn raa_screen_caustic(c: ShadeCtx, floor: vec3<f32>) -> f32 {
+    let w = raa_water_unpack(raa_frame.reserved);
+    let sun = raa_frame.sun_dir.xyz;
+    let k = raa_water_caustic(w, sun, floor);
+    if k == 1.0 { return 1.0; }
+    let entry = raa_water_sun_entry(w, sun, floor);
+    let lit = raa_slot_shadow(entry, vec3<f32>(0.0, 1.0, 0.0), c.frag);
+    return 1.0 + (k - 1.0) * RAA_SCREEN_CAUSTIC_SUN_SHARE * lit;
+}
+
 // transmitted x T x (1 - F) x transmission, T = exp(-sigma x path) along the refracted
-// view ray, F Schlick with the surface f0 at n.v.
+// view ray (plus the light path of a submerged surface, raa_screen_submerged), F Schlick with
+// the surface f0 at n.v; a submerged surface takes the water caustics (raa_screen_caustic).
 fn raa_slot_transmission(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let n = s.normal;
     let dir = raa_screen_refract(-c.view_dir, n, 1.0 / s.ior);
-    let uv = raa_screen_uv(c, dir, s.thickness);
+    let path = raa_screen_submerged(s, c, dir);
+    let uv = raa_screen_uv(c, dir, select(s.thickness, path.x, path.z > 0.0));
     let view_depth = -(raa_frame.view * vec4<f32>(c.position, 1.0)).z;
     let lod = raa_screen_lod(s.roughness, raa_frame.viewport.y, s.thickness, view_depth);
     let max_lod = f32(textureNumLevels(raa_opaque_color) - 1u);
     let transmitted = textureSampleLevel(raa_opaque_color, raa_linear_clamp, uv, min(lod, max_lod)).rgb;
     let sigma = raa_screen_sigma(s.attenuation_color, s.attenuation_distance);
-    let t = exp(-sigma * raa_screen_path_length(s.thickness, dir, n));
+    let t = exp(-sigma * (path.x + path.y));
     let f = raa_screen_fresnel(c.f0, c.n_dot_v);
-    return transmitted * t * (vec3<f32>(1.0) - f) * s.transmission;
+    var caustic = 1.0;
+    if path.z > 0.0 {
+        caustic = raa_screen_caustic(c, c.position + dir * path.x);
+    }
+    return transmitted * caustic * t * (vec3<f32>(1.0) - f) * s.transmission;
 }

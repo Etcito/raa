@@ -69,3 +69,28 @@ fn schlick_endpoints() {
     assert!((schlick_fresnel(0.04, 1.0) - 0.04).abs() < 1e-6);
     assert!((schlick_fresnel(0.04, 0.0) - 1.0).abs() < 1e-6);
 }
+
+#[test]
+fn submerged_floor_uses_the_medium_depth_and_the_light_path() {
+    // 1 m of water seen straight down over a floor 1 m below, sun straight down: 1 m each way.
+    let down = [0.0, -1.0, 0.0];
+    let (view, light, submerged) = submerged_paths(4.0, 1.0, 1.0, down, N, down, 1.33);
+    assert!(submerged);
+    assert!((view - 1.0).abs() < 1e-5 && (light - 1.0).abs() < 1e-5);
+    // Grazing view (n.v = 0.2) over 1 m of water: the straight ray meets the floor 5 m on,
+    // the refracted one crosses 1 / cos_t, with cos_t >= sqrt(1 - 1/1.33^2) ~ 0.66.
+    let v = [0.98f32.sqrt(), 0.2, 0.0];
+    let dir = refract_view(v, N, 1.33);
+    let (view, _, submerged) = submerged_paths(4.0, 5.0, 0.2, dir, N, down, 1.33);
+    assert!(submerged && view > 1.0 && view < 1.0 / 0.66);
+}
+
+#[test]
+fn slab_over_a_distant_background_keeps_the_thickness_path() {
+    let down = [0.0, -1.0, 0.0];
+    let (view, light, submerged) = submerged_paths(0.05, 3.0, 1.0, down, N, down, 1.5);
+    assert!(!submerged && light == 0.0);
+    assert_eq!(view, path_length(0.05, down, N));
+    let (_, _, far) = submerged_paths(4.0, NO_ABSORPTION_DISTANCE, 1.0, down, N, down, 1.5);
+    assert!(!far);
+}
