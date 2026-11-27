@@ -147,7 +147,7 @@ fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
     let view_depth = -(raa_frame.view * vec4<f32>(world_pos, 1.0)).z;
     // params.w 2: the virtual shadow map (vsm.wgsl) instead of the cascades.
     if (raa_shadow.params.w > 1.5) {
-        return raa_vsm_shadow(world_pos, n, frag, view_depth) * contact * raa_cloud_shadow(world_pos);
+        return raa_csm_vsm_shadow(world_pos, n, frag, view_depth) * contact * raa_cloud_shadow(world_pos);
     }
     let s = raa_shadow.splits;
     let band = max(raa_shadow.params2.y, 1e-6);

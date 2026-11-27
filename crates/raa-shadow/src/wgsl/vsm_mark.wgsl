@@ -1,5 +1,5 @@
 // VSM page marking (crates/raa-shadow/src/vsm_gpu.rs): every pixel of the prepass depth picks
-// its clipmap level (as raa_vsm_level in vsm.wgsl) and sets the request bits of the pages its
+// its clipmap level (as raa_csm_vsm_level in vsm.wgsl) and sets the request bits of the pages its
 // filter footprint touches (the page of each corner of a MARGIN-texel square). Bit layout: level
 // l, toroidal entry (y & 127) * 128 + (x & 127), word l * 512 + entry / 32.
 
