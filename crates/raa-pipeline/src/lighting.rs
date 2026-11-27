@@ -2367,11 +2367,11 @@ mod tests {
     }
 
     #[test]
-    fn opaque_layout_fragment_counts_are_10_textures_2_samplers_and_7_uniforms() {
+    fn opaque_layout_fragment_counts_are_11_textures_2_samplers_and_7_uniforms() {
         let (textures, samplers, uniforms) = fragment_counts(&opaque_layout_entries());
         assert_eq!(
             textures,
-            [0, 3, 5, 7, 8, 13, 14, 15, 17, 20],
+            [0, 3, 5, 7, 8, 13, 14, 15, 17, 20, 22],
             "sampled textures"
         );
         assert_eq!((samplers, uniforms), (2, 7));

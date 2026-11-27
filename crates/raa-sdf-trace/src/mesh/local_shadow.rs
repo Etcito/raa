@@ -51,8 +51,8 @@ impl Default for LocalShadowSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            resolution: 256,
-            faces_per_frame: 3,
+            resolution: 128,
+            faces_per_frame: 2,
         }
     }
 }

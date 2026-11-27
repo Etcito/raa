@@ -42,9 +42,9 @@ export interface LocalLightDesc {
 export interface LocalShadowsDesc {
   /** Default true. */
   enabled?: boolean;
-  /** Texels per cube-face side, a multiple of 8 in [64, 1024]. Default 256. */
+  /** Texels per cube-face side, a multiple of 8 in [64, 1024]. Default 128. */
   resolution?: number;
-  /** Cube faces traced per frame at most, [1, 24]. Default 3. */
+  /** Cube faces traced per frame at most, [1, 24]. Default 2. */
   facesPerFrame?: number;
 }
 

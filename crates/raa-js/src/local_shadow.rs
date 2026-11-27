@@ -53,7 +53,7 @@ fn whole(options: &JsValue, key: &str, previous: u32) -> Result<u32, RaaError> {
 #[wasm_bindgen]
 impl Engine {
     /// Configures the local-light cube shadows: `{ enabled, resolution, facesPerFrame }`
-    /// (defaults true, 256 texels per face side, 3 faces traced per frame at most). Lights opt in
+    /// (defaults true, 128 texels per face side, 2 faces traced per frame at most). Lights opt in
     /// with `shadows: true`; their `radius` is the emitter radius the shadow rays start from.
     #[wasm_bindgen(js_name = setLocalShadows)]
     pub fn set_local_shadows(&self, options: JsValue) -> Result<(), JsValue> {

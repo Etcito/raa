@@ -61,8 +61,8 @@ probe-only tier (light cutoff); the per-tile forward budget still applies.
 interface LocalShadowsDesc { enabled?: boolean; resolution?: number; facesPerFrame?: number }
 ```
 
-`setLocalShadows(settings)` (defaults `enabled: true`, `resolution: 256` texels per
-face side, a multiple of 8 in [64, 1024], `facesPerFrame: 3` in [1, 24]); a refusal
+`setLocalShadows(settings)` (defaults `enabled: true`, `resolution: 128` texels per
+face side, a multiple of 8 in [64, 1024], `facesPerFrame: 2` in [1, 24]); a refusal
 throws `api.invalid_argument` (non-object) or `shadow.local_invalid` and changes
 nothing. `invalidateLocalShadows()` re-traces every face. `localShadowStats()`
 returns the settings, `lights`, `capacity`, `readyFaces`, `pendingFaces`,
