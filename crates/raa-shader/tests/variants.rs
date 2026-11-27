@@ -851,7 +851,7 @@ fn forward_layer_variants_validate_with_their_targets() {
             assert_eq!(wgsl.matches("fn fs_main(").count(), 1, "{key:?}");
             assert!(wgsl.contains("fn raa_opaque_layers("), "{key:?}");
             assert_eq!(
-                wgsl.contains("fn raa_interlace_sample("),
+                wgsl.contains("fn raa_interlace_phase_pixel("),
                 flags & VARIANT_FLAG_FORWARD_LAYER_INTERLACED != 0,
                 "{key:?}"
             );

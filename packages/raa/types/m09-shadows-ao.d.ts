@@ -31,6 +31,11 @@ export interface ShadowSettings {
    * Edge length of one cascade's shadow map in texels; 1024, 2048 or 4096. Default 2048.
    */
   resolution?: 1024 | 2048 | 4096;
+  /**
+   * Number of cascades rendered, 1..4 (practical splits of `distance` for that count; the
+   * unused layers are not rendered and the shader clamps to the last used cascade). Default 4.
+   */
+  cascades?: 1 | 2 | 3 | 4;
 }
 
 /** What the last `shadow.csm` frame computed, from {@link Engine.shadowStats}. */
