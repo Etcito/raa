@@ -103,10 +103,9 @@ fn raa_opaque_lighting(in: MaterialInput, s: MaterialOutput) -> vec4<f32> {
     }
     var sun_radiance = raa_directional_radiance(raa_frame.sun_color.rgb) * shadow;
     if water_sun.under && shadow > 0.0 {
-        // Fresnel transmittance and the caustics of the ripple (raa_water_caustic), full on an
+        // Fresnel transmittance and the caustics of the ripple (raa_water_sun.k), full on an
         // upward receiver (floor), none on a vertical one (wall).
-        let k = raa_water_caustic(water, raa_frame.sun_dir.xyz, in.position);
-        sun_radiance *= water_sun.transmit * mix(1.0, k, saturate(in.normal.y));
+        sun_radiance *= water_sun.transmit * mix(1.0, water_sun.k, saturate(in.normal.y));
     }
     let direct = raa_slot_direct(s, c, water_sun.to_sun, sun_radiance);
     let ambient = raa_slot_ambient(s, c);

@@ -156,8 +156,8 @@ impl WaterBody {
         1.0 / ((a[0] * b[1] - a[1] * b[0]).abs() / (e * e)).max(0.15)
     }
 
-    /// Horizontal run per metre of depth from a submerged receiver up to where the sun's path
-    /// enters the water, as `raa_water_sun` (bent by `sun_bend`); None when the sun is below
+    /// Mean (flat-water) horizontal run per metre of depth from a submerged receiver up to where the sun's path
+    /// enters the water, as `raa_water_sun` without the ripple (bent by `sun_bend`); None when the sun is below
     /// the horizon of the water.
     pub fn sun_run(&self, sun: [f32; 3]) -> Option<[f32; 2]> {
         let t = refract(sun, [0.0, 1.0, 0.0], 1.0 / self.ior.max(1.0))?;
