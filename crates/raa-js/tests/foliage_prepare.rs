@@ -326,7 +326,7 @@ fn update_prepares_viewport_zero_foliage_beside_billboards_before_lit() {
             "s.prepare_billboard_groups(0)",
             "s.prepare_foliage_groups(0)",
             "crate::trace::prepare_view(s, 0",
-            "s.scene_invocation.prepare(0)",
+            "s.scene_invocation.is_discontinuous(0)",
             ".prepare(gpu, &mut s.scene",
         ],
     );
@@ -343,7 +343,7 @@ fn split_views_prepare_foliage_after_their_camera_and_before_lit() {
             "let result = (|| {",
             "super::m36_billboard_groups::prepare_billboard_groups(",
             "st.prepare_foliage_groups(u8::try_from(index).unwrap_or(u8::MAX))",
-            "st.scene_invocation.prepare(index)",
+            "st.scene_invocation.is_discontinuous(index)",
             "st.lit.prepare(",
             "st.scene.camera = original;",
         ],

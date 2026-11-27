@@ -183,6 +183,29 @@ pub fn compose_appearance(material_wgsl: &str) -> Result<String, RaaError> {
     }
     src.push_str(&prelude[material_start..area_start]);
     src.push('\n');
+    // The material section's reflection class calls the near-mirror policy, which the prelude
+    // places outside the head and material sections.
+    if !src.contains("fn raa_near_mirror(") {
+        src.push_str(raa_shader::NEAR_MIRROR_WGSL);
+        src.push('\n');
+    }
+    // ... and the integration's material helpers (DDGI sky term) test feature bits through
+    // `raa_feature_enabled`, generated with the shared constants after the prelude (group 0 only).
+    if !src.contains("fn raa_feature_enabled(") {
+        let start = prelude
+            .find("const FRAME_GPU_SIZE: u32")
+            .ok_or_else(|| bake_failed("foliage appearance prelude has no shared constants"))?;
+        let feature = prelude[start..]
+            .find("fn raa_feature_enabled(")
+            .map(|at| start + at)
+            .ok_or_else(|| bake_failed("foliage appearance prelude has no feature test"))?;
+        let end = prelude[feature..]
+            .find("\n}\n")
+            .map(|at| feature + at + 3)
+            .ok_or_else(|| bake_failed("foliage appearance feature test is not closed"))?;
+        src.push_str(&prelude[start..end]);
+        src.push('\n');
+    }
     src.push_str(raa_shader::LIB_WGSL);
     src.push('\n');
     src.push_str(material_wgsl);

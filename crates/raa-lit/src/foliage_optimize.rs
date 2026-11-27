@@ -1287,20 +1287,18 @@ pub async fn drive_foliage_optimizer<S: FoliageOptimizeSteps>(
                 FoliageBinOutcome::Raster => break,
             }
         }
-        steps
-            .submit_iteration(coordinator)
-            .map_err(at(STAGE_ITERATION, iteration))?;
+        // The stage is set before the step runs (a method-call argument is evaluated after
+        // its receiver, so `at(..)` inside `map_err` would report the stage too late).
+        let fail = at(STAGE_ITERATION, iteration);
+        steps.submit_iteration(coordinator).map_err(fail)?;
         steps.settle().await;
     }
     let last = iterations - 1;
-    let triangles = steps
-        .terminal()
-        .await
-        .map_err(at(STAGE_TERMINAL_READBACK, last))?;
+    let fail = at(STAGE_TERMINAL_READBACK, last);
+    let triangles = steps.terminal().await.map_err(fail)?;
     steps.settle().await;
-    coordinator
-        .publish(&triangles)
-        .map_err(at(STAGE_PUBLICATION, last))?;
+    let fail = at(STAGE_PUBLICATION, last);
+    coordinator.publish(&triangles).map_err(fail)?;
     Ok(triangles)
 }
 
