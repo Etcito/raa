@@ -63,6 +63,7 @@ export async function loadRaa(options = {}) {
         return engine;
       })();
     },
+    setAsyncPipelines: (on) => glue.setAsyncPipelines(on),
     clusterBakeRevision: () => glue.clusterBakeRevision(),
     bakeClusters: (input) => glue.bakeClusters(input),
     createClusterBake: (input) => clusterBake(input),
