@@ -159,7 +159,9 @@ fn voxelize(gpu: &GpuContext, colors: &[u32]) -> Vec<u32> {
         .get_mapped_range()
         .expect("mapped readback")
         .to_vec();
-    data.chunks_exact(12)
+    data.as_chunks::<12>()
+        .0
+        .iter()
         .map(|voxel| u32::from_le_bytes([voxel[0], voxel[1], voxel[2], voxel[3]]))
         .collect()
 }

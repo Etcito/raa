@@ -51,7 +51,7 @@ impl SkinMesh {
                 ));
             }
         }
-        for (v, w) in weights.chunks_exact(MAX_INFLUENCES).enumerate() {
+        for (v, w) in weights.as_chunks::<MAX_INFLUENCES>().0.iter().enumerate() {
             let mut sum = 0.0_f64;
             for (k, &x) in w.iter().enumerate() {
                 if !x.is_finite() || x < 0.0 {
@@ -69,7 +69,7 @@ impl SkinMesh {
                 ));
             }
         }
-        for (v, js) in joints.chunks_exact(MAX_INFLUENCES).enumerate() {
+        for (v, js) in joints.as_chunks::<MAX_INFLUENCES>().0.iter().enumerate() {
             for (k, &j) in js.iter().enumerate() {
                 if usize::from(j) >= MAX_JOINTS {
                     return Err(SkinError::new(
@@ -113,7 +113,7 @@ impl SkinMesh {
     /// Appends joints as two little-endian u32 per vertex (`u16x4` as `u32x2`, 8 B).
     pub fn write_joint_bytes(&self, out: &mut Vec<u8>) {
         out.reserve(self.joints.len() * 2);
-        for j in self.joints.chunks_exact(MAX_INFLUENCES) {
+        for j in self.joints.as_chunks::<MAX_INFLUENCES>().0 {
             let lo = u32::from(j[0]) | (u32::from(j[1]) << 16);
             let hi = u32::from(j[2]) | (u32::from(j[3]) << 16);
             out.extend_from_slice(&lo.to_le_bytes());

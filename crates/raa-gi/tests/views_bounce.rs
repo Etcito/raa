@@ -230,7 +230,9 @@ fn read_view(gpu: &GpuContext, view: &wgpu::TextureView, width: u32, height: u32
         .get_mapped_range()
         .expect("mapped readback")
         .to_vec();
-    data.chunks_exact(16)
+    data.as_chunks::<16>()
+        .0
+        .iter()
         .map(|texel| {
             let channel = |i: usize| {
                 f32::from_le_bytes([

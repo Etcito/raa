@@ -80,7 +80,7 @@ impl Builder {
             }
             remap.push(id);
         }
-        for t in self.idx.chunks_exact(3) {
+        for t in self.idx.as_chunks::<3>().0 {
             // drop zero-area triangles (on the f64 positions, as the reference does)
             let [a, b, c] = [t[0], t[1], t[2]].map(|i| self.pos[i as usize]);
             if length_squared(cross(sub(b, a), sub(c, a))) > 1e-20 {
@@ -91,7 +91,7 @@ impl Builder {
         let p = |i: u32| out.positions[i as usize].map(f64::from);
         let n = |i: u32| out.normals[i as usize].map(f64::from);
         let mut flips = Vec::new();
-        for (k, t) in out.indices.chunks_exact(3).enumerate() {
+        for (k, t) in out.indices.as_chunks::<3>().0.iter().enumerate() {
             let fnrm = cross(sub(p(t[1]), p(t[0])), sub(p(t[2]), p(t[0])));
             let vn = add(add(n(t[0]), n(t[1])), n(t[2]));
             if dot(fnrm, vn) < 0.0 {

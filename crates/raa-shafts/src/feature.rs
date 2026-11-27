@@ -92,7 +92,12 @@ impl Default for ShaftsState {
 type SharedShafts = Rc<RefCell<ShaftsState>>;
 
 fn write_vec4(out: &mut [u8; PARAMS_LEN], offset: usize, v: [f32; 4]) {
-    for (chunk, x) in out[offset..offset + 16].chunks_exact_mut(4).zip(v) {
+    for (chunk, x) in out[offset..offset + 16]
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(v)
+    {
         chunk.copy_from_slice(&x.to_le_bytes());
     }
 }
@@ -930,7 +935,7 @@ mod tests {
                 .poll(wgpu::PollType::wait_indefinitely())
                 .unwrap();
             let mapped = slice.get_mapped_range().unwrap();
-            for px in mapped.chunks_exact(8).take(SIZE as usize) {
+            for px in mapped.as_chunks::<8>().0.iter().take(SIZE as usize) {
                 let r = f16_to_f32(u16::from_le_bytes([px[0], px[1]]));
                 assert!((r - 2.0).abs() < 1e-2, "shafts without shadows gave {r}");
             }

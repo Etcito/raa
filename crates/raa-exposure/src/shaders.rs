@@ -46,7 +46,7 @@ pub fn pack_params(
         [0; 4],
         [0; 4],
     ];
-    for (chunk, word) in out.chunks_exact_mut(4).zip(words) {
+    for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
         chunk.copy_from_slice(&word);
     }
 }
@@ -67,7 +67,10 @@ pub struct ExposureResult {
 /// Decodes the 16 B `ExposureState` record.
 pub fn read_result(bytes: &[u8; RESULT_SIZE]) -> ExposureResult {
     let mut w = [[0u8; 4]; 4];
-    for (word, chunk) in w.iter_mut().zip(bytes.chunks_exact(4)) {
+    for (word, chunk) in w
+        .iter_mut()
+        .zip(bytes.as_chunks::<4>().0.iter().map(|c| c.as_slice()))
+    {
         word.copy_from_slice(chunk);
     }
     ExposureResult {

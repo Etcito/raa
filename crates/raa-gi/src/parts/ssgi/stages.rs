@@ -98,7 +98,7 @@ fn write_params(gpu: &GpuContext, params: &wgpu::Buffer, slices: u32, steps: u32
         0u32.to_le_bytes(),
     ];
     let mut bytes = [0; 32];
-    for (dst, src) in bytes.chunks_exact_mut(4).zip(words) {
+    for (dst, src) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(words) {
         dst.copy_from_slice(&src);
     }
     gpu.queue().write_buffer(params, 0, &bytes);

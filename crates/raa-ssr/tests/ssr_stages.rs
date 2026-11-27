@@ -269,7 +269,7 @@ fn composite_without_trace_advances_hdr_unchanged() {
         .poll(wgpu::PollType::wait_indefinitely())
         .unwrap();
     let mapped = slice.get_mapped_range().unwrap();
-    for (i, px) in mapped.chunks_exact(2).enumerate() {
+    for (i, px) in mapped.as_chunks::<2>().0.iter().enumerate() {
         let value = half(u16::from_le_bytes([px[0], px[1]]));
         let expected = if i % 4 == 3 { 1.0 } else { 2.0 };
         assert!((value - expected).abs() < 1e-2, "channel {i}: {value}");

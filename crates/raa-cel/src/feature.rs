@@ -277,7 +277,7 @@ impl FeaturePass for CelPass {
         };
         self.bytes = desc.to_bytes(ctx.size);
         let mut bytes = [0; 128];
-        for (out, m) in bytes.chunks_exact_mut(64).zip(camera) {
+        for (out, m) in bytes.as_chunks_mut::<64>().0.iter_mut().zip(camera) {
             m.write_le_bytes(out);
         }
         ctx.gpu.queue().write_buffer(&self.camera, 0, &bytes);

@@ -244,7 +244,9 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         rx.recv().expect("map callback").expect("map");
         let mapped = slice.get_mapped_range().expect("mapped range");
         let texels = mapped
-            .chunks_exact(16)
+            .as_chunks::<16>()
+            .0
+            .iter()
             .map(|px| {
                 [
                     f32::from_le_bytes([px[0], px[1], px[2], px[3]]),

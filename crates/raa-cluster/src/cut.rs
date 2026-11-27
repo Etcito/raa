@@ -100,22 +100,24 @@ impl ClusterMesh {
             return Err(refusal("nodes", "the node bytes are not a multiple of 48"));
         }
         let vertices = vertices
-            .chunks_exact(8)
-            .map(|chunk| {
-                <[u16; 8]>::try_from(chunk)
-                    .ok()
-                    .map(|data| PackedVertex { data })
-            })
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|&data| Some(PackedVertex { data }))
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| refusal("vertices", "a vertex record is incomplete"))?;
         let clusters = clusters
-            .chunks_exact(PACKED_CLUSTER_SIZE)
-            .map(PackedCluster::read_le_bytes)
+            .as_chunks::<PACKED_CLUSTER_SIZE>()
+            .0
+            .iter()
+            .map(|bytes| PackedCluster::read_le_bytes(bytes))
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| refusal("clusters", "a cluster record is incomplete"))?;
         let nodes = nodes
-            .chunks_exact(PACKED_NODE_SIZE)
-            .map(PackedNode::read_le_bytes)
+            .as_chunks::<PACKED_NODE_SIZE>()
+            .0
+            .iter()
+            .map(|bytes| PackedNode::read_le_bytes(bytes))
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| refusal("nodes", "a node record is incomplete"))?;
         let mesh = ClusterMesh {

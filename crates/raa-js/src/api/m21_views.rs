@@ -103,8 +103,10 @@ impl OverlayLayer {
         out.reserve(self.segments() * OVERLAY_SEGMENT_FLOATS);
         for (p, c) in self
             .positions
-            .chunks_exact(6)
-            .zip(self.colors.chunks_exact(8))
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .zip(self.colors.as_chunks::<8>().0.iter())
         {
             out.extend_from_slice(&[p[0], p[1], p[2], self.width_px]);
             out.extend_from_slice(&c[0..4]);

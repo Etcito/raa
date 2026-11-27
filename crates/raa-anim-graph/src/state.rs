@@ -48,10 +48,10 @@ fn bad(message: &str) -> GraphError {
 fn word(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
-fn next(words: &mut std::slice::ChunksExact<'_, u8>) -> Result<u32, GraphError> {
+fn next(words: &mut std::slice::Iter<'_, [u8; 4]>) -> Result<u32, GraphError> {
     words
         .next()
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .map(|&b| u32::from_le_bytes(b))
         .ok_or_else(|| bad("snapshot is truncated"))
 }
 fn boolean(word: u32) -> Result<bool, GraphError> {
@@ -125,7 +125,7 @@ impl GraphState {
         if !bytes.len().is_multiple_of(4) {
             return Err(bad("snapshot length is not word aligned"));
         }
-        let mut words = bytes.chunks_exact(4);
+        let mut words = bytes.as_chunks::<4>().0.iter();
         if next(&mut words)? != u32::from_le_bytes(*b"RGS1") {
             return Err(bad("unknown snapshot format"));
         }

@@ -102,16 +102,14 @@ impl MeshData {
             self.normals.push(t.normalize_or_zero().to_array());
         }
         self.indices.reserve(other.indices.len());
-        for triangle in other.indices.chunks_exact(3) {
-            if let [a, b, c] = triangle {
-                self.indices.push(*a + base);
-                if flip {
-                    self.indices.push(*c + base);
-                    self.indices.push(*b + base);
-                } else {
-                    self.indices.push(*b + base);
-                    self.indices.push(*c + base);
-                }
+        for [a, b, c] in other.indices.as_chunks::<3>().0 {
+            self.indices.push(*a + base);
+            if flip {
+                self.indices.push(*c + base);
+                self.indices.push(*b + base);
+            } else {
+                self.indices.push(*b + base);
+                self.indices.push(*c + base);
             }
         }
     }

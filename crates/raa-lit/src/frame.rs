@@ -120,13 +120,13 @@ impl FrameParams {
 
 /// Writes `values` as consecutive f32 LE into `out`.
 fn put_f32s(out: &mut [u8], values: &[f32]) {
-    for (chunk, v) in out.chunks_exact_mut(4).zip(values) {
+    for (chunk, v) in out.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         chunk.copy_from_slice(&v.to_le_bytes());
     }
 }
 
 fn put_u32s(out: &mut [u8], values: &[u32]) {
-    for (chunk, v) in out.chunks_exact_mut(4).zip(values) {
+    for (chunk, v) in out.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         chunk.copy_from_slice(&v.to_le_bytes());
     }
 }
@@ -186,7 +186,7 @@ pub(crate) fn write_camera_frame_gpu(
         });
     };
     let mats: [Mat4; 5] = [jittered_proj * view, view, proj, inv_proj, inv_view];
-    for (chunk, m) in out[0..320].chunks_exact_mut(64).zip(&mats) {
+    for (chunk, m) in out[0..320].as_chunks_mut::<64>().0.iter_mut().zip(&mats) {
         m.write_le_bytes(chunk);
     }
     let eye = cam.eye;

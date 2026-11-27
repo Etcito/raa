@@ -86,7 +86,12 @@ pub(crate) fn write_slot(
     let Some(dst) = out.get_mut(start..start + PARAMS_SIZE as usize) else {
         return;
     };
-    for (chunk, x) in dst.chunks_exact_mut(4).zip([1.0 / w, 1.0 / h, radius, s]) {
+    for (chunk, x) in dst
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip([1.0 / w, 1.0 / h, radius, s])
+    {
         chunk.copy_from_slice(&x.to_le_bytes());
     }
 }

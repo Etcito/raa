@@ -59,7 +59,13 @@ pub fn ltc_table_halfs() -> [Vec<u16>; 2] {
             break;
         }
         let base = (line_index % LTC_ROWS) * LTC_ROW_VALUES;
-        for (index, group) in line.as_bytes().chunks_exact(HEX_DIGITS).enumerate() {
+        for (index, group) in line
+            .as_bytes()
+            .as_chunks::<HEX_DIGITS>()
+            .0
+            .iter()
+            .enumerate()
+        {
             if index >= LTC_ROW_VALUES {
                 break;
             }

@@ -197,16 +197,26 @@ pub(crate) fn bake_input(
     let owned = OwnedClusterInput {
         mesh: MeshData {
             positions: positions
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|p| [p[0], p[1], p[2]])
                 .collect(),
             normals: normals
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|n| [n[0], n[1], n[2]])
                 .collect(),
             indices: indices.to_vec(),
         },
-        uvs: uvs.map(|uvs| uvs.chunks_exact(2).map(|uv| [uv[0], uv[1]]).collect()),
+        uvs: uvs.map(|uvs| {
+            uvs.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|uv| [uv[0], uv[1]])
+                .collect()
+        }),
     };
     owned.as_input().validate().map_err(|e| cluster_error(&e))?;
     Ok(owned)

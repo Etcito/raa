@@ -150,13 +150,17 @@ impl CelSettings {
         ];
         let mut bytes = [0; 112];
         for (out, v) in bytes[..80]
-            .chunks_exact_mut(4)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
             .zip(values.into_iter().flatten())
         {
             out.copy_from_slice(&v.to_le_bytes());
         }
         for (out, v) in bytes[80..96]
-            .chunks_exact_mut(4)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
             .zip([size.0, size.1, 1, 0])
         {
             out.copy_from_slice(&v.to_le_bytes());

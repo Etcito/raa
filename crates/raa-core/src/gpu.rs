@@ -137,7 +137,8 @@ impl LostState {
 }
 
 /// The adapter, device and queue used by every other RAA object.
-#[derive(Debug)]
+/// Clones share the same device, queue and device-loss signal.
+#[derive(Clone, Debug)]
 pub struct GpuContext {
     adapter: wgpu::Adapter,
     device: wgpu::Device,

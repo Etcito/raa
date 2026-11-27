@@ -70,7 +70,9 @@ pub(crate) fn colors_to_rgba(values: &[f32], components: u32) -> Result<Vec<f32>
         return Ok(values.to_vec());
     }
     Ok(values
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .flat_map(|c| [c[0], c[1], c[2], 1.0])
         .collect())
 }

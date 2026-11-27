@@ -83,7 +83,9 @@ fn pack_params(out: &mut [u8; UNIFORM_LEN], size: (u32, u32), d: &GradingDesc, a
         [d.split_balance, d.vignette, aspect, amount],
     ];
     for (chunk, x) in out
-        .chunks_exact_mut(4)
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
         .zip(vecs.iter().flat_map(|v| v.iter()))
     {
         chunk.copy_from_slice(&x.to_le_bytes());

@@ -82,13 +82,19 @@ fn cpu_mesh(skin: &SkinMesh, matrices: &[f32]) -> AttributedMesh {
     let mut s1 = Vec::new();
     rest.write_stream1_bytes(&mut s1);
     let uv: Vec<f32> = s1
-        .chunks_exact(40)
+        .as_chunks::<40>()
+        .0
+        .iter()
+        .map(|c| c.as_slice())
         .flat_map(|v| [0, 4].map(|o| f32::from_le_bytes(v[o..o + 4].try_into().unwrap())))
         .collect();
     let mut idx = Vec::new();
     rest.write_index_bytes(&mut idx);
     let idx: Vec<u32> = idx
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| c.as_slice())
         .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
         .collect();
     let mut mesh = raa_mesh::from_js_arrays(&p, &n, Some(&uv), Some(&t), None, &idx, &[]).unwrap();
@@ -246,7 +252,12 @@ fn read_rgba16f(gpu: &GpuContext, texture: &wgpu::Texture) -> Vec<[f32; 4]> {
     let mapped = buffer.get_mapped_range(..).expect("mapped").to_vec();
     let mut texels = Vec::with_capacity((SIZE.0 * SIZE.1) as usize);
     for row in mapped.chunks_exact(padded) {
-        for px in row[..row_bytes].chunks_exact(8) {
+        for px in row[..row_bytes]
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| c.as_slice())
+        {
             texels.push(std::array::from_fn(|c| {
                 f16_to_f32(u16::from_le_bytes([px[2 * c], px[2 * c + 1]]))
             }));

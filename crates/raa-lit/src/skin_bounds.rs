@@ -21,7 +21,7 @@ pub fn posed_bounds(rest: Aabb, joints: &[f32]) -> Option<Aabb> {
         return None;
     }
     let mut bounds = Aabb::EMPTY;
-    for joint in joints.chunks_exact(16) {
+    for joint in joints.as_chunks::<16>().0 {
         let mut m = Mat4::IDENTITY;
         for (out, value) in m.cols.iter_mut().flatten().zip(joint) {
             *out = *value;

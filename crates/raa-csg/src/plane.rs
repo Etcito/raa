@@ -37,7 +37,7 @@ pub fn convex_planes(mesh: &MeshData, eps: f64) -> Result<Vec<Plane>, CsgError> 
         Some([f64::from(p[0]), f64::from(p[1]), f64::from(p[2])])
     };
     let mut planes: Vec<Plane> = Vec::new();
-    for t in mesh.indices.chunks_exact(3) {
+    for t in mesh.indices.as_chunks::<3>().0 {
         let (Some(a), Some(b), Some(c)) = (pos(t[0]), pos(t[1]), pos(t[2])) else {
             return Err(CsgError::Degenerate("index out of range".into()));
         };

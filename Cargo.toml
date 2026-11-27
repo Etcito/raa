@@ -45,5 +45,7 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
-strip = true
+# Keep the wasm name section: a trap or panic stack then names its functions. "debuginfo"
+# drops only DWARF; `strip = true` (symbols) also removed the names.
+strip = "debuginfo"
 debug = false

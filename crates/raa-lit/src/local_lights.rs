@@ -288,9 +288,9 @@ impl LocalLights {
     pub fn write_gpu(&self, out: &mut [u8; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE]) {
         out.fill(0);
         let eff = self.effective();
-        let records = out.chunks_exact_mut(LIGHT_GPU_SIZE);
+        let records = out.as_chunks_mut::<LIGHT_GPU_SIZE>().0.iter_mut();
         for (((light, forward), slot), record) in eff.1.iter().zip(&eff.2).zip(&eff.3).zip(records) {
-            light.write_gpu_tiered(*forward, *slot, record.try_into().expect("one light record"));
+            light.write_gpu_tiered(*forward, *slot, record);
         }
     }
 
@@ -504,7 +504,9 @@ mod tests {
         let mut out = [0xff; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE];
         lights.write_gpu(&mut out);
         for (rank, record) in out[..4 * LIGHT_GPU_SIZE]
-            .chunks_exact(LIGHT_GPU_SIZE)
+            .as_chunks::<LIGHT_GPU_SIZE>()
+            .0
+            .iter()
             .enumerate()
         {
             for (offset, expected) in [
@@ -578,8 +580,10 @@ mod tests {
         assert!((gpu_float(&out, 48) - 10.0_f32.to_radians().cos()).abs() < 1e-6);
         assert!(
             out[..64]
-                .chunks_exact(4)
-                .all(|b| f32::from_le_bytes(b.try_into().unwrap()).is_finite())
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|b| f32::from_le_bytes(*b).is_finite())
         );
         assert!(out[64..].iter().all(|b| *b == 0));
         lights.remove(kept).unwrap();

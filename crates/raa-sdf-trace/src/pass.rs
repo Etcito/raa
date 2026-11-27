@@ -182,7 +182,13 @@ impl TraceScene {
             ));
         }
         let mut next = current.clone();
-        for (index, record) in words.chunks_exact(INSTANCE_WORDS).enumerate() {
+        for (index, record) in words
+            .as_chunks::<INSTANCE_WORDS>()
+            .0
+            .iter()
+            .map(|c| c.as_slice())
+            .enumerate()
+        {
             let raw: Vec<u32> = record.iter().map(|value| value.to_bits()).collect();
             let instance = read_instance(&raw, current.instances[index].bend);
             next.instances[index] = instance;

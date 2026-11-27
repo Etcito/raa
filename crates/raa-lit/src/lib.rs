@@ -15,10 +15,27 @@
 
 mod area_shadow;
 mod area_stochastic;
+mod billboard_bake;
+mod billboard_targets;
 mod contributor;
 mod editor;
 pub use editor::WireframeMode;
 mod extras;
+pub mod foliage_appearance;
+pub mod foliage_bake;
+pub mod foliage_bindings;
+pub mod foliage_bins;
+pub mod foliage_gradients;
+pub mod foliage_hull;
+pub mod foliage_optimize;
+pub mod foliage_poisson;
+pub mod foliage_raster;
+pub mod foliage_reference;
+pub mod foliage_resources;
+pub mod foliage_sampling;
+pub mod foliage_stochastic;
+pub mod foliage_update;
+pub mod foliage_volume;
 mod frame;
 mod frame_history;
 mod handle;
@@ -67,8 +84,16 @@ pub use area_stochastic::{
     AreaStochasticFrame, StochasticMode, StochasticSelector, StochasticShadowSettings,
     stochastic_weight, table_cells, table_limit, table_slot, write_table,
 };
+pub use billboard_bake::{
+    BILLBOARD_DIRECTIONS, BillboardBakeInput, BillboardBakeResult, BillboardFraming,
+    billboard_camera, billboard_framing, billboard_proxy,
+};
+pub use billboard_targets::{
+    BillboardLayout, BillboardTargets, billboard_layout, billboard_tile_rect,
+};
 pub use contributor::ForwardContributor;
 pub use extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
+pub use foliage_bake::{FoliageAsset, FoliageBakeSettings};
 pub use frame::{FRAME_GPU_SIZE, FrameParams, SUN_ANGULAR_RADIUS_DEFAULT, write_frame_gpu};
 pub use handle::{DrawMemo, InstanceShape, LitHandle, LitMeshStorage, PipelineSpec};
 pub use instance_store::{InstanceStore, StoreKind, write_instance_record};

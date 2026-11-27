@@ -46,7 +46,9 @@ pub fn write_instance_record(
 ) {
     world.write_le_bytes(&mut out[0..64]);
     for (chunk, v) in out[64..112]
-        .chunks_exact_mut(4)
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
         .zip(world.normal_matrix().as_flattened())
     {
         chunk.copy_from_slice(&v.to_le_bytes());

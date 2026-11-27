@@ -493,6 +493,100 @@ impl TextureAtlas {
         Ok((id, created))
     }
 
+    /// Whether the full atlas texture exists (false: group 0 binds the 1 x 1 placeholder).
+    /// A caller of [`TextureAtlas::add_gpu_image`] compares it before and after the call
+    /// to know when group 0 must be bound again.
+    #[allow(
+        dead_code,
+        reason = "read by the billboard bake owner in the next share"
+    )]
+    pub(crate) fn is_allocated(&self) -> bool {
+        self.allocated
+    }
+
+    /// Packs an `extent[0]` x `extent[1]` image and copies it from mip zero of `source`
+    /// (origin 0, 0) into the atlas on the GPU, without CPU texels or readback. Returns its
+    /// id. Refusals (nothing changes): `texture.invalid` (`source` not a single-sample 2D
+    /// rgba8unorm `COPY_SRC` texture, a zero extent side or an extent larger than
+    /// `source`), then the [`ShelfPacker::alloc`] refusals. The atlas texture is created
+    /// like the first [`TextureAtlas::add`] (see [`TextureAtlas::is_allocated`]). Only
+    /// level 0 is written; the rect is written with `gpu_bytes_with(false)` (no mips). The
+    /// copy is submitted on `gpu.queue()` before the call returns.
+    pub(crate) fn add_gpu_image(
+        &mut self,
+        gpu: &GpuContext,
+        source: &wgpu::Texture,
+        extent: [u32; 2],
+    ) -> Result<u32, RaaError> {
+        let [width, height] = extent;
+        if source.format() != ATLAS_FORMAT
+            || !source.usage().contains(wgpu::TextureUsages::COPY_SRC)
+            || source.dimension() != wgpu::TextureDimension::D2
+            || source.sample_count() != 1
+        {
+            return Err(texture_error(
+                "texture.invalid",
+                format!(
+                    "the source texture must be a single-sample 2D {ATLAS_FORMAT:?} texture \
+                     with COPY_SRC (got {:?}, {:?}, {} samples)",
+                    source.format(),
+                    source.usage(),
+                    source.sample_count()
+                ),
+            ));
+        }
+        if width == 0 || height == 0 || width > source.width() || height > source.height() {
+            return Err(texture_error(
+                "texture.invalid",
+                format!(
+                    "image size {width} x {height} must be at least 1 and within the {} x {} \
+                     source texture",
+                    source.width(),
+                    source.height()
+                ),
+            ));
+        }
+        let (id, rect) = self.packer.alloc(width, height)?;
+        if !self.allocated {
+            self.texture = create_texture(gpu, ATLAS_SIZE, ATLAS_MIP_LEVELS);
+            self.view = self.texture.create_view(&Default::default());
+            self.allocated = true;
+        }
+        let mut encoder = gpu
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("raa.lit.texture_atlas.gpu_image"),
+            });
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: source,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: rect.x,
+                    y: rect.y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let offset = u64::from(id) * TEXTURE_RECT_SIZE as u64;
+        gpu.queue()
+            .write_buffer(&self.rects, offset, &rect.gpu_bytes_with(false));
+        gpu.queue().submit([encoder.finish()]);
+        Ok(id)
+    }
+
     /// Removes texture `id` (its rect samples zero again); an unknown or already removed
     /// id does nothing. Returns whether it was live.
     pub(crate) fn remove(&mut self, gpu: &GpuContext, id: u32) -> bool {

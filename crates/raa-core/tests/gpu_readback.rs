@@ -40,7 +40,7 @@ fn clear_pass_into_offscreen_target_reads_back_clear_color() {
         unorm8(CLEAR_COLOR.b),
         unorm8(CLEAR_COLOR.a),
     ];
-    for (i, px) in pixels.chunks_exact(4).enumerate() {
+    for (i, px) in pixels.as_chunks::<4>().0.iter().enumerate() {
         for c in 0..4 {
             assert!(
                 px[c].abs_diff(expected[c]) <= 1,

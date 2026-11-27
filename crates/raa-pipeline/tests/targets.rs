@@ -160,9 +160,11 @@ fn hdr_dst_clears_and_reads_back(gpu: &GpuContext) {
     let mapped = slice.get_mapped_range().expect("mapped range");
     // f16 bits of 1.0, 0.5, 0.25 and 2.0
     let expected = [0x3C00u16, 0x3800, 0x3400, 0x4000];
-    for (i, px) in mapped.chunks_exact(8).enumerate() {
+    for (i, px) in mapped.as_chunks::<8>().0.iter().enumerate() {
         let got: Vec<u16> = px
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(got, expected, "pixel {i}");

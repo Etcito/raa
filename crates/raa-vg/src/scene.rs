@@ -66,7 +66,9 @@ pub fn pack_vertex_colors(colors: &[f32]) -> Result<Vec<[f32; 4]>, String> {
         return Err("colours must be finite".to_string());
     }
     Ok(colors
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| [c[0], c[1], c[2], c[3]])
         .collect())
 }
@@ -82,7 +84,12 @@ pub fn pack_vertex_uvs(uvs: &[f32]) -> Result<Vec<[f32; 2]>, String> {
     if uvs.iter().any(|c| !c.is_finite()) {
         return Err("uvs must be finite".to_string());
     }
-    Ok(uvs.chunks_exact(2).map(|c| [c[0], c[1]]).collect())
+    Ok(uvs
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| [c[0], c[1]])
+        .collect())
 }
 
 /// The shading attributes of one section (`VgScene::set_cluster_shading`): the colour and uv
