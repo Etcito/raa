@@ -89,6 +89,15 @@ export interface SurfaceMaterialDesc {
   attenuationColor?: [number, number, number];
   /** Absorption distance in metres, > 0. Default Infinity (no absorption). */
   attenuationDistance?: number;
+  /**
+   * Diffuse transmission weight [0, 1] (thin translucency drawn opaque: lantern glass, paper,
+   * leaves): this share of the diffuse lobe is lit from behind, Lambert around the inverted normal
+   * (sun, local lights, DDGI/ambient irradiance read with -N), the front keeping 1 - weight. Any
+   * blend; it does not need `blend: 'transmissive'`. Ignored on metals. Default 0.
+   */
+  diffuseTransmission?: number;
+  /** Diffuse transmission colour multiplying the base colour, linear RGB [0, 1] (8 bits). Default [1, 1, 1]. */
+  diffuseTransmissionColor?: [number, number, number];
   /** Fur shell extrusion length in metres, >= 0; > 0 enables fur. Default 0. */
   furLength?: number;
   /** Strands per cm2, > 0. Default 2000. */

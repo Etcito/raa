@@ -33,7 +33,7 @@ use raa_shader::{
 };
 
 use crate::handle::{DrawMemo, LitHandle, PipelineSpec};
-use crate::material::{DrawClass, FLAG_DOUBLE_SIDED};
+use crate::material::{DrawClass, FLAG_DIFFUSE_TRANSMISSION, FLAG_DOUBLE_SIDED};
 use crate::planar_reflection::{PlanarTargets, PlanarView};
 use crate::renderer::{Contributors, pipeline_busy};
 
@@ -59,6 +59,11 @@ const DRAWN_CLASSES: [DrawClass; 2] = [DrawClass::Opaque, DrawClass::Fur];
 
 /// Material flags that select a pipeline (cull mode), kept in the variant key.
 const VARIANT_FLAGS: u32 = FLAG_DOUBLE_SIDED;
+
+/// Material flags that select a forward-only shader variant: diffuse transmission compiles the
+/// back-lighting term of `opaque_lighting.wgsl` (tested there as `RAA_VARIANT_FLAGS`), so every
+/// other draw keeps the uber-shader without it. The prepass never carries them.
+const FORWARD_VARIANT_FLAGS: u32 = FLAG_DIFFUSE_TRANSMISSION;
 
 /// Forward lightingOutput "layers" / "layers-signals" / "layers-interlaced" (camera forward
 /// only; see raa-shader `opaque_layers.wgsl` for the per-pixel identity). The opaque draws write the HDR chain
@@ -240,12 +245,18 @@ fn draw_lit(
             if indices.is_empty() {
                 continue;
             }
-            let flags = lit.material_record(d.material).map_or(0, |m| m.flags) & VARIANT_FLAGS;
+            let gpu_flags = lit.material_record(d.material).map_or(0, |m| m.gpu_flags());
+            let flags = gpu_flags & VARIANT_FLAGS;
+            let forward_flags = if kind == PassKind::Forward {
+                gpu_flags & FORWARD_VARIANT_FLAGS
+            } else {
+                0
+            };
             let key = VariantKey {
                 material_fn: d.material_fn,
                 pass: kind,
                 msaa,
-                flags: flags | lit.material_variant_flags(d.material) | extra_flags,
+                flags: flags | forward_flags | lit.material_variant_flags(d.material) | extra_flags,
             };
             let pipeline = lit.pipeline_memo(gpu, key, specs.get(flags), &mut memo)?;
             memo.set_pipeline(pass, &pipeline);

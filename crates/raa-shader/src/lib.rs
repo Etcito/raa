@@ -658,6 +658,41 @@ fn depth_probe() {{
     }
 
     #[test]
+    fn diffuse_transmission_flag_composes_valid_forward_and_vg_shade() {
+        // Material flag 512 (raa-lit FLAG_DIFFUSE_TRANSMISSION) is a low bit of the key, distinct
+        // from the high variant bits; the forward gate reads it from RAA_VARIANT_FLAGS.
+        assert_eq!(
+            512 & (VARIANT_FLAG_NO_AREA_LIGHTS
+                | VARIANT_FLAG_MOTION_DEFORM
+                | VARIANT_FLAG_TINT_GRAPH
+                | 1 << 31),
+            0
+        );
+        assert!(PRELUDE_WGSL.contains("const RAA_FLAG_DIFFUSE_TRANSMISSION: u32 = 512u;"));
+        assert!(PASS_FORWARD_WGSL.contains(
+            "if (RAA_VARIANT_FLAGS & RAA_FLAG_DIFFUSE_TRANSMISSION) == 0u { return 0.0; }"
+        ));
+        assert!(PASS_FORWARD_WGSL.contains("raa_ddgi_sample(in.position, n, -in.view_dir)"));
+        let composer = stub_composer();
+        let reg = MaterialFnRegistry::new();
+        for (pass, flags) in [
+            (PassKind::Forward, 512),
+            (PassKind::Forward, 512 | VARIANT_FLAG_NO_AREA_LIGHTS),
+            (PassKind::Forward, 512 | 8),
+            (PassKind::VgShade, 0),
+        ] {
+            let k = VariantKey {
+                flags,
+                ..key(MaterialFnId::STANDARD, pass)
+            };
+            let wgsl = composer.compose(&reg, &k).expect("compose");
+            assert!(wgsl.contains(&format!("const RAA_VARIANT_FLAGS: u32 = {flags}u;")));
+            Composer::validate(&wgsl)
+                .unwrap_or_else(|e| panic!("{pass:?} flags {flags}: {e}"));
+        }
+    }
+
+    #[test]
     fn multiply_is_todays_module_and_graph_drops_only_the_colour_multiply() {
         let composer = stub_composer();
         let reg = MaterialFnRegistry::new();

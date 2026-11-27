@@ -23,6 +23,8 @@ mod ddgi_gi;
 #[cfg(target_arch = "wasm32")]
 mod nrc_gi;
 #[cfg(target_arch = "wasm32")]
+mod local_shadow;
+#[cfg(target_arch = "wasm32")]
 mod training_capture;
 
 #[cfg(target_arch = "wasm32")]

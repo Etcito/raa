@@ -17,10 +17,11 @@ use std::cell::RefCell;
 /// forward, the others fade to the probes (light_tiles.wgsl). 0 = unlimited.
 pub const DEFAULT_FORWARD_BUDGET: u32 = 8;
 
-/// Cached effective lights: registry generation, descriptors, forward radii.
-type Effective = (u64, Vec<LocalLight>, Vec<f32>);
+/// Cached effective lights: registry generation, descriptors, forward radii, shadow slots.
+type Effective = (u64, Vec<LocalLight>, Vec<f32>, Vec<Option<u32>>);
 use crate::local_light::{LightHandle, LocalLight, MAX_LIGHT_HANDLE};
 
+use raa_pipeline::{LocalShadowSlot, MAX_LOCAL_SHADOWS};
 use raa_shader::LIGHT_GPU_SIZE;
 /// Maximum number of local lights held by the renderer.
 pub use raa_shader::MAX_LOCAL_LIGHTS;
@@ -55,6 +56,9 @@ pub struct LocalLights {
     generation: u64,
     forward_budget: u32,
     effective: RefCell<Effective>,
+    /// Owner of each local shadow slot. A shadow-casting light keeps its slot (and so its cached
+    /// cube faces) for as long as it stays shadowed, on and in the registry.
+    shadow_owners: RefCell<[Option<LightHandle>; MAX_LOCAL_SHADOWS]>,
 }
 
 impl Default for LocalLights {
@@ -74,7 +78,8 @@ impl LocalLights {
             cutoff: LightCutoff::default(),
             generation: 1,
             forward_budget: DEFAULT_FORWARD_BUDGET,
-            effective: RefCell::new((0, Vec::new(), Vec::new())),
+            effective: RefCell::new((0, Vec::new(), Vec::new(), Vec::new())),
+            shadow_owners: RefCell::new([None; MAX_LOCAL_SHADOWS]),
         }
     }
 
@@ -284,9 +289,31 @@ impl LocalLights {
         out.fill(0);
         let eff = self.effective();
         let records = out.chunks_exact_mut(LIGHT_GPU_SIZE);
-        for ((light, forward), record) in eff.1.iter().zip(&eff.2).zip(records) {
-            light.write_gpu_tiered(*forward, record.try_into().expect("one light record"));
+        for (((light, forward), slot), record) in eff.1.iter().zip(&eff.2).zip(&eff.3).zip(records) {
+            light.write_gpu_tiered(*forward, *slot, record.try_into().expect("one light record"));
         }
+    }
+
+    /// The shadow-casting lights (`shadows`, point or spot, not off under the cutoff) that hold
+    /// a local shadow slot, in record order: slot, dense record index, world position, effective
+    /// range and the emitter radius (the bake starts its rays that far from the light). At most
+    /// [`MAX_LOCAL_SHADOWS`]; later shadow-casting lights stay unshadowed.
+    pub fn shadow_slots(&self) -> Vec<LocalShadowSlot> {
+        let eff = self.effective();
+        eff.1
+            .iter()
+            .zip(&eff.3)
+            .enumerate()
+            .filter_map(|(index, (light, slot))| {
+                slot.map(|slot| LocalShadowSlot {
+                    slot,
+                    index: index as u32,
+                    position: light.position,
+                    range: light.range,
+                    near: light.radius,
+                })
+            })
+            .collect()
     }
 
     /// Yields `(dense GPU record index, stable handle, world descriptor)` in the ascending-handle
@@ -346,7 +373,9 @@ impl LocalLights {
                     .map(world_desc)
                     .collect();
                 let (lights, forward) = budgeted(&worlds, self.cutoff);
-                *cache = (self.generation, lights, forward);
+                let handles = self.entries[..self.len].iter().flatten().map(|entry| entry.handle);
+                let slots = assign_shadow_slots(&mut self.shadow_owners.borrow_mut(), handles, &lights);
+                *cache = (self.generation, lights, forward, slots);
             }
         }
         self.effective.borrow()
@@ -364,6 +393,39 @@ impl LocalLights {
             })
             .ok()
     }
+}
+
+/// Keeps each still-shadowed light in its slot, frees the others, then gives free slots to the
+/// new shadow-casting lights in record order. Returns the slot of each light (None: unshadowed).
+fn assign_shadow_slots(
+    owners: &mut [Option<LightHandle>; MAX_LOCAL_SHADOWS],
+    handles: impl Iterator<Item = LightHandle>,
+    lights: &[LocalLight],
+) -> Vec<Option<u32>> {
+    use crate::local_light::LocalLightKind::{Point, Spot};
+    let wanted: Vec<Option<LightHandle>> = handles
+        .zip(lights)
+        .map(|(handle, light)| {
+            (light.shadows && matches!(light.kind, Point | Spot) && !light.is_off()).then_some(handle)
+        })
+        .collect();
+    for owner in owners.iter_mut() {
+        if owner.is_some_and(|handle| !wanted.contains(&Some(handle))) {
+            *owner = None;
+        }
+    }
+    wanted
+        .iter()
+        .map(|handle| {
+            let handle = (*handle)?;
+            if let Some(slot) = owners.iter().position(|owner| *owner == Some(handle)) {
+                return Some(slot as u32);
+            }
+            let free = owners.iter().position(Option::is_none)?;
+            owners[free] = Some(handle);
+            Some(free as u32)
+        })
+        .collect()
 }
 
 /// Effective world-space descriptor: latest world position and, while attached, world direction.
@@ -457,10 +519,12 @@ mod tests {
                 (32, 0.0),
                 (36, 0.0),
                 (40, -1.0),
-                (60, 3.0),
             ] {
                 assert_eq!(gpu_float(record, offset), expected, "offset {offset}");
             }
+            // point and spot carry their shadow slot + 1 (shadows: true), the others the height
+            let height = if rank < 2 { rank as f32 + 1.0 } else { 3.0 };
+            assert_eq!(gpu_float(record, 60), height);
             // point and spot carry the forward radius (0: forward everywhere), the others the width
             assert_eq!(gpu_float(record, 56), if rank < 2 { 0.0 } else { 2.0 });
             assert!((gpu_float(record, 44) - 17.5_f32.to_radians().cos()).abs() < 1e-6);
@@ -772,5 +836,34 @@ mod tests {
         let expected = (0.3 / lights.cutoff().forward_radiance).sqrt();
         assert!((lane(0) - expected).abs() < 1e-3 && lane(0) > 1.0 && lane(0) < 25.0, "{}", lane(0));
         assert_eq!((lane(1), lane(2)), (0.0, 0.0), "strong and shadowed lights stay forward");
+    }
+
+    #[test]
+    fn shadow_slots_are_stable_freed_on_removal_and_written_into_the_height_lane() {
+        use crate::LocalLightKind::{Area, Point, Spot};
+        let mut lights = LocalLights::new();
+        let shadowed = |kind| LocalLight { kind, shadows: true, radius: 0.3, ..LocalLight::default() };
+        let a = lights.add(shadowed(Point)).unwrap();
+        lights.add(LocalLight::default()).unwrap();
+        let c = lights.add(shadowed(Spot)).unwrap();
+        lights.add(shadowed(Area)).unwrap();
+        let slots = lights.shadow_slots();
+        assert_eq!(slots.iter().map(|s| (s.slot, s.index)).collect::<Vec<_>>(), [(0, 0), (1, 2)]);
+        assert_eq!(slots[0].near, 0.3);
+        let mut out = [0u8; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE];
+        lights.write_gpu(&mut out);
+        let height = |out: &[u8], i: usize| gpu_float(&out[i * LIGHT_GPU_SIZE..(i + 1) * LIGHT_GPU_SIZE], 60);
+        assert_eq!([height(&out, 0), height(&out, 1), height(&out, 2)], [1.0, 0.0, 2.0]);
+        // Removing the first light frees slot 0; the spot keeps slot 1 although its index moved,
+        // and a new shadow-casting light takes the freed slot.
+        lights.remove(a).unwrap();
+        let d = lights.add(shadowed(Point)).unwrap();
+        let slots = lights.shadow_slots();
+        assert_eq!(slots.iter().map(|s| (s.slot, s.index)).collect::<Vec<_>>(), [(1, 1), (0, 3)]);
+        // Turning shadows off frees the slot.
+        lights.replace(c, LocalLight { shadows: false, ..shadowed(Spot) }, true).unwrap();
+        assert_eq!(lights.shadow_slots().iter().map(|s| s.slot).collect::<Vec<_>>(), [0]);
+        lights.remove(d).unwrap();
+        assert!(lights.shadow_slots().is_empty());
     }
 }

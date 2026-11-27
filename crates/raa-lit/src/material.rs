@@ -27,6 +27,10 @@ const INFINITE_DISTANCE: f32 = 1e30;
 
 /// Ideal mirror in the mesh tracer. Marks the raster receiver footprint.
 pub const FLAG_TRACE_MIRROR: u32 = 256;
+/// Material flag: diffuse transmission (thin translucent surface, drawn opaque). Set by
+/// [`SurfaceMaterial::gpu_flags`] whenever `diffuse_transmission > 0`; the forward variant of
+/// such a draw compiles the back-lighting term (`opaque_lighting.wgsl`), others drop it.
+pub const FLAG_DIFFUSE_TRANSMISSION: u32 = 512;
 
 /// How a surface is shaded.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -98,6 +102,15 @@ pub struct SurfaceMaterial {
     pub thickness: f32,
     /// Linear attenuation colour, each channel >= 0.
     pub attenuation_color: [f32; 3],
+    /// Diffuse transmission weight in [0, 1] (KHR_materials_diffuse_transmission factor): the
+    /// share of the diffuse lobe that leaves through the back of a thin surface. The surface stays
+    /// in the Opaque class; its forward shading adds a Lambert term gathered around the inverted
+    /// normal (sun, local lights, probe/ambient irradiance read with -N) and keeps `1 - weight`
+    /// of the front diffuse. 0 (default) = off. Ignored on metals (scaled by `1 - metallic`).
+    pub diffuse_transmission: f32,
+    /// Linear diffuse transmission colour, each channel in [0, 1], multiplying the base colour
+    /// of the transmitted term. Default white. Stored as 8 bits per channel.
+    pub diffuse_transmission_color: [f32; 3],
     /// Attenuation distance in metres, > 0; `f32::INFINITY` (default) is written as 1e30.
     pub attenuation_distance: f32,
     /// `FLAG_*` bits.
@@ -133,6 +146,8 @@ impl Default for SurfaceMaterial {
             thickness: 0.0,
             attenuation_color: [1.0; 3],
             attenuation_distance: f32::INFINITY,
+            diffuse_transmission: 0.0,
+            diffuse_transmission_color: [1.0; 3],
             flags: 0,
             params: [[0.0; 4]; 8],
             fur: [0.0; 4],
@@ -194,7 +209,8 @@ impl SurfaceMaterial {
     }
 
     /// Checks every value: finite, colours >= 0, opacity, roughness, metallic, clearcoat,
-    /// clearcoat roughness, sheen roughness and transmission in [0, 1], ior in [1, 3],
+    /// clearcoat roughness, sheen roughness, transmission, diffuse transmission and each channel
+    /// of the diffuse transmission colour in [0, 1], ior in [1, 3],
     /// thickness >= 0, attenuation distance > 0 (infinity allowed), params and fur finite.
     /// Refusals have code `material.invalid` and name the field.
     pub fn validate(&self) -> Result<(), RaaError> {
@@ -205,6 +221,9 @@ impl SurfaceMaterial {
         check_color("emissive", self.emissive)?;
         check_color("sheen_color", self.sheen_color)?;
         check_color("attenuation_color", self.attenuation_color)?;
+        for (i, v) in self.diffuse_transmission_color.iter().enumerate() {
+            check_unit(&format!("diffuse_transmission_color[{i}]"), *v)?;
+        }
         for (field, v) in [
             ("opacity", self.opacity),
             ("roughness", self.roughness),
@@ -213,6 +232,7 @@ impl SurfaceMaterial {
             ("clearcoat_roughness", self.clearcoat_roughness),
             ("sheen_roughness", self.sheen_roughness),
             ("transmission", self.transmission),
+            ("diffuse_transmission", self.diffuse_transmission),
         ] {
             check_unit(field, v)?;
         }
@@ -247,8 +267,11 @@ impl SurfaceMaterial {
     /// Appends the 256-byte S10 `SurfaceMaterialGpu` little-endian to `out`: base (a =
     /// opacity) @0, emissive @16, surface @32 (roughness clamped to [0.03, 1], metallic,
     /// clearcoat, clearcoat roughness), sheen @48, transmission @64 (transmission, ior,
-    /// thickness, 0), attenuation @80 (rgb, distance, infinity as 1e30), header @96 (model,
-    /// fn id, flags, data base), p @112, fur @240.
+    /// thickness, diffuse transmission), attenuation @80 (rgb, distance, infinity as 1e30),
+    /// header @96 (model, fn id, [`SurfaceMaterial::gpu_flags`], data base), p @112, fur @240.
+    /// `emissive.w` @28 holds the diffuse transmission colour as the exact float
+    /// `r + 256 g + 65536 b` of its 8-bit channels (below 2^24, so the WGSL decode
+    /// `u32(w)` is exact without any bitcast).
     pub fn write_gpu(&self, out: &mut Vec<u8>) {
         let f = |out: &mut Vec<u8>, v: [f32; 4]| {
             for x in v {
@@ -262,7 +285,7 @@ impl SurfaceMaterial {
             self.attenuation_distance
         };
         f(out, rgb(self.base_color, self.opacity));
-        f(out, rgb(self.emissive, 0.0));
+        f(out, rgb(self.emissive, self.diffuse_transmission_color_word()));
         f(
             out,
             [
@@ -273,16 +296,44 @@ impl SurfaceMaterial {
             ],
         );
         f(out, rgb(self.sheen_color, self.sheen_roughness));
-        f(out, [self.transmission, self.ior, self.thickness, 0.0]);
+        f(
+            out,
+            [
+                self.transmission,
+                self.ior,
+                self.thickness,
+                self.diffuse_transmission,
+            ],
+        );
         f(out, rgb(self.attenuation_color, distance));
         let (model, fn_id) = self.model.header();
-        for x in [model, fn_id, self.flags, self.data] {
+        for x in [model, fn_id, self.gpu_flags(), self.data] {
             out.extend_from_slice(&x.to_le_bytes());
         }
         for p in self.params {
             f(out, p);
         }
         f(out, self.fur);
+    }
+
+    /// The flags written to the GPU record and used for draw variants: `flags`, plus
+    /// [`FLAG_DIFFUSE_TRANSMISSION`] exactly when `diffuse_transmission > 0` (any caller value of
+    /// that bit is replaced, so record and pipeline variant always agree).
+    pub fn gpu_flags(&self) -> u32 {
+        let flags = self.flags & !FLAG_DIFFUSE_TRANSMISSION;
+        if self.diffuse_transmission > 0.0 {
+            flags | FLAG_DIFFUSE_TRANSMISSION
+        } else {
+            flags
+        }
+    }
+
+    /// `emissive.w` of the GPU record: the diffuse transmission colour, each channel clamped to
+    /// [0, 1] and rounded to 8 bits, as the exact float `r + 256 g + 65536 b`.
+    pub fn diffuse_transmission_color_word(&self) -> f32 {
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+        let [r, g, b] = self.diffuse_transmission_color;
+        (q(r) | q(g) << 8 | q(b) << 16) as f32
     }
 
     /// TRANSPARENT or TRANSMISSIVE -> Transparent (wins over FUR); FUR -> Fur; else Opaque.

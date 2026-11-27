@@ -26,7 +26,8 @@ pub use interlace::{
     INTERLACE_PHASES, InterlaceSignals, IrradianceRate, LightingInterlace, ShadowRate,
 };
 pub use lighting::{
-    AREA_SHADOW_MASK_LAYERS, AREA_STOCHASTIC_GPU_SIZE, LightingResources, MAX_STOCHASTIC_LIGHTS,
+    AREA_SHADOW_MASK_LAYERS, AREA_STOCHASTIC_GPU_SIZE, LightingResources, LocalShadowSlot,
+    MAX_LOCAL_SHADOWS, MAX_STOCHASTIC_LIGHTS,
     WeatherLightingGpu,
 };
 pub use pass::{FeaturePass, PassInfo, PassRole, PrepareCtx, RecordCtx};

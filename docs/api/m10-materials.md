@@ -43,10 +43,23 @@ nothing). Colours are sRGB [0, 1] except `emissive`, which is linear and unbound
 | `thickness` | 0 | metres |
 | `attenuationColor` | [1, 1, 1] | sRGB |
 | `attenuationDistance` | Infinity | metres |
+| `diffuseTransmission` | 0 | [0, 1]; opaque thin translucency |
+| `diffuseTransmissionColor` | [1, 1, 1] | linear [0, 1], 8 bits |
 | `furLength` | 0 | metres; > 0 enables fur |
 | `furDensity` | 2000 | strands per cm2 |
 | `furDroop` | 0 | [0, 1] |
 | `furShells` | 32 | integer 1..64 |
+
+`diffuseTransmission` is the cheap translucent mode (lantern glass, paper, leaves), not
+`transmission`: the material stays opaque (prepass, depth, shadows, no OIT) and its forward
+shading adds a Lambert term with albedo `color x diffuseTransmissionColor x weight` gathered
+around the inverted normal -N (the sun with its shadow re-evaluated for -N, the tile's local
+lights with the LocalVisibility slot, the DDGI probes or the SH / flat ambient read with -N),
+while the front diffuse keeps `1 - weight`. Metals transmit nothing. Only forward draws whose
+material has a weight > 0 compile the term (variant flag 512, `FLAG_DIFFUSE_TRANSMISSION`);
+virtual-geometry draws and the transparent, fur and probe-tracing shaders ignore it. A glass
+lit by its own lamp is double-sided or faces outward, with `castShadow: false` so the lamp's
+light is not stopped by it.
 
 Fur is drawn by the `fur.shells` contributor of the forward pass with alpha-to-coverage.
 `setPassEnabled('fur.shells', false)` leaves fur materials drawn as their base surface only.

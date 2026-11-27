@@ -532,6 +532,7 @@ impl LitRenderer {
             view: 0,
             readback: Arc::clone(&readback),
             lights_dirty: false,
+            shadow_slots: Vec::new(),
         }));
         let renderer = LitRenderer {
             opts,

@@ -23,10 +23,50 @@ export interface LocalLightDesc {
   innerAngleDeg?: number;
   /** Positive full width and height in metres. Default [1, 1]. */
   size?: [number, number];
-  /** Nonnegative authoring metadata; does not control shadows. Default 0. */
+  /**
+   * Nonnegative emitter radius in metres. For a shadow-casting point or spot light the shadow
+   * rays start this far from the light, so geometry inside it (the light's own bulb, lantern
+   * glass) casts nothing and stays lit. Default 0.
+   */
   radius?: number;
-  /** Authoring metadata; local-light shadows are not enabled. Default false. */
+  /**
+   * Point and spot lights: cast shadows from a cached cube shadow map traced through the mesh
+   * BVH of a BVH-consuming GI (DDGI graphs; none otherwise, the light stays unshadowed); see
+   * {@link Engine.setLocalShadows}. At most 32 shadow-casting lights; later ones stay
+   * unshadowed. Area lights use their own tiers; directional lights ignore it. Default false.
+   */
   shadows?: boolean;
+}
+
+/** Settings accepted by {@link Engine.setLocalShadows}; omitted keys keep their value. */
+export interface LocalShadowsDesc {
+  /** Default true. */
+  enabled?: boolean;
+  /** Texels per cube-face side, a multiple of 8 in [64, 1024]. Default 128. */
+  resolution?: number;
+  /** Cube faces traced per frame at most, [1, 24]. Default 2. */
+  facesPerFrame?: number;
+}
+
+/** {@link Engine.localShadowStats}: settings and the last frame's cache state. */
+export interface LocalShadowStats {
+  enabled: boolean;
+  resolution: number;
+  facesPerFrame: number;
+  /** Shadow-casting lights holding a slot. */
+  lights: number;
+  /** Slots the face array holds (a multiple of 4). */
+  capacity: number;
+  /** Faces of the current lights traced and still valid, and still to trace. */
+  readyFaces: number;
+  pendingFaces: number;
+  /** Faces traced in the last frame and since installation. */
+  tracedFaces: number;
+  tracedTotal: number;
+  /** Triangles of the traced BVH (0: no trace geometry, nothing is traced). */
+  triangles: number;
+  /** Bytes of the R32Float face array. */
+  bytes: number;
 }
 
 /** Partial changes merged atomically onto an existing light. */
@@ -186,4 +226,19 @@ export interface Engine {
    * and the stochastic mode.
    */
   areaLightShadows(): AreaLightShadows;
+  /**
+   * Configures the cached cube shadows of the point and spot lights with `shadows: true`. Each
+   * such light holds 6 R32Float faces (distance from the light to the first occluder) traced once
+   * through the shared mesh BVH, starting at the light's `radius`; a face is traced again only
+   * when its light moves (position, range, radius) or the geometry changes inside its range. At
+   * most `facesPerFrame` faces are traced per frame, nearest lights first; an untraced face reads
+   * as unoccluded. The forward reads them with 2x2 PCF (direct and diffuse-transmission terms).
+   * A non-object argument throws `api.invalid_argument`; an out-of-range value throws
+   * `shadow.local_invalid`; nothing changes on refusal.
+   */
+  setLocalShadows(settings: LocalShadowsDesc): void;
+  /** Re-traces every cached local shadow face. */
+  invalidateLocalShadows(): void;
+  /** Settings and cache state of the local shadows, or null when not installed. */
+  localShadowStats(): LocalShadowStats | null;
 }

@@ -69,6 +69,8 @@ pub(crate) struct TileInputs {
     pub readback: Arc<Mutex<ReadbackCoordinator>>,
     /// The light records changed since their last upload (warm frames upload nothing).
     pub lights_dirty: bool,
+    /// The shadow-casting lights of the records (`LocalLights::shadow_slots`).
+    pub shadow_slots: Vec<raa_pipeline::LocalShadowSlot>,
 }
 
 /// Tile grid of a framebuffer: `ceil(width/16)` by `ceil(height/16)`.
@@ -96,6 +98,7 @@ pub(crate) fn light_info(
 pub(crate) fn publish_local_lights(inputs: &mut TileInputs, lights: &mut LocalLights) {
     if lights.is_dirty() {
         lights.write_gpu(&mut inputs.lights);
+        inputs.shadow_slots = lights.shadow_slots();
         lights.clear_dirty();
         inputs.lights_dirty = true;
     }
@@ -351,6 +354,7 @@ impl LightTiles {
         }
         ctx.lighting
             .set_local_lights(&inputs.lights, self.views[index].fragment.clone());
+        ctx.lighting.set_local_shadow_slots(&inputs.shadow_slots);
         self.current = index;
         // S55 `lightTiles`: the viewport's tile array at its grid size and layer count.
         let view = &self.views[index];
@@ -433,6 +437,7 @@ mod tests {
             view: 0,
             readback: Arc::new(Mutex::new(ReadbackCoordinator::new())),
             lights_dirty: false,
+            shadow_slots: Vec::new(),
         }
     }
 

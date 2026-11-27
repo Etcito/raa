@@ -34,11 +34,39 @@ normalized when accepted.
 An explicit inner angle cannot exceed the outer angle. When omitted, the effective
 inner angle is 80% of the outer angle. `size` contains positive full width and
 height values. All numeric values must be finite; colours must be in [0, 1].
-`radius` and `shadows` are retained authoring metadata only: radius does not
-control shadows, and local lights do not cast shadows.
+`shadows: true` makes a point or spot light cast shadows (see "Local-light cube
+shadows" below); `radius` is its emitter radius, where its shadow rays start. Both
+are ignored by area lights (own tiers) and directional lights.
 
 An area light emits radiance intensity / (width x height) per unit colour over its
 rectangle, so intensity is radiance x area.
+
+## Local-light cube shadows
+
+A point or spot light with `shadows: true` holds one of 32 shadow slots (later
+shadow-casting lights stay unshadowed): 6 cube faces of R32Float distances from the
+light to the first occluder, traced through the shared mesh BVH (the one DDGI traces;
+without a BVH-consuming GI node nothing is traced and the lights stay unshadowed).
+Rays start `radius` metres from the light, so geometry inside it (its bulb, a
+lantern's glass) casts nothing and stays lit, including its diffuse-transmission back
+term. Faces are cached: one is traced again only when its light moves (position,
+range, radius), the mesh geometry changes inside its range, or the array is
+reallocated. At most `facesPerFrame` faces are traced per frame (pass `shadow.local`,
+order 36), nearest lights first; an untraced face reads as unoccluded. The forward
+reads the faces with textureLoad and 2x2 PCF (group 1 binding 22; the light record
+carries `slot + 1` in its height lane). Shadow-casting lights are never put in the
+probe-only tier (light cutoff); the per-tile forward budget still applies.
+
+```ts
+interface LocalShadowsDesc { enabled?: boolean; resolution?: number; facesPerFrame?: number }
+```
+
+`setLocalShadows(settings)` (defaults `enabled: true`, `resolution: 128` texels per
+face side, a multiple of 8 in [64, 1024], `facesPerFrame: 2` in [1, 24]); a refusal
+throws `api.invalid_argument` (non-object) or `shadow.local_invalid` and changes
+nothing. `invalidateLocalShadows()` re-traces every face. `localShadowStats()`
+returns the settings, `lights`, `capacity`, `readyFaces`, `pendingFaces`,
+`tracedFaces`, `tracedTotal`, `triangles` and `bytes`, or null.
 
 ## Area-light shading
 
