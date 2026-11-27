@@ -124,7 +124,7 @@ mod alloc_log {
     /// Takes the failure reserve and installs the foliage stage reporter.
     pub(crate) fn install() {
         if RESERVE.load(Ordering::Relaxed).is_null() {
-            // SAFETY: a non-zero-sized layout; the block is only ever freed by `release`.
+            // SAFETY: a non-zero-sized layout; the block is only ever freed by `release`. (test: system_forwarding_keeps_blocks_and_strings_intact)
             let block = unsafe { System.alloc(reserve_layout()) };
             RESERVE.store(block, Ordering::Relaxed);
         }
@@ -134,7 +134,7 @@ mod alloc_log {
     fn release_reserve() {
         let block = RESERVE.swap(std::ptr::null_mut(), Ordering::Relaxed);
         if !block.is_null() {
-            // SAFETY: `block` came from `System.alloc(reserve_layout())` in `install`.
+            // SAFETY: `block` came from `System.alloc(reserve_layout())` in `install`. (test: system_forwarding_keeps_blocks_and_strings_intact)
             unsafe { System.dealloc(block, reserve_layout()) };
         }
     }
@@ -151,7 +151,7 @@ mod alloc_log {
             return "none";
         }
         let len = STAGE_LEN.load(Ordering::Relaxed);
-        // SAFETY: `ptr`/`len` were stored together from a `&'static str` in `report_stage`.
+        // SAFETY: `ptr`/`len` were stored together from a `&'static str` in `report_stage`. (test: system_forwarding_keeps_blocks_and_strings_intact)
         unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }
     }
 
@@ -246,11 +246,11 @@ mod alloc_log {
     /// the failure log.
     pub(crate) struct LoggingAlloc;
 
-    // SAFETY: every call forwards its layout and pointer unchanged to `System`; the
-    // counters and the failure log only observe sizes.
+    // SAFETY: every call forwards its layout and pointer unchanged to `System`; the counters and the failure log only observe sizes. (test: system_forwarding_keeps_blocks_and_strings_intact)
     unsafe impl GlobalAlloc for LoggingAlloc {
+        // SAFETY: forwards the caller's arguments unchanged to `System`, whose contract the trait's own contract matches (test: system_forwarding_keeps_blocks_and_strings_intact)
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            // SAFETY: forwards the caller's layout unchanged.
+            // SAFETY: forwards the caller's layout unchanged. (test: system_forwarding_keeps_blocks_and_strings_intact)
             let ptr = unsafe { System.alloc(layout) };
             if ptr.is_null() {
                 failed(layout.size(), layout.align());
@@ -260,8 +260,9 @@ mod alloc_log {
             ptr
         }
 
+        // SAFETY: forwards the caller's arguments unchanged to `System`, whose contract the trait's own contract matches (test: system_forwarding_keeps_blocks_and_strings_intact)
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            // SAFETY: forwards the caller's layout unchanged.
+            // SAFETY: forwards the caller's layout unchanged. (test: system_forwarding_keeps_blocks_and_strings_intact)
             let ptr = unsafe { System.alloc_zeroed(layout) };
             if ptr.is_null() {
                 failed(layout.size(), layout.align());
@@ -271,14 +272,16 @@ mod alloc_log {
             ptr
         }
 
+        // SAFETY: forwards the caller's arguments unchanged to `System`, whose contract the trait's own contract matches (test: system_forwarding_keeps_blocks_and_strings_intact)
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            // SAFETY: forwards the caller's pointer and layout unchanged.
+            // SAFETY: forwards the caller's pointer and layout unchanged. (test: system_forwarding_keeps_blocks_and_strings_intact)
             unsafe { System.dealloc(ptr, layout) };
             LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
         }
 
+        // SAFETY: forwards the caller's arguments unchanged to `System`, whose contract the trait's own contract matches (test: system_forwarding_keeps_blocks_and_strings_intact)
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            // SAFETY: forwards the caller's pointer, layout and size unchanged.
+            // SAFETY: forwards the caller's pointer, layout and size unchanged. (test: system_forwarding_keeps_blocks_and_strings_intact)
             let grown = unsafe { System.realloc(ptr, layout, new_size) };
             if grown.is_null() {
                 failed(new_size, layout.align());
@@ -292,4 +295,36 @@ mod alloc_log {
 
     #[global_allocator]
     static GLOBAL: LoggingAlloc = LoggingAlloc;
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use std::alloc::{GlobalAlloc, Layout, System};
+
+    /// The forwarding the wasm32 `LoggingAlloc` and the stage name rely on: a block from `System`
+    /// keeps its bytes through `realloc` and is released by `dealloc` with the layout it has, and a
+    /// `&'static str` rebuilt from its pointer and length is the same string.
+    #[test]
+    fn system_forwarding_keeps_blocks_and_strings_intact() {
+        let layout = Layout::from_size_align(64, 16).expect("layout");
+        // SAFETY: a non-zero-sized layout, freed below with the layout realloc returned it under (test: system_forwarding_keeps_blocks_and_strings_intact)
+        let block = unsafe { System.alloc_zeroed(layout) };
+        assert!(!block.is_null());
+        // SAFETY: `block` holds 64 initialized zero bytes (test: system_forwarding_keeps_blocks_and_strings_intact)
+        unsafe { block.write_bytes(7, 64) };
+        // SAFETY: `block` came from `System` under `layout`; 256 is a non-zero size (test: system_forwarding_keeps_blocks_and_strings_intact)
+        let grown = unsafe { System.realloc(block, layout, 256) };
+        assert!(!grown.is_null());
+        // SAFETY: the first 64 bytes were copied by realloc and are initialized (test: system_forwarding_keeps_blocks_and_strings_intact)
+        let kept = unsafe { std::slice::from_raw_parts(grown, 64) };
+        assert!(kept.iter().all(|&b| b == 7));
+        let grown_layout = Layout::from_size_align(256, 16).expect("layout");
+        // SAFETY: `grown` came from `System.realloc` with size 256 and align 16 (test: system_forwarding_keeps_blocks_and_strings_intact)
+        unsafe { System.dealloc(grown, grown_layout) };
+        let stage: &'static str = "source snapshot";
+        let (ptr, len) = (stage.as_ptr(), stage.len());
+        // SAFETY: `ptr`/`len` come from the same `&'static str` (test: system_forwarding_keeps_blocks_and_strings_intact)
+        let back = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) };
+        assert_eq!(back, stage);
+    }
 }

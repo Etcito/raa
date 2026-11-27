@@ -46,11 +46,11 @@ fn grew(bytes: usize) {
     PEAK.fetch_max(now, Ordering::Relaxed);
 }
 
-// SAFETY: every call forwards its layout and pointer unchanged to `System`; the counters
-// only observe sizes.
+// SAFETY: every call forwards its layout and pointer unchanged to `System`; the counters only observe sizes. (test: sample_tree_bake_stages_fit_the_heap_one_stage_at_a_time)
 unsafe impl GlobalAlloc for PeakAlloc {
+    // SAFETY: forwards the caller's arguments unchanged to `System`, whose contract the trait's own contract matches (test: sample_tree_bake_stages_fit_the_heap_one_stage_at_a_time)
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: forwards the caller layout unchanged.
+        // SAFETY: forwards the caller layout unchanged. (test: sample_tree_bake_stages_fit_the_heap_one_stage_at_a_time)
         let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() {
             grew(layout.size());
@@ -58,8 +58,9 @@ unsafe impl GlobalAlloc for PeakAlloc {
         ptr
     }
 
+    // SAFETY: forwards the caller's arguments unchanged to `System`, whose contract the trait's own contract matches (test: sample_tree_bake_stages_fit_the_heap_one_stage_at_a_time)
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: forwards the caller layout unchanged.
+        // SAFETY: forwards the caller layout unchanged. (test: sample_tree_bake_stages_fit_the_heap_one_stage_at_a_time)
         let ptr = unsafe { System.alloc_zeroed(layout) };
         if !ptr.is_null() {
             grew(layout.size());
@@ -67,8 +68,9 @@ unsafe impl GlobalAlloc for PeakAlloc {
         ptr
     }
 
+    // SAFETY: forwards the caller's arguments unchanged to `System`, whose contract the trait's own contract matches (test: sample_tree_bake_stages_fit_the_heap_one_stage_at_a_time)
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: forwards the caller arguments unchanged.
+        // SAFETY: forwards the caller arguments unchanged. (test: sample_tree_bake_stages_fit_the_heap_one_stage_at_a_time)
         let out = unsafe { System.realloc(ptr, layout, new_size) };
         if !out.is_null() {
             // A moving realloc briefly holds both blocks; count that as the peak.
@@ -78,9 +80,10 @@ unsafe impl GlobalAlloc for PeakAlloc {
         out
     }
 
+    // SAFETY: forwards the caller's arguments unchanged to `System`, whose contract the trait's own contract matches (test: sample_tree_bake_stages_fit_the_heap_one_stage_at_a_time)
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         CURRENT.fetch_sub(layout.size(), Ordering::Relaxed);
-        // SAFETY: forwards the caller arguments unchanged.
+        // SAFETY: forwards the caller arguments unchanged. (test: sample_tree_bake_stages_fit_the_heap_one_stage_at_a_time)
         unsafe { System.dealloc(ptr, layout) }
     }
 }
