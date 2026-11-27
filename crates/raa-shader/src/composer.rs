@@ -40,12 +40,24 @@ pub struct SlotProvider {
 #[derive(Clone, Debug, Default)]
 pub struct Composer {
     providers: Vec<SlotProvider>,
+    /// The Transparent pass composes the DDGI probe lookup without binding 21: set when the
+    /// device has fewer than 9 fragment storage buffers, where raa-pipeline lays the
+    /// transparent group 1 out without binding 21 (`GroupSet::Transparent`).
+    transparent_without_probes: bool,
 }
 
 impl Composer {
     /// A composer without slot providers.
     pub fn new() -> Composer {
         Composer::default()
+    }
+
+    /// Whether the Transparent pass may read the spherical/DDGI data (group 1 binding 21). With
+    /// `false` its module declares no binding 21 and the probe lookup of pass_transparent is a
+    /// stub (`raa_ddgi_active()` false): the transparent layout of a device with fewer than 9
+    /// fragment storage buffers has no binding 21. Default `true`.
+    pub fn set_transparent_probes(&mut self, enabled: bool) {
+        self.transparent_without_probes = !enabled;
     }
 
     /// Installs a provider. Refuses `shader.slot_conflict` when the slot already has a
@@ -166,7 +178,8 @@ impl Composer {
         }
         section(&mut out, "local lighting", LOCAL_LIGHTING_WGSL);
         // Transparent: the DDGI lookup of transmissive and blended fragments (pass_transparent.wgsl).
-        if matches!(key.pass, PassKind::Forward | PassKind::VgShade | PassKind::Transparent) {
+        let transparent_probes = key.pass == PassKind::Transparent && !self.transparent_without_probes;
+        if matches!(key.pass, PassKind::Forward | PassKind::VgShade) || transparent_probes {
             section(&mut out, "spherical cube", crate::SPHERICAL_CUBE_WGSL);
             section(
                 &mut out,
@@ -180,6 +193,14 @@ impl Composer {
                 "fn raa_ddgi_word(index: u32) -> vec4<u32> { return raa_spherical_data[index]; }",
             );
             section(&mut out, "DDGI", crate::DDGI_GI_WGSL);
+        } else if key.pass == PassKind::Transparent {
+            // No binding 21 in this device's transparent layout: the lookup is never taken.
+            section(
+                &mut out,
+                "DDGI stub (no binding 21)",
+                "fn raa_ddgi_active() -> bool { return false; }\n\
+                 fn raa_ddgi_sample(p: vec3<f32>, n: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32> { return vec4<f32>(0.0); }",
+            );
         }
         if matches!(key.pass, PassKind::VgGbuffer | PassKind::VgShade) {
             section(&mut out, "depth", DEPTH_WGSL);

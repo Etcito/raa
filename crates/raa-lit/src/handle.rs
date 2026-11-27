@@ -578,6 +578,9 @@ impl LitShared {
         for p in default_slot_providers() {
             composer.add_slot(p).map_err(shader_error)?;
         }
+        // raa-pipeline drops binding 21 from the transparent group 1 below 9 fragment storage
+        // buffers (LightingResources::transparent_set): the Transparent module must not read it.
+        composer.set_transparent_probes(gpu.device().limits().max_storage_buffers_per_shader_stage >= 9);
         let instances = u64::from(max_instances.max(1));
         let materials = u64::from(max_materials.max(1));
         let store = InstanceStore::new(max_instances.max(1));
