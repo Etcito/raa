@@ -260,6 +260,7 @@ impl FeaturePass for ShadowPass {
     /// writes the caster uniform and `ShadowGpu`, and gives the array to the lighting.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let mut st = self.state.try_borrow_mut().map_err(|_| state_busy())?;
+        st.vsm_active = false;
         let Some(view) = st.view else {
             if st.bound {
                 ctx.lighting.clear_shadow();
@@ -269,7 +270,6 @@ impl FeaturePass for ShadowPass {
             return Ok(());
         };
         let desc = st.desc;
-        st.vsm_active = false;
         if desc.mode == ShadowMode::Vsm {
             return prepare_vsm(&self.lit, ctx, &mut st, view);
         }
