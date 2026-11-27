@@ -31,7 +31,9 @@
 //       visible = luma(e / w) / -t. The 1e-4 floor (f16 target) only changes vis where the
 //       sky irradiance luma is below 1e-4.
 // - em: emissive + local lights + A(0, sph0) (AO-free ambient, e.g. sheen) + the screen
-//       indirect (raa_slot_indirect) when no probe GI is enabled.
+//       indirect (raa_slot_indirect) when no probe GI is enabled + the diffuse transmission
+//       back term (its own -N sun shadow and probe read; no screen AO, so with AO < 1 its
+//       indirect part lands in r).
 // - r:  the residual, only in "layers-signals": combined - the recomposition. Zero up to
 //       rounding except (1) where A is not linear in c.ao (multi-bounce AO, specular
 //       occlusion), (2) probe weight w < 1 (the layers assume w = 1 whenever a probe GI feature
@@ -85,7 +87,12 @@ fn raa_layers_sphere_direct(kind: u32) -> bool {
     return kind == 3u && raa_spherical_direct_range() >= 0.0;
 }
 
-fn raa_opaque_layers(in: MaterialInput, s: MaterialOutput) -> RaaOpaqueLayers {
+fn raa_opaque_layers(in: MaterialInput, shaded: MaterialOutput) -> RaaOpaqueLayers {
+    // Diffuse transmission keeps 1 - t of the front diffuse (t = 0 outside its variant), as
+    // raa_opaque_lighting; the transmitted back term goes to em below.
+    let dt = raa_dt_weight(in.record, shaded);
+    var s = shaded;
+    s.base_color = shaded.base_color * (1.0 - dt);
     let capture = raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE);
     let unlit = raa_pass_unlit(in.record);
     let kind = raa_layers_probe_kind(capture);
@@ -129,12 +136,32 @@ fn raa_opaque_layers(in: MaterialInput, s: MaterialOutput) -> RaaOpaqueLayers {
     if !raa_layers_sphere_direct(kind) {
         local = raa_local_lighting(s, c);
     }
+    // The transmitted back term of raa_opaque_lighting (sun shadow for -N, local lights with
+    // their visibility, probes read with -N): no front signal scales it, so it lands in em. Its
+    // indirect part takes no screen AO here (combined multiplies it by c.ao).
+    var back = vec3<f32>(0.0);
+    if dt > 0.0 && !unlit {
+        var sun_far = 0.0;
+        if !capture && kind == 3u {
+            let range = raa_spherical_direct_range();
+            if range >= 0.0 {
+                sun_far = smoothstep(range, 1.25 * range + 0.01,
+                    length(in.position - raa_frame.camera_pos.xyz));
+            }
+        }
+        let albedo = shaded.base_color * raa_dt_color(in.record) * dt;
+        back = albedo * raa_dt_direct(in, -s.normal, sun_far);
+        if !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
+            back += albedo * raa_dt_indirect(in, -s.normal, 1.0);
+        }
+    }
     var out: RaaOpaqueLayers;
     let zero = vec3<f32>(0.0);
     out.d0 = select(d0, zero, unlit);
     out.kd = select(kd, zero, unlit);
     out.s0 = select(ambient_lit - ambient_free, zero, unlit);
-    out.em = select(s.emissive + local + ambient_free + indirect, s.base_color + s.emissive, unlit);
+    out.em = select(s.emissive + local + ambient_free + indirect + back,
+        shaded.base_color + s.emissive, unlit);
     out.sky = select(sky, 0.0, unlit);
     return out;
 }
