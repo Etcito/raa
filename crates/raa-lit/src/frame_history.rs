@@ -26,6 +26,21 @@ struct ViewSlot {
 pub(crate) struct FrameHistory {
     slots: [ViewSlot; MAX_VIEWS],
     frame_index: u64,
+    /// Length of the Halton jitter cycle (`JITTER_PHASES` at 1:1, longer when upscaling).
+    pub(crate) jitter_phases: u32,
+}
+
+/// Jitter cycle length of a 1:1 temporal resolve.
+pub(crate) const JITTER_PHASES: u32 = 8;
+
+/// The jitter cycle for a scene rendered at `render` and resolved to `display`: 8 samples per
+/// display pixel, so 8 x (display / render area) phases when upscaling (18 at 0.67), at most 64.
+pub(crate) fn jitter_phases(render: (u32, u32), display: (u32, u32)) -> u32 {
+    if render.0 == 0 || render.1 == 0 || (display.0 <= render.0 && display.1 <= render.1) {
+        return JITTER_PHASES;
+    }
+    let area = (display.0 as f64 / render.0 as f64) * (display.1 as f64 / render.1 as f64);
+    ((JITTER_PHASES as f64 * area).ceil() as u32).clamp(JITTER_PHASES, 64)
 }
 
 impl FrameHistory {
@@ -34,6 +49,7 @@ impl FrameHistory {
         FrameHistory {
             slots: [ViewSlot::default(); MAX_VIEWS],
             frame_index: 0,
+            jitter_phases: JITTER_PHASES,
         }
     }
 
@@ -56,7 +72,7 @@ impl FrameHistory {
         jitter_consumer: bool,
         discontinuity: bool,
     ) -> CameraHistory {
-        let jitter = frame_jitter(self.frame_index, size, jitter_consumer);
+        let jitter = frame_jitter(self.frame_index, size, jitter_consumer, self.jitter_phases);
         let slot = &mut self.slots[view];
         let valid = !discontinuity
             && slot
@@ -117,11 +133,11 @@ fn pixel_offset_to_ndc(offset: [f32; 2], size: (u32, u32)) -> [f32; 2] {
     ]
 }
 
-pub(crate) fn frame_jitter(frame_index: u64, size: (u32, u32), jitter_consumer: bool) -> [f32; 2] {
+pub(crate) fn frame_jitter(frame_index: u64, size: (u32, u32), jitter_consumer: bool, phases: u32) -> [f32; 2] {
     if !jitter_consumer {
         return [0.0; 2];
     }
-    let sample = (frame_index % 8) as u32 + 1;
+    let sample = (frame_index % phases.max(1) as u64) as u32 + 1;
     let offset = [halton(sample, 2) - 0.5, halton(sample, 3) - 0.5];
     pixel_offset_to_ndc(offset, size)
 }
@@ -133,6 +149,16 @@ mod tests {
 
     const F: &str = include_str!("../tests/fixtures/frame-history.txt");
     const S: (u32, u32) = (1280, 720);
+
+    #[test]
+    fn jitter_cycle_grows_with_the_upscale_area() {
+        assert_eq!(jitter_phases((1920, 1080), (1920, 1080)), JITTER_PHASES);
+        assert_eq!(jitter_phases((1286, 724), (1920, 1080)), 18);
+        assert_eq!(jitter_phases((960, 540), (1920, 1080)), 32);
+        assert_eq!(jitter_phases((100, 100), (1920, 1080)), 64);
+        assert_eq!(frame_jitter(18, S, true, 18), frame_jitter(0, S, true, 18));
+        assert_ne!(frame_jitter(8, S, true, 18), frame_jitter(0, S, true, 18));
+    }
 
     fn close(a: [f32; 2], b: [f32; 2]) -> bool {
         (a[0] - b[0]).abs() <= 1e-7 && (a[1] - b[1]).abs() <= 1e-7
@@ -187,7 +213,7 @@ mod tests {
         for i in 0..8 {
             let s = [halton(i as u32 + 1, 2), halton(i as u32 + 1, 3)];
             assert!(close(hs[i], s));
-            assert!(close(nd[i], frame_jitter(i as u64, S, true)));
+            assert!(close(nd[i], frame_jitter(i as u64, S, true, JITTER_PHASES)));
         }
         assert!(close(
             pixel_offset_to_ndc([1.0, 1.0], (100, 50)),
@@ -237,14 +263,14 @@ mod tests {
         let mut h = FrameHistory::new();
         let (u0, u1) = (shift(1.0), shift(2.0));
         h.begin(0);
-        let a = h.prepare(0, jit(u0, frame_jitter(0, S, true)), u0, S, true, false);
+        let a = h.prepare(0, jit(u0, frame_jitter(0, S, true, JITTER_PHASES)), u0, S, true, false);
         assert!(!a.history_valid && a.unjittered_view_proj == u0);
         assert_eq!(a.previous_view_proj, jit(u0, a.current_jitter));
         assert_eq!(a.previous_jitter, a.current_jitter);
         h.submitted(0);
         h.finish();
         h.begin(1);
-        let b = h.prepare(0, jit(u1, frame_jitter(1, S, true)), u1, S, true, false);
+        let b = h.prepare(0, jit(u1, frame_jitter(1, S, true, JITTER_PHASES)), u1, S, true, false);
         assert!(b.history_valid && b.unjittered_view_proj == u1);
         assert_eq!(b.previous_view_proj, jit(u0, a.current_jitter));
         assert_eq!(b.previous_jitter, a.current_jitter);

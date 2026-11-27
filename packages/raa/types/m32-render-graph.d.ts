@@ -89,6 +89,21 @@ export interface RenderGraphResult {
   rebuilt: number;
 }
 
+/**
+ * The forward `lightingOutput: 'layers-interlaced'` state of the latest submitted frame
+ * ({@link Engine.lightingInterlace}). `frame` is the real-frame counter n (advances only on
+ * submitted frames); `real` is true on an R frame (n even: the forward evaluated the signals at
+ * the pixels (x, y) with (x & 1, y & 1) = `phase`), false on a G frame (no signal evaluated,
+ * the `skipped` signal passes did not record). `phase` is [[0,0],[1,1],[1,0],[0,1]][(n / 2) % 4].
+ */
+export interface LightingInterlaceState {
+  mode: boolean;
+  frame: number;
+  real: boolean;
+  phase: [number, number];
+  skipped: ('shadow.csm' | 'ao.gtao' | 'shadow.contact' | 'gi.ddgi')[];
+}
+
 /** The per-frame stats of {@link Engine.renderGraphStats}, from the latest rendered frame. */
 export interface RenderGraphStats {
   /** The Engine render invocation of the latest frame; null before one. */
@@ -107,6 +122,11 @@ export interface RenderGraphStats {
       format: string;
       bytes: number;
     }[];
+    /**
+     * Nodes that keep a history and report it (`pass.lighting.reconstruct`): whether that
+     * history was valid when the node last ran. Absent for every other node.
+     */
+    historyValid?: boolean;
   }[];
 }
 
@@ -375,6 +395,12 @@ export interface Engine {
    * `setAreaLightShadows`, `setGlobalIllumination`, `setGiQuality`.
    */
   renderGraphOwnedSetters(): string[];
+  /**
+   * The forward `layers-interlaced` state of the latest submitted frame, with or without a
+   * graph; null before the first submitted frame. `mode` is false in every other
+   * `lightingOutput`.
+   */
+  lightingInterlace(): LightingInterlaceState | null;
 }
 
 export interface NeuralModelHeads {

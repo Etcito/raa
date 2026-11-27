@@ -27,12 +27,18 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-override RAA_TAA_FILTER_SHARPNESS: f32 = 2.3;
+override RAA_TAA_FILTER_SHARPNESS: f32 = 8.0;
 override RAA_TAA_CLIP_TOLERANCE: f32 = 1.25;
-override RAA_TAA_BLEND_BASE: f32 = 0.06;
-override RAA_TAA_BLEND_MOTION_GAIN: f32 = 0.012;
+override RAA_TAA_BLEND_BASE: f32 = 0.04;
+override RAA_TAA_BLEND_MOTION_GAIN: f32 = 0.03;
 override RAA_TAA_BLEND_MIN: f32 = 0.04;
-override RAA_TAA_BLEND_MAX: f32 = 0.3;
+override RAA_TAA_BLEND_MAX: f32 = 0.5;
+override RAA_TAA_HISTORY_SHARPNESS: f32 = 0.6;
+override RAA_TAA_BLEND_STATIC: f32 = 0.015;
+override RAA_TAA_CLIP_STATIC: f32 = 3.0;
+override RAA_TAA_UPSAMPLE_CONFIDENCE: f32 = 3.0;
+override RAA_TAA_UPSAMPLE_CLIP_SCENE: f32 = 1.0;
+override RAA_TAA_UPSAMPLE_KERNEL: f32 = 1.0;
 
 @group(0) @binding(0) var<uniform> raa_taa_frame: RaaTemporalFrame;
 @group(0) @binding(1) var<uniform> raa_taa_params: RaaTaaParams;
@@ -78,17 +84,27 @@ fn from_ycocg(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
 }
 
-// Five-tap Catmull-Rom: nearly bicubic history sampling, which is the main thing keeping
-// reprojection from blurring the image over time.
+// Keys cubic weight at distance x in [0, 2) for a = -RAA_TAA_HISTORY_SHARPNESS: 0.5 is
+// Catmull-Rom; larger values deepen the negative lobes, which offsets the softening of the
+// subpixel resampling the history goes through every frame (0.6 measured best on Sponza).
+fn keys_weight(x: vec2<f32>) -> vec2<f32> {
+    let a = -RAA_TAA_HISTORY_SHARPNESS;
+    let near = ((a + 2.0) * x - (a + 3.0)) * x * x + 1.0;
+    let far = ((a * x - 5.0 * a) * x + 8.0 * a) * x - 4.0 * a;
+    return select(far, near, x <= vec2<f32>(1.0));
+}
+
+// Five-tap Keys cubic (Catmull-Rom at sharpness 0.5): nearly bicubic history sampling, which
+// is the main thing keeping reprojection from blurring the image over time.
 fn sample_history(uv: vec2<f32>) -> vec3<f32> {
     let size = vec2<f32>(textureDimensions(raa_taa_history));
     let position = uv * size;
     let center = floor(position - vec2<f32>(0.5)) + vec2<f32>(0.5);
     let f = position - center;
-    let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
-    let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
-    let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
-    let w3 = f * f * (-0.5 + 0.5 * f);
+    let w0 = keys_weight(vec2<f32>(1.0) + f);
+    let w1 = keys_weight(f);
+    let w2 = keys_weight(vec2<f32>(1.0) - f);
+    let w3 = keys_weight(vec2<f32>(2.0) - f);
     let w12 = w1 + w2;
     let offset12 = w2 / w12;
     let t0 = (center - vec2<f32>(1.0)) / size;
@@ -143,6 +159,16 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
     var filter_total = 0.0;
     var closest_depth = select(1.0, textureLoad(raa_taa_depth, nearest, 0), scaled);
     var closest_pixel = nearest;
+    // Squared distance, in display pixels, from this output pixel to the nearest jittered
+    // scene sample (temporal upscaling confidence).
+    var nearest_sample = 1.0e9;
+    // RAA_TAA_UPSAMPLE_KERNEL >= 0.5 (with a confidence > 0): the current value is the
+    // display-pixel Gaussian exp(-confidence * d^2) of the jittered samples and its weight sum
+    // (at most 1) is the confidence, instead of the nearest sample's distance.
+    let kernel = scaled && RAA_TAA_UPSAMPLE_CONFIDENCE > 0.0 && RAA_TAA_UPSAMPLE_KERNEL >= 0.5;
+    var kernel_sum = vec3<f32>(0.0);
+    var kernel_total = 0.0;
+    let to_display = display_extent / scene_extent;
     for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) {
             let p = clamp(nearest + vec2<i32>(dx, dy), vec2<i32>(0), scene_size - vec2<i32>(1));
@@ -155,7 +181,10 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
                 vec2<i32>(output_size) - vec2<i32>(1),
             );
             var clip_color = color;
-            if scaled {
+            // RAA_TAA_UPSAMPLE_CLIP_SCENE >= 0.5 keeps the 3x3 scene samples around the raster
+            // position as the clipping distribution (a box of nine distinct samples instead of
+            // the display neighbours' nearest samples, which repeat at upscaled extents).
+            if scaled && RAA_TAA_UPSAMPLE_CLIP_SCENE < 0.5 {
                 let clip_position = (vec2<f32>(display_neighbor) + vec2<f32>(0.5)) * scene_extent
                     / display_extent + jitter_pixels;
                 let clip_pixel = clamp(vec2<i32>(floor(clip_position)), vec2<i32>(0), scene_size - vec2<i32>(1));
@@ -172,6 +201,11 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
             let sample_position = vec2<f32>(p) + vec2<f32>(0.5) - jitter_pixels;
             let delta = sample_position - scene_position;
             let weight = exp(-RAA_TAA_FILTER_SHARPNESS * dot(delta, delta));
+            let delta_display = delta * to_display;
+            nearest_sample = min(nearest_sample, dot(delta_display, delta_display));
+            let kernel_weight = exp(-RAA_TAA_UPSAMPLE_CONFIDENCE * dot(delta_display, delta_display));
+            kernel_sum += color * kernel_weight;
+            kernel_total += kernel_weight;
             filtered += color * weight;
             filter_total += weight;
 
@@ -185,7 +219,11 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
     mean /= 9.0;
     second_moment /= 9.0;
     let deviation = sqrt(max(second_moment - mean * mean, vec3<f32>(0.0)));
-    let current = filtered / max(filter_total, 1.0e-4);
+    let current = select(
+        filtered / max(filter_total, 1.0e-4),
+        kernel_sum / max(kernel_total, 1.0e-6),
+        kernel && kernel_total > 1.0e-3,
+    );
 
     // Reproject. The sky (closest_depth at the far plane) has no stored motion, so derive
     // it from the camera alone; geometry uses the S12 motion of the nearest pixel, whose
@@ -212,7 +250,11 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
 
         // Clip history against the current neighbourhood's colour distribution: anything far
         // outside it is a disocclusion or lighting change, not a useful earlier sample.
-        let tolerance = RAA_TAA_CLIP_TOLERANCE;
+        // At rest (no reprojection offset) the history is the same surface point, so a
+        // longer history and a looser box average the jitter positions instead of flickering.
+        let moved = length((previous_uv - uv) * display_extent);
+        let rest = 1.0 - smoothstep(0.0, 0.5, moved);
+        let tolerance = RAA_TAA_CLIP_TOLERANCE * mix(1.0, RAA_TAA_CLIP_STATIC, rest);
         let low = mean - deviation * tolerance;
         let high = mean + deviation * tolerance;
         let y = to_ycocg(previous);
@@ -224,8 +266,17 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
 
         // More weight on the current frame when the scene is moving, since resampled
         // history gets softer with distance on the accumulation grid.
-        let moved = length((previous_uv - uv) * display_extent);
-        let blend = clamp(RAA_TAA_BLEND_BASE + moved * RAA_TAA_BLEND_MOTION_GAIN, RAA_TAA_BLEND_MIN, RAA_TAA_BLEND_MAX);
+        var blend = clamp(
+            mix(RAA_TAA_BLEND_BASE, RAA_TAA_BLEND_STATIC, rest) + moved * RAA_TAA_BLEND_MOTION_GAIN,
+            min(RAA_TAA_BLEND_MIN, RAA_TAA_BLEND_STATIC),
+            RAA_TAA_BLEND_MAX,
+        );
+        // Temporal upscaling: a display pixel only learns from this frame as much as a jittered
+        // sample landed near it; elsewhere the current value is an interpolation that would blur
+        // the accumulated history (0 disables the weighting).
+        if scaled && RAA_TAA_UPSAMPLE_CONFIDENCE > 0.0 {
+            blend *= select(exp(-RAA_TAA_UPSAMPLE_CONFIDENCE * nearest_sample), min(kernel_total, 1.0), kernel);
+        }
         result = mix(from_ycocg(clipped), current, blend);
     }
     let color = decompress(max(result, vec3<f32>(0.0)));

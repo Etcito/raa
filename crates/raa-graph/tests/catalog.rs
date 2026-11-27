@@ -449,6 +449,9 @@ fn pass_names_and_default_sources_resolve() {
             "neural.super-resolution" => Some("taa"),
             // The radiance cache is installed as its own GI pass (nodes/nrc.rs, NRC_GI_NAME).
             "neural.radiance-cache" => Some(raa_sdf_trace::mesh::NRC_GI_NAME),
+            // A graph-installed stage pass (entry `pass.lighting.reconstruct#<id>`): no
+            // engine-installed pipeline entry, so availability never refuses it.
+            "pass.lighting.reconstruct" => None,
             id => id.strip_prefix("pass."),
         };
         assert_eq!(node.pass, expected_pass, "{} pipeline entry", node.id);

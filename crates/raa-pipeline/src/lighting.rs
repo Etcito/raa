@@ -921,6 +921,8 @@ pub struct LightingResources {
     spherical_gi: Option<(wgpu::Buffer, wgpu::Buffer)>,
     spherical_dirty: bool,
     state: State<wgpu::TextureView>,
+    /// Forward "layers-interlaced" cadence of the frame (raa-lit `set_interlace`).
+    interlace: crate::LightingInterlace,
 }
 
 impl LightingResources {
@@ -1043,7 +1045,19 @@ impl LightingResources {
             spherical_gi: None,
             spherical_dirty: false,
             state,
+            interlace: crate::LightingInterlace::default(),
         }
+    }
+
+    /// The forward "layers-interlaced" state of the frame being prepared and recorded.
+    pub fn interlace(&self) -> crate::LightingInterlace {
+        self.interlace
+    }
+
+    /// Set by raa-lit's prepare each frame, before the pipeline prepares its passes. Not a
+    /// GPU resource: it marks nothing dirty.
+    pub fn set_interlace(&mut self, interlace: crate::LightingInterlace) {
+        self.interlace = interlace;
     }
 
     /// The full S38 group-1 layout (bindings 0..=18) every lit pass uses at `@group(1)`.

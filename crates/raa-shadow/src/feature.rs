@@ -106,6 +106,13 @@ struct ShadowState {
     resolution: u32,
     /// Preallocated `ShadowGpu` bytes, rewritten every prepare.
     uniform: [u8; SHADOW_GPU_SIZE],
+    /// Cascade view-projections and splits of the latest frame that renders (or rendered) the
+    /// cascade layers. A G frame of forward "layers-interlaced" that skips the cascades keeps
+    /// them in `ShadowGpu`, so the maps its readers sample agree with the matrices.
+    rendered: Option<([Mat4; CASCADES], [f32; CASCADES])>,
+    /// This frame renders the cascades although `skip_cascades` is set (no rendered cascades
+    /// to keep: first frame, new array).
+    force_cascades: bool,
     /// What the last prepare computed (diagnostics).
     stats: ShadowStats,
 }
@@ -202,6 +209,7 @@ impl FeaturePass for ShadowPass {
                 st.bound = false;
                 st.heroes = [None; MAX_HERO_LIGHTS];
                 st.hero_layers = 0;
+                st.rendered = None;
             }
         }
     }
@@ -216,6 +224,7 @@ impl FeaturePass for ShadowPass {
                 ctx.lighting.clear_shadow();
                 st.bound = false;
             }
+            st.rendered = None;
             return Ok(());
         };
         let desc = st.desc;
@@ -230,6 +239,7 @@ impl FeaturePass for ShadowPass {
             .is_none_or(|c| c.resolution() != desc.resolution || c.hero_layers() != hero_capacity)
         {
             st.casters = Some(Casters::new(ctx.gpu, desc.resolution, hero_capacity));
+            st.rendered = None;
         }
         // `cover`: the scene bounds keep the last cascade over the whole scene (no sun without
         // shadow inside it); otherwise the plain range min(far, distance).
@@ -249,10 +259,20 @@ impl FeaturePass for ShadowPass {
             desc.resolution,
             scene.as_ref(),
         );
-        let (matrices, splits) = (frame.matrices, frame.splits);
+        // A G frame of forward "layers-interlaced" that skips the cascades keeps the matrices
+        // and splits the cascade layers were last rendered with (OIT, fur shells and opaque
+        // particles sample those maps on that frame); it renders fresh ones only when there is
+        // nothing to keep.
+        let skip = ctx.lighting.interlace().skip_cascades;
+        let kept = st.rendered.filter(|_| skip);
+        st.force_cascades = skip && kept.is_none();
+        let (matrices, splits) = kept.unwrap_or((frame.matrices, frame.splits));
+        if kept.is_none() {
+            st.rendered = Some((matrices, splits));
+        }
         st.stats = ShadowStats {
             cover: desc.cover,
-            splits,
+            splits: frame.splits,
             fits: frame.fits,
             texels_m: frame.texels_m,
             cover_m: frame.cover_m,
@@ -312,13 +332,17 @@ impl FeaturePass for ShadowPass {
     }
 
     /// Renders the caster draws into the four cascade layers and each occupied hero layer
-    /// (nothing without a caster array).
+    /// (nothing without a caster array). On a G frame of forward "layers-interlaced" whose
+    /// cascade readers allow it (`LightingInterlace::skip_cascades`, raa-lit) only the hero
+    /// layers, which the local lighting reads every frame, are rendered; the cascade layers and
+    /// `ShadowGpu` keep the last rendered cascades (see `prepare`).
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let st = self.state.try_borrow().map_err(|_| state_busy())?;
         let Some(casters) = st.casters.as_ref() else {
             return Ok(());
         };
-        casters.record(ctx.gpu, ctx.encoder, &self.lit, &st.heroes)
+        let cascades = !ctx.lighting.interlace().skip_cascades || st.force_cascades;
+        casters.record(ctx.gpu, ctx.encoder, &self.lit, &st.heroes, cascades)
     }
 }
 
@@ -356,6 +380,8 @@ impl ShadowFeature {
             sun_dir: Vec3::ZERO,
             resolution: 0,
             uniform: [0; SHADOW_GPU_SIZE],
+            rendered: None,
+            force_cascades: false,
             stats: ShadowStats::default(),
         }));
         let pass = ShadowPass {

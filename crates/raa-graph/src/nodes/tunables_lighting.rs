@@ -22,6 +22,8 @@ type MetaRow = (&'static str, &'static str, &'static str, &'static str);
 const GTAO_ROWS: &[MetaRow] = &[
     ("slices", "pass.ao.gtao", "Quality", "Slices"),
     ("steps", "pass.ao.gtao", "Quality", "Steps"),
+    ("scale", "pass.ao.gtao", "Quality", "Pixels per AO texel"),
+    ("upsample", "pass.ao.gtao", "Quality", "Bilateral upsample"),
 ];
 
 /// The raa-contact row of docs/render-graph/tunables.md.
@@ -152,7 +154,7 @@ mod tests {
         let before = find_node(&types, "pass.ao.gtao").params.len();
         family().extend_types(&mut types);
         let gtao = find_node(&types, "pass.ao.gtao");
-        assert_eq!(gtao.params.len(), before + 2);
+        assert_eq!(gtao.params.len(), before + 4);
         assert_eq!(gtao.params[before].key, "slices");
         assert_eq!(gtao.params[before + 1].key, "steps");
 

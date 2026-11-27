@@ -231,6 +231,9 @@ pub struct NodeStats {
     /// Whether the node's pipeline entry ran this frame.
     pub ran: bool,
     pub resources: Vec<ResourceStat>,
+    /// Whether the node's retained history was valid when it last ran (`None`: the node keeps
+    /// no history or does not report it).
+    pub history_valid: Option<bool>,
 }
 
 /// The size, format and memory of one resource a node produced.

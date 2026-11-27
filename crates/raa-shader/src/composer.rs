@@ -10,7 +10,8 @@ use crate::registry::MaterialFnRegistry;
 use crate::{
     CLOUD_SHADOW_WGSL, DEPTH_WGSL, LIB_WGSL, LOCAL_LIGHTING_WGSL, PASS_FORWARD_WGSL,
     PASS_FURSHELL_WGSL, PASS_PREPASS_WGSL, PASS_SHADOW_WGSL, PASS_TRANSPARENT_WGSL,
-    PASS_VG_GBUFFER_WGSL, PASS_VG_SHADE_WGSL, PRELUDE_WGSL, VG_SURFACE_WGSL,
+    PASS_VG_GBUFFER_WGSL, PASS_VG_SHADE_WGSL, PRELUDE_WGSL, VARIANT_FLAG_FORWARD_LAYERS,
+    VG_SURFACE_WGSL,
 };
 
 /// Inserted after the material function when it defines no `material_vertex`.
@@ -183,11 +184,15 @@ impl Composer {
             section(&mut out, "depth", DEPTH_WGSL);
             section(&mut out, "vg surface", VG_SURFACE_WGSL);
         }
+        let layers = key.pass == PassKind::Forward && key.flags & VARIANT_FLAG_FORWARD_LAYERS != 0;
+        let body = if layers {
+            Cow::Owned(crate::forward_layers_wgsl(key.flags))
+        } else {
+            Cow::Borrowed(pass_wgsl(key.pass))
+        };
         let pass = format!(
             "const RAA_MSAA: u32 = {}u;\nconst RAA_VARIANT_FLAGS: u32 = {}u;\n\n{}",
-            key.msaa,
-            key.flags,
-            pass_wgsl(key.pass)
+            key.msaa, key.flags, body
         );
         section(&mut out, &format!("pass {:?}", key.pass), &pass);
         Ok(out)
@@ -244,13 +249,34 @@ impl Composer {
     }
 }
 
-// Naga does not reject every interprocedural derivative-uniformity violation.
-// Enforce S11 on the entire call graph reached inside the tiled light loop.
+/// Functions called from non-uniform control flow, with what makes the flow non-uniform: the
+/// tiled light loop, and the phase-pixel branch of forward "layers-interlaced"
+/// (pass_forward_layers_interlaced.wgsl; also checked in "layers-signals", which calls it
+/// uniformly).
+const NONUNIFORM_ROOTS: [(&str, &str); 2] = [
+    ("raa_local_contribution", "nonuniform local-light loop"),
+    ("raa_opaque_signals", "interlaced phase-pixel branch"),
+];
+
+// Naga does not reject every interprocedural derivative-uniformity violation (an implicit-lod
+// textureSample inside a branch on frag_coord validates). Enforce S11 on the entire call graph
+// reached from each NONUNIFORM_ROOTS function.
 fn validate_local_derivatives(module: &naga::Module) -> Result<(), ShaderError> {
+    for (root, context) in NONUNIFORM_ROOTS {
+        validate_derivative_free(module, root, context)?;
+    }
+    Ok(())
+}
+
+fn validate_derivative_free(
+    module: &naga::Module,
+    root: &str,
+    context: &str,
+) -> Result<(), ShaderError> {
     let mut pending: Vec<_> = module
         .functions
         .iter()
-        .filter(|(_, f)| f.name.as_deref() == Some("raa_local_contribution"))
+        .filter(|(_, f)| f.name.as_deref() == Some(root))
         .map(|(h, _)| h)
         .collect();
     let mut visited = std::collections::HashSet::new();
@@ -271,7 +297,7 @@ fn validate_local_derivatives(module: &naga::Module) -> Result<(), ShaderError> 
                 return Err(ShaderError::new(
                     ShaderError::VALIDATE,
                     format!(
-                        "nonuniform local-light loop reaches derivative-dependent function `{}`; use explicit LOD, established gradients or textureLoad",
+                        "{context} reaches derivative-dependent function `{}`; use explicit LOD, established gradients or textureLoad",
                         function.name.as_deref().unwrap_or("unnamed")
                     ),
                 ));

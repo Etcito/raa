@@ -99,6 +99,7 @@ fn generate_module_writes_the_full_text_and_its_offset() {
         "  inv_view: mat4x4<f32>,\n",
         "  previous_view_proj: mat4x4<f32>,\n",
         "  history_valid: u32,\n",
+        "  interlace: u32,\n",
         "}\n",
         "@group(0) @binding(0) var<uniform> rg_params: RgParams;\n",
         "@group(0) @binding(1) var<uniform> rg_frame: RgFrame;\n",

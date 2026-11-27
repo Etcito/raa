@@ -126,6 +126,7 @@ pub fn chain_type(ty: &str) -> bool {
         || matches!(
             ty,
             "pass.forward"
+                | "pass.lighting.reconstruct"
                 | "pass.gi.history"
                 | "pass.ssr"
                 | "pass.fog"
@@ -188,6 +189,7 @@ pub fn node_entries(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> Vec<(Stri
                         | "bloom.down"
                         | "bloom.up"
                         | "compute.wgsl"
+                        | "pass.lighting.reconstruct"
                 )
             {
                 let entry = if node.type_id == "compute.wgsl" {

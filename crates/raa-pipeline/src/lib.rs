@@ -6,6 +6,7 @@
 mod brdf_atlas;
 mod env;
 mod graph_frame;
+mod interlace;
 mod lighting;
 mod output;
 mod pass;
@@ -21,6 +22,7 @@ pub use brdf_atlas::{
 };
 pub use env::EnvGpu;
 pub use graph_frame::GraphFrame;
+pub use interlace::{INTERLACE_PHASES, LightingInterlace};
 pub use lighting::{
     AREA_SHADOW_MASK_LAYERS, AREA_STOCHASTIC_GPU_SIZE, LightingResources, MAX_STOCHASTIC_LIGHTS,
     WeatherLightingGpu,

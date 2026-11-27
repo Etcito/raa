@@ -45,6 +45,9 @@ pub struct FrameParams {
     pub tile_stride: u32,
     /// Temporal state: parity, accumulation enabled and history valid.
     pub frame_parity: u32,
+    /// Forward "layers-interlaced" word (`temporal.w`): raa-pipeline `LightingInterlace::word`,
+    /// 0 with the mode off.
+    pub interlace: u32,
     pub accumulation_enabled: bool,
     pub history_valid: bool,
     /// Material texture mip bias in levels (`reserved2[0].x`), added to the lod of
@@ -56,6 +59,10 @@ pub struct FrameParams {
 /// Negative mip bias that keeps material textures as sharp as the display resolution while a
 /// jittered, temporally upscaled frame renders at `render` pixels: `log2(render / display)` on the
 /// width, 0 when the frame is not jittered or renders at or above the display size.
+/// The default extra material mip bias of a jittered frame (any render scale): the temporal
+/// resolve accumulates the jittered samples of the finer level, as a supersampled frame does.
+pub const JITTER_TEXTURE_LOD_BIAS: f32 = -0.5;
+
 pub fn taau_texture_lod_bias(jitter: bool, render: (u32, u32), display: (u32, u32)) -> f32 {
     if !jitter || render.0 == 0 || display.0 <= render.0 {
         return 0.0;
@@ -83,6 +90,7 @@ impl Default for FrameParams {
             tile_rows: 0,
             tile_stride: 0,
             frame_parity: 0,
+            interlace: 0,
             accumulation_enabled: false,
             history_valid: false,
             texture_lod_bias: 0.0,
@@ -136,7 +144,8 @@ fn jittered_projection(proj: Mat4, jitter: [f32; 2]) -> Mat4 {
 /// feature bits 32-63), exposure @432 (TONEMAP_DEFAULT), reserved @448..512 zero,
 /// previous_view_proj @512, unjittered_view_proj @576, camera_jitter @640 (current NDC
 /// xy, previous NDC xy), light_info @656 (active count, tile columns, tile rows, tile
-/// stride in words), temporal @672 (parity, accumulation enabled, history valid, 0) and
+/// stride in words), temporal @672 (parity, accumulation enabled, history valid, interlace
+/// word of forward "layers-interlaced", 0 with the mode off) and
 /// reserved2 @688 (x: material texture mip bias, rest zero) to 768.
 /// Handoff: `pub const fn feature_address(id: u32) -> Option<(usize, u32)>` from
 /// `crates/raa-shader/src/gpu_constants.rs` (landed first) maps `FrameParams` feature
@@ -208,7 +217,7 @@ pub(crate) fn write_camera_frame_gpu(
             p.frame_parity,
             u32::from(p.accumulation_enabled),
             u32::from(p.history_valid),
-            0,
+            p.interlace,
         ],
     );
     put_f32s(&mut out[688..692], &[p.texture_lod_bias]);
@@ -357,6 +366,7 @@ mod tests {
             tile_rows: 23,
             tile_stride: 128,
             frame_parity: 1,
+            interlace: 11,
             accumulation_enabled: true,
             history_valid: true,
             ..FrameParams::default()
@@ -376,7 +386,7 @@ mod tests {
             [656, 660, 664, 668].map(|o| u32_at(&out, o)),
             [17, 40, 23, 128]
         );
-        assert_eq!([672, 676, 680, 684].map(|o| u32_at(&out, o)), [1, 1, 1, 0]);
+        assert_eq!([672, 676, 680, 684].map(|o| u32_at(&out, o)), [1, 1, 1, 11]);
     }
 
     #[test]

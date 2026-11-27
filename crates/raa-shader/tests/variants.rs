@@ -799,3 +799,137 @@ fn local_lighting_accepts_shipped_cel_and_matfn_sources() {
     let wgsl = composer.compose(&reg, &key).expect("compose") + LOCAL_PROBE;
     assert_eq!(Composer::validate(&wgsl), Ok(()));
 }
+
+/// lightingOutput "layers" / "layers-signals" / "layers-interlaced": the forward variants with
+/// the layers bits validate at MSAA 1 and 4 and write four / six / five Rgba targets; without the
+/// bits the forward module is unchanged (the bits only replace its fs_main).
+#[test]
+fn forward_layer_variants_validate_with_their_targets() {
+    use raa_shader::{
+        VARIANT_FLAG_FORWARD_LAYER_INTERLACED, VARIANT_FLAG_FORWARD_LAYER_SIGNALS,
+        VARIANT_FLAG_FORWARD_LAYERS,
+    };
+    let reg = MaterialFnRegistry::new();
+    let composer = default_composer();
+    let vec4_f32 = naga::TypeInner::Vector {
+        size: naga::VectorSize::Quad,
+        scalar: naga::Scalar::F32,
+    };
+    let plain = |msaa| {
+        let key = VariantKey {
+            material_fn: MaterialFnId::STANDARD,
+            pass: PassKind::Forward,
+            msaa,
+            flags: 0,
+        };
+        composer.compose(&reg, &key).expect("compose")
+    };
+    for msaa in [1, 4] {
+        for (flags, expected) in [
+            (VARIANT_FLAG_FORWARD_LAYERS, vec![0, 1, 2, 3]),
+            (
+                VARIANT_FLAG_FORWARD_LAYERS | VARIANT_FLAG_FORWARD_LAYER_SIGNALS,
+                vec![0, 1, 2, 3, 4, 5],
+            ),
+            (
+                VARIANT_FLAG_FORWARD_LAYERS | VARIANT_FLAG_FORWARD_LAYER_INTERLACED,
+                vec![0, 1, 2, 3, 4],
+            ),
+        ] {
+            let key = VariantKey {
+                material_fn: MaterialFnId::STANDARD,
+                pass: PassKind::Forward,
+                msaa,
+                flags,
+            };
+            let wgsl = composer
+                .compose(&reg, &key)
+                .unwrap_or_else(|e| panic!("{key:?}: {e}"));
+            if let Err(e) = Composer::validate(&wgsl) {
+                panic!("{key:?}: {e}");
+            }
+            assert_eq!(wgsl.matches("fn fs_main(").count(), 1, "{key:?}");
+            assert!(wgsl.contains("fn raa_opaque_layers("), "{key:?}");
+            assert_eq!(
+                wgsl.contains("fn raa_interlace_sample("),
+                flags & VARIANT_FLAG_FORWARD_LAYER_INTERLACED != 0,
+                "{key:?}"
+            );
+            let module = naga::front::wgsl::parse_str(&wgsl).expect("parse");
+            check_entry_points(PassKind::Forward, &module);
+            let fs = entry(&module, "fs_main").expect("fs_main");
+            let result = fs.function.result.as_ref().expect("fs result");
+            let targets: Vec<u32> = result_locations(&module, result)
+                .into_iter()
+                .map(|(location, ty, _)| {
+                    assert_eq!(module.types[ty].inner, vec4_f32, "{key:?}");
+                    location
+                })
+                .collect();
+            assert_eq!(targets, expected, "{key:?}");
+        }
+        // The signals bit alone is ignored, and the plain module carries no layer code.
+        let alone = VariantKey {
+            material_fn: MaterialFnId::STANDARD,
+            pass: PassKind::Forward,
+            msaa,
+            flags: VARIANT_FLAG_FORWARD_LAYER_SIGNALS,
+        };
+        let wgsl = composer.compose(&reg, &alone).expect("compose");
+        assert!(!wgsl.contains("raa_opaque_layers"));
+        let base = plain(msaa);
+        assert!(!base.contains("raa_opaque_layers"));
+        assert_eq!(
+            wgsl.replace(&format!("{:#x}", VARIANT_FLAG_FORWARD_LAYER_SIGNALS), "0x0")
+                .replace(&format!("{}u;", VARIANT_FLAG_FORWARD_LAYER_SIGNALS), "0u;"),
+            base
+        );
+    }
+}
+
+// The csm Shadow and gtao Ao providers (standalone files of raa-shadow and raa-gtao).
+#[path = "../../raa-shadow/src/provider.rs"]
+#[allow(dead_code)]
+mod csm_provider;
+#[path = "../../raa-gtao/src/shaders.rs"]
+#[allow(dead_code)]
+mod gtao_shaders;
+
+/// lightingOutput "layers-interlaced" with the csm Shadow and gtao Ao providers: the fs_main
+/// evaluates raa_opaque_signals (raa_slot_shadow, raa_slot_ao, the DDGI/spherical/NRC lookups)
+/// inside its non-uniform phase-pixel branch, which naga's control-flow uniformity validation
+/// accepts only when everything reached is derivative-free.
+#[test]
+fn forward_interlaced_variant_validates_with_csm_and_gtao() {
+    use raa_shader::{
+        VARIANT_FLAG_FORWARD_LAYER_INTERLACED, VARIANT_FLAG_FORWARD_LAYER_SIGNALS,
+        VARIANT_FLAG_FORWARD_LAYERS,
+    };
+    let mut composer = default_composer();
+    for p in [csm_provider::csm_provider(), gtao_shaders::ao_provider()] {
+        if let Err(e) = composer.add_slot(p) {
+            panic!("{e}");
+        }
+    }
+    let reg = MaterialFnRegistry::new();
+    for flags in [
+        VARIANT_FLAG_FORWARD_LAYERS | VARIANT_FLAG_FORWARD_LAYER_SIGNALS,
+        VARIANT_FLAG_FORWARD_LAYERS | VARIANT_FLAG_FORWARD_LAYER_INTERLACED,
+        VARIANT_FLAG_FORWARD_LAYERS | VARIANT_FLAG_FORWARD_LAYER_INTERLACED | 8,
+    ] {
+        let key = VariantKey {
+            material_fn: MaterialFnId::STANDARD,
+            pass: PassKind::Forward,
+            msaa: 1,
+            flags,
+        };
+        let wgsl = composer
+            .compose(&reg, &key)
+            .unwrap_or_else(|e| panic!("{key:?}: {e}"));
+        assert!(wgsl.contains("raa_csm_"), "{key:?}");
+        assert!(wgsl.contains("raa_ao_tex"), "{key:?}");
+        if let Err(e) = Composer::validate(&wgsl) {
+            panic!("{key:?}: {e}");
+        }
+    }
+}

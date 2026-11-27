@@ -193,6 +193,10 @@ pub struct DdgiSettings {
     /// replaces is, not by the material AO alone: probes 1.5 m apart carry no small-scale
     /// occlusion.
     pub screen_ao: bool,
+    /// Pixels per side of one screen-resolve texel (1 = full resolution, 2 = the default half
+    /// resolution, up to 8). The resolve samples the prepass at the centre pixel of its block
+    /// and forward blends the four nearest texels depth-matched (raa_ddgi_screen).
+    pub resolve_scale: u32,
     pub rays_per_probe: u32,
     pub hysteresis: f32,
     pub blend: DdgiBlend,
@@ -269,6 +273,7 @@ impl Default for DdgiSettings {
             cascade_counts: [16, 8, 12],
             far: DdgiFar::Clamp,
             screen_ao: true,
+            resolve_scale: 2,
             rays_per_probe: 64,
             hysteresis: 0.97,
             blend: DdgiBlend::Update,
@@ -644,8 +649,6 @@ const INITIAL_MS_PER_PROBE: f64 = 0.0033;
 /// as GPU-filling batches and a steady-state budget below a batch's cost is met by updating only
 /// every k-th frame. Per-probe costs are learned from batches of at least this size.
 const MIN_BATCH: u32 = 256;
-/// The screen resolve runs at 1/RESOLVE_SCALE of the frame on each axis.
-const RESOLVE_SCALE: u32 = 2;
 
 /// GPU timestamps around the update dispatch; one readback in flight at a time.
 struct UpdateTimer {
@@ -1107,8 +1110,8 @@ impl FeaturePass for DdgiPass {
         let cascades = settings.cascade_layouts();
         // One row per resolve texel inside the forward's one storage binding.
         let resolve_size = (
-            ctx.size.0.div_ceil(RESOLVE_SCALE),
-            ctx.size.1.div_ceil(RESOLVE_SCALE),
+            ctx.size.0.div_ceil(settings.resolve_scale.clamp(1, 8)),
+            ctx.size.1.div_ceil(settings.resolve_scale.clamp(1, 8)),
         );
         let rows = layout(probes).rows
             + u64::from(resolve_size.0) * u64::from(resolve_size.1)
@@ -1322,7 +1325,12 @@ impl FeaturePass for DdgiPass {
         if settings.relocation {
             flags |= FLAG_RELOCATE;
         }
-        gpu.write_header(ctx.gpu, &bases, &closed, flags, settings);
+        // Forward "layers-interlaced" at resolveScale 2: each resolve texel is resolved at the
+        // phase pixel of its block (raa_ddgi_screen then returns it unchanged there).
+        let interlace = ctx.lighting.interlace();
+        let phase = (interlace.enabled && settings.resolve_scale.clamp(1, 8) == 2)
+            .then(|| interlace.phase());
+        gpu.write_header(ctx.gpu, &bases, &closed, flags, settings, phase);
         let resolve = gpu.screen;
         ctx.lighting
             .set_spherical_gi(Some((gpu.probes.clone(), gpu.probes.clone())));
@@ -1610,7 +1618,12 @@ impl FeaturePass for DdgiPass {
                 }
             }
         }
-        if let Some((width, height)) = staged.screen {
+        // A G frame of forward "layers-interlaced" (`LightingInterlace::skip_gi_resolve`) reads
+        // no probe GI: the resolve rows keep the previous R frame's values.
+        if let Some((width, height)) = staged
+            .screen
+            .filter(|_| !ctx.lighting.interlace().skip_gi_resolve)
+        {
             let depth = ctx.targets.depth_input(ctx.resources, DDGI_GI_NAME);
             let normal = ctx.targets.normal_input(ctx.resources, DDGI_GI_NAME);
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1942,6 +1955,7 @@ impl DdgiGpu {
         closed: &[u32],
         flags: u32,
         settings: DdgiSettings,
+        phase: Option<[u32; 2]>,
     ) {
         let probes = self.probes();
         let rows = layout(self.total());
@@ -1990,7 +2004,8 @@ impl DdgiGpu {
                 settings.surface_range.to_bits(),
             ],
         );
-        // Screen resolve rows: first row, width, height, pixels per texel side (0 = off).
+        // Screen resolve rows: first row, width, height, pixels per texel side (bits 0-7, 0 =
+        // off) | phase mode (bit 8, forward "layers-interlaced" at scale 2) | px << 9 | py << 10.
         let (width, height) = self.screen.unwrap_or((0, 0));
         push_u32(
             &mut header,
@@ -1999,7 +2014,7 @@ impl DdgiGpu {
                 width,
                 height,
                 if self.screen.is_some() {
-                    RESOLVE_SCALE
+                    settings.resolve_scale.clamp(1, 8) | screen_phase_bits(phase)
                 } else {
                     0
                 },
@@ -2129,6 +2144,13 @@ pub(crate) fn ddgi_module() -> String {
         include_str!("../wgsl/mesh_ddgi.wgsl"),
         raa_shader::DDGI_GI_WGSL,
     )
+}
+
+
+/// The phase bits of header row 9 `.w` (above the 8-bit resolve scale): bit 8 phase mode, bit 9
+/// px, bit 10 py; 0 without a phase.
+fn screen_phase_bits(phase: Option<[u32; 2]>) -> u32 {
+    phase.map_or(0, |[px, py]| 0x100 | ((px & 1) << 9) | ((py & 1) << 10))
 }
 
 #[cfg(test)]

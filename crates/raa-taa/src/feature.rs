@@ -66,7 +66,7 @@ struct TaaPass {
     bound: Option<BoundGroups>,
     accumulated: Rc<Cell<u32>>,
     pending_invalidate: Rc<Cell<bool>>,
-    tunables: Rc<Cell<[f64; 6]>>,
+    tunables: Rc<Cell<[f64; crate::tunables::N]>>,
     generation: Rc<Cell<u64>>,
     built_generation: u64,
     pipelines: TaaPipelines,
@@ -405,7 +405,7 @@ impl TaaFeature {
 pub struct TaaHandle {
     accumulated: Rc<Cell<u32>>,
     pending_invalidate: Rc<Cell<bool>>,
-    tunables: Rc<Cell<[f64; 6]>>,
+    tunables: Rc<Cell<[f64; crate::tunables::N]>>,
     generation: Rc<Cell<u64>>,
 }
 

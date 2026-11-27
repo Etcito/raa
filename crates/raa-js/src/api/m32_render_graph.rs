@@ -85,15 +85,23 @@ pub fn stats_to_json(frame_index: Option<u64>, nodes: &[NodeStats]) -> JsonValue
     ])
 }
 
-/// One `NodeStats` as `{ id, type, ran, resources }`.
+/// One `NodeStats` as `{ id, type, ran, resources }`, plus `historyValid` when the node
+/// reports its history (pass.lighting.reconstruct).
 fn node_stats_json(node: &NodeStats) -> JsonValue {
     let resources = node.resources.iter().map(resource_stats_json).collect();
-    JsonValue::Object(vec![
+    let fields = JsonValue::Object(vec![
         ("id".to_string(), JsonValue::String(node.node.clone())),
         ("type".to_string(), JsonValue::String(node.type_id.clone())),
         ("ran".to_string(), JsonValue::Bool(node.ran)),
         ("resources".to_string(), JsonValue::Array(resources)),
-    ])
+    ]);
+    match (fields, node.history_valid) {
+        (JsonValue::Object(mut fields), Some(valid)) => {
+            fields.push(("historyValid".to_string(), JsonValue::Bool(valid)));
+            JsonValue::Object(fields)
+        }
+        (fields, _) => fields,
+    }
 }
 
 /// One `ResourceStat` as `{ port, width, height, layers, mips, format, bytes }`.
@@ -106,6 +114,38 @@ fn resource_stats_json(r: &ResourceStat) -> JsonValue {
         ("mips".to_string(), JsonValue::Number(f64::from(r.mips))),
         ("format".to_string(), JsonValue::String(r.format.clone())),
         ("bytes".to_string(), JsonValue::Number(r.bytes as f64)),
+    ])
+}
+
+/// `lightingInterlace()`: the forward "layers-interlaced" state of the latest submitted frame as
+/// `{ mode, frame, real, phase: [px, py], skipped: string[] }`, null before one. `real` is the R
+/// frame class (n even: the forward evaluated the signals at the phase pixels); `skipped` the
+/// signal pipeline entries a G frame did not record.
+pub fn interlace_to_json(state: Option<raa_pipeline::LightingInterlace>) -> JsonValue {
+    let Some(state) = state else {
+        return JsonValue::Null;
+    };
+    let [px, py] = state.phase();
+    JsonValue::Object(vec![
+        ("mode".to_string(), JsonValue::Bool(state.enabled)),
+        ("frame".to_string(), JsonValue::Number(state.frame as f64)),
+        ("real".to_string(), JsonValue::Bool(state.real())),
+        (
+            "phase".to_string(),
+            JsonValue::Array(vec![
+                JsonValue::Number(f64::from(px)),
+                JsonValue::Number(f64::from(py)),
+            ]),
+        ),
+        (
+            "skipped".to_string(),
+            JsonValue::Array(
+                state
+                    .skipped()
+                    .map(|name| JsonValue::String(name.to_string()))
+                    .collect(),
+            ),
+        ),
     ])
 }
 
@@ -832,6 +872,13 @@ pub(crate) mod web {
                 let stats = stats_to_json(state.executor.frame_index(), &state.executor.stats());
                 Ok(json_to_js(&stats))
             })
+        }
+
+        /// The forward lightingOutput "layers-interlaced" state of the latest submitted frame
+        /// (`interlace_to_json`), null before one; works with or without a graph.
+        #[wasm_bindgen(js_name = lightingInterlace)]
+        pub fn lighting_interlace(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| Ok(json_to_js(&interlace_to_json(st.lit.lighting_interlace()))))
         }
 
         /// The setters the graph owns while it is active, in S54 order, as a string array.

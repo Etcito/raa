@@ -32,7 +32,9 @@ struct FrameGpu {
     camera_jitter: vec4<f32>,
     // Active light count, tile columns, tile rows and tile stride in words.
     light_info: vec4<u32>,
-    // Frame parity, accumulation enabled (0/1), history valid (0/1), reserved zero.
+    // Frame parity, accumulation enabled (0/1), history valid (0/1), forward "layers-interlaced"
+    // word (raa-pipeline LightingInterlace::word: bit 0 mode, bit 1 R frame, bits 2-3 phase
+    // px/py, bits 4-5 lighting frame % 4; 0 with the mode off).
     temporal: vec4<u32>,
     reserved2: array<vec4<f32>, 5>,
 }
@@ -334,10 +336,22 @@ fn raa_spherical_blend_diffuse(legacy: vec3<f32>, s: MaterialOutput, c: ShadeCtx
 // their irradiance to the unoccluded sky irradiance (`sky_diffuse`, the ambient diffuse factor
 // that the probe term replaces, same units as `spherical_diffuse.rgb`), at most 1, scales the
 // environment term. Outdoors the probes (sky plus bounced sun) exceed the sky and nothing changes.
+// While raa_probe_sky_unoccluded is set (the forward layer split, opaque_layers.wgsl, around its
+// ambient measurements) the term returns env with the sky fully visible and records the
+// denominator max(luma(sky_diffuse), 1e-6) in raa_probe_sky_luma (unchanged where the term does
+// not apply), so that the layers carry vis as a separate factor.
+var<private> raa_probe_sky_unoccluded: bool;
+var<private> raa_probe_sky_luma: f32;
+
 fn raa_probe_sky_specular(env: vec3<f32>, sky_diffuse: vec3<f32>, c: ShadeCtx) -> vec3<f32> {
     if !raa_feature_enabled(RAA_DDGI_GI_FEATURE) || c.spherical_diffuse.w <= 0.0 { return env; }
     let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
-    let visible = clamp(dot(c.spherical_diffuse.rgb, luma) / max(dot(sky_diffuse, luma), 1e-6), 0.0, 1.0);
+    let sky_luma = max(dot(sky_diffuse, luma), 1e-6);
+    if raa_probe_sky_unoccluded {
+        raa_probe_sky_luma = sky_luma;
+        return env;
+    }
+    let visible = clamp(dot(c.spherical_diffuse.rgb, luma) / sky_luma, 0.0, 1.0);
     return env * mix(1.0, visible, c.spherical_diffuse.w);
 }
 

@@ -32,7 +32,7 @@ const FRAME_PACK: &str = r#"
     frame[14u+i] = lit[16u+i];
     frame[18u+i] = lit[32u+i];
   }
-  frame[22] = vec4<u32>(lit[42].z * frame[22].y, 0u, 0u, 0u);
+  frame[22] = vec4<u32>(lit[42].z * frame[22].y, lit[42].w, 0u, 0u);
 }
 "#;
 
@@ -416,6 +416,7 @@ impl ComputeNodeState {
             type_id: "compute.wgsl".into(),
             ran: self.ran,
             resources,
+            history_valid: None,
         }
     }
 }

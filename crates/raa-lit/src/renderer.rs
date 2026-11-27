@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
 use raa_math::{Aabb, Mat4, Vec3};
 use raa_mesh::AttributedMesh;
-use raa_pipeline::{Pipeline, SubmissionState};
+use raa_pipeline::{LightingInterlace, Pipeline, SubmissionState};
 use raa_scene::{Camera, InstanceIndex, RenderList, Scene, frustum_planes};
 use raa_shader::{
     Composer, LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, MaterialFnId, MaterialFnRegistry, SlotProvider,
@@ -118,6 +118,58 @@ pub(crate) const TAA_PASS_NAME: &str = "taa";
 /// entry leaves every viewport with zero current and previous jitter and no accumulation.
 fn jitter_consumer(taa_enabled: Option<bool>) -> bool {
     taa_enabled == Some(true)
+}
+
+/// The enabled pipeline entries whose reads keep a signal pass running on a G frame of forward
+/// "layers-interlaced" (names of raa-shafts and raa-vg).
+///
+/// `transparent.oit`, `fur.shells` and `particles.opaque` (raa_slot_shadow, raa_slot_ao) do
+/// not: on a G frame they read the previous R frame's cascade maps with that frame's
+/// `ShadowGpu` (raa-shadow freezes the cascade matrices and splits while the cascades are not
+/// rendered, so map and matrices agree) and the contact / AO textures that R frame left bound
+/// (screen-space, one frame old).
+#[derive(Clone, Copy, Debug, Default)]
+struct SignalReaders {
+    /// `sunshafts`: marches the cascade layers along view rays; left running (not reviewed for
+    /// stale cascades).
+    shafts: bool,
+    /// `vg.shade`: raa_opaque_lighting of opaque virtualized geometry (cascades, contact, AO and
+    /// DDGI resolve): an opaque surface must not take one-frame-old screen-space AO / contact,
+    /// so every signal pass keeps running.
+    vg_shade: bool,
+}
+
+impl SignalReaders {
+    fn of(p: &Pipeline) -> SignalReaders {
+        let on = |name: &str| p.entry_enabled(name).unwrap_or(false);
+        SignalReaders {
+            shafts: on("sunshafts"),
+            vg_shade: on("vg.shade"),
+        }
+    }
+}
+
+/// The forward "layers-interlaced" state of real frame `frame` (the scene frame index). On a
+/// G frame of the mode the signal passes are skipped unless a reader that needs the current
+/// frame's output is on: VG shade keeps all four, sun shafts and the planar reflection capture
+/// (raa_slot_shadow of the mirrored view) keep the cascades, the planar reflection keeps the
+/// contact. The cascade hero layers (local lights) are always rendered, and the DDGI probe
+/// update always runs.
+fn interlace_state(
+    enabled: bool,
+    frame: u64,
+    readers: SignalReaders,
+    planar_reflection: bool,
+) -> LightingInterlace {
+    let mut state = LightingInterlace::new(enabled, frame);
+    if state.generated() {
+        let vg = readers.vg_shade;
+        state.skip_cascades = !(vg || readers.shafts || planar_reflection);
+        state.skip_contact = !(vg || planar_reflection);
+        state.skip_ao = !vg;
+        state.skip_gi_resolve = !vg;
+    }
+    state
 }
 
 struct CameraLodInput<'a> {
@@ -293,7 +345,7 @@ impl SceneLifecycle {
         }
         let (view, discontinuity) = self.selected.take().unwrap_or((0, false));
         self.current_view = view;
-        let jitter = frame_jitter(self.frame_index, size, consumer);
+        let jitter = frame_jitter(self.frame_index, size, consumer, self.history.jitter_phases);
         let (proj, view_matrix) = (scene.camera.projection(), scene.camera.view());
         let unjittered_view_proj = proj * view_matrix;
         let view_proj = if jitter == [0.0; 2] {
@@ -376,6 +428,11 @@ pub struct LitRenderer {
     /// Per-viewport camera history and the open scene invocation (RAA-FRAME).
     scene_frame: SceneLifecycle,
     camera_jitter: Option<bool>,
+    /// Extra material texture mip bias while the camera is jittered (temporal accumulation
+    /// resolves the finer level's detail), added to the TAAU bias; see
+    /// [`Renderer::set_jitter_texture_lod_bias`].
+    jitter_lod_bias: f32,
+    jitter_phases: Option<u32>,
     /// The renderer-owned S17 local-light registry (M2-LOCAL-STATE).
     ///
     /// Handoff: `LitRenderer::local_lights_mut(&mut self) -> &mut LocalLights` in
@@ -400,6 +457,10 @@ pub struct LitRenderer {
     pending_resolve: Option<(u64, SubmissionState, bool)>,
     /// A background that could not reach the pipeline (borrowed), applied at `prepare`.
     pending_background: Option<[f32; 3]>,
+    /// Forward "layers-interlaced" state of the latest prepare, and of the latest invocation
+    /// with an acknowledged submission ([`LitRenderer::lighting_interlace`]).
+    interlace_prepared: LightingInterlace,
+    interlace_submitted: Option<LightingInterlace>,
     /// Bounds last sent to the scene per uploaded sub-mesh; only changes are sent.
     sent_bounds: HashMap<MeshId, Aabb>,
     /// Sub-mesh ids of every uploaded lit mesh, refreshed on upload/update.
@@ -474,11 +535,15 @@ impl LitRenderer {
             frame_bytes: [0; FRAME_GPU_SIZE],
             scene_frame: SceneLifecycle::new(),
             camera_jitter: None,
+            jitter_lod_bias: crate::frame::JITTER_TEXTURE_LOD_BIAS,
+            jitter_phases: None,
             local_lights: LocalLights::new(),
             tile_inputs,
             readback,
             pending_resolve: None,
             pending_background: None,
+            interlace_prepared: LightingInterlace::default(),
+            interlace_submitted: None,
             sent_bounds: HashMap::new(),
             submeshes: HashMap::new(),
             visible_slots: Vec::new(),
@@ -1047,6 +1112,30 @@ impl LitRenderer {
         }
     }
 
+    /// Selects forward lightingOutput "layers" / "layers-signals" / "layers-interlaced" for
+    /// every later camera forward recording ([`ForwardLayers`](crate::ForwardLayers)). The
+    /// modes need a forward pass of 1 sample: with MSAA the forward record refuses them.
+    pub fn set_forward_layers(&mut self, mode: crate::ForwardLayers) {
+        self.shared.borrow_mut().forward_layers = mode;
+    }
+
+    /// The forward layers mode set by [`set_forward_layers`](Self::set_forward_layers).
+    pub fn forward_layers(&self) -> crate::ForwardLayers {
+        self.shared.borrow().forward_layers
+    }
+
+    /// MSAA sample count of the forward pass (1 or 4).
+    pub fn forward_msaa(&self) -> u32 {
+        self.shared.borrow().msaa()
+    }
+
+    /// The forward "layers-interlaced" state of the latest scene invocation whose frame was
+    /// submitted (`None` before one): mode, real-frame counter n, R/G class, phase and the
+    /// signal passes it skipped. The state of a frame is fixed by its prepare.
+    pub fn lighting_interlace(&self) -> Option<LightingInterlace> {
+        self.interlace_submitted
+    }
+
     /// The stored value of feature `id`; false for ignored ids.
     pub fn frame_feature(&self, id: u32) -> bool {
         id < 64 && self.frame_features & (1u64 << id) != 0
@@ -1075,6 +1164,18 @@ impl LitRenderer {
         self.camera_jitter = enabled;
     }
 
+    /// Sets the extra material texture mip bias of jittered frames (finite, clamped to
+    /// [-2, 0]); unjittered frames never take it.
+    pub fn set_jitter_texture_lod_bias(&mut self, bias: f32) {
+        self.jitter_lod_bias = if bias.is_finite() { bias.clamp(-2.0, 0.0) } else { 0.0 };
+    }
+
+    /// Fixes the Halton jitter cycle length (1..=64); 0 restores the automatic length
+    /// (8 at 1:1, 8 x the display/render area ratio when upscaling).
+    pub fn set_jitter_phases(&mut self, phases: u32) {
+        self.jitter_phases = (phases > 0).then(|| phases.min(64));
+    }
+
     /// Drops the camera history for a viewport absent from the rendered layout.
     pub fn suspend_scene_view(&mut self, view: usize) {
         if view < MAX_VIEWS {
@@ -1095,6 +1196,9 @@ impl LitRenderer {
             .try_borrow()
             .map(|p| p.scene_submission())
             .unwrap_or_default();
+        if self.scene_frame.acknowledged != 0 {
+            self.interlace_submitted = Some(self.interlace_prepared);
+        }
         self.scene_frame.finish();
         if let Ok(mut guard) = self.shared.try_borrow_mut() {
             self.scene_frame.flush(&mut guard.store);
@@ -1142,7 +1246,7 @@ impl LitRenderer {
         if let Some((index, observation, submitted)) = self.pending_resolve.take() {
             ReadbackCoordinator::resolve(&self.readback, gpu, index, observation, submitted);
         }
-        let (viewport, display_size, encode_srgb, tiling, taa_enabled) = {
+        let (viewport, display_size, encode_srgb, tiling, taa_enabled, readers) = {
             let p = self.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
             (
                 p.targets().map_or((1, 1), |t| t.size()),
@@ -1150,6 +1254,7 @@ impl LitRenderer {
                 !p.surface_is_srgb(),
                 p.entry_enabled(LIGHT_TILES_NAME).unwrap_or(false),
                 jitter_consumer(p.entry_enabled(TAA_PASS_NAME)),
+                SignalReaders::of(&p),
             )
         };
         if !self.scene_frame.open {
@@ -1164,6 +1269,9 @@ impl LitRenderer {
         }
         let jitter = self.camera_jitter.unwrap_or(taa_enabled);
         let discontinuity = self.scene_frame.selected.is_some_and(|(_, cut)| cut);
+        self.scene_frame.history.jitter_phases = self
+            .jitter_phases
+            .unwrap_or_else(|| crate::frame_history::jitter_phases(viewport, display_size));
         let camera = self.scene_frame.prepare(scene, viewport, jitter);
         if discontinuity || camera.jitter_mode_changed {
             self.pipeline
@@ -1379,6 +1487,19 @@ impl LitRenderer {
             }
         }
 
+        let interlace = interlace_state(
+            s.forward_layers == crate::ForwardLayers::Interlaced && s.msaa() == 1,
+            camera.frame_index,
+            readers,
+            s.planar_reflection.is_some(),
+        );
+        self.interlace_prepared = interlace;
+        self.pipeline
+            .try_borrow_mut()
+            .map_err(|_| pipeline_busy())?
+            .lighting_mut()
+            .set_interlace(interlace);
+
         let [active_lights, tile_columns, tile_rows, tile_stride] =
             light_info(
                 self.local_lights.gpu_count(),
@@ -1392,12 +1513,14 @@ impl LitRenderer {
             msaa: self.opts.msaa,
             frame_index: camera.frame_index,
             camera_jitter_ndc: camera.current_jitter,
-            texture_lod_bias: crate::frame::taau_texture_lod_bias(jitter, viewport, display_size),
+            texture_lod_bias: crate::frame::taau_texture_lod_bias(jitter, viewport, display_size)
+                + if jitter { self.jitter_lod_bias } else { 0.0 },
             previous_jitter_ndc: camera.previous_jitter,
             previous_view_proj: camera.previous_view_proj,
             history_valid: camera.history_valid,
             accumulation_enabled: taa_enabled,
             frame_parity: (camera.frame_index & 1) as u32,
+            interlace: interlace.word(),
             active_lights,
             tile_columns,
             tile_rows,
@@ -1409,7 +1532,8 @@ impl LitRenderer {
         let mut lighting_view = None;
         for id in (0..64u32).filter(|&id| self.frame_features & (1u64 << id) != 0) {
             if matches!(id, RAA_DIRECT_ONLY_FEATURE | RAA_INDIRECT_ONLY_FEATURE) {
-                lighting_view = Some(id);
+                // Both set: forward's "shadow" isolation view (see opaque_lighting.wgsl).
+                lighting_view = Some(lighting_view.unwrap_or(0u64) | (1u64 << id));
             } else {
                 params.set_feature(id, true);
             }
@@ -1495,7 +1619,11 @@ impl LitRenderer {
                 })
             });
             let mut preview = self.frame_bytes;
-            params.set_feature(feature, true);
+            for id in [RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE] {
+                if feature & (1u64 << id) != 0 {
+                    params.set_feature(id, true);
+                }
+            }
             write_frame_flags(&mut preview, &params);
             gpu.queue().write_buffer(buffer, 0, &preview);
         } else {

@@ -9,6 +9,7 @@ struct RgFrame {
   inv_view: mat4x4<f32>,
   previous_view_proj: mat4x4<f32>,
   history_valid: u32,
+  interlace: u32,
 }
 @group(0) @binding(0) var<uniform> rg_params: RgParams;
 @group(0) @binding(1) var<uniform> rg_frame: RgFrame;

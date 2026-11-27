@@ -27,7 +27,9 @@ use raa_pipeline::{
     FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
 };
 use raa_shader::{
-    LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, PassKind, VARIANT_FLAG_NO_AREA_LIGHTS, VariantKey,
+    LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, PassKind, VARIANT_FLAG_FORWARD_LAYER_INTERLACED,
+    VARIANT_FLAG_FORWARD_LAYER_SIGNALS, VARIANT_FLAG_FORWARD_LAYERS, VARIANT_FLAG_NO_AREA_LIGHTS,
+    VariantKey,
 };
 
 use crate::handle::{DrawMemo, LitHandle, PipelineSpec};
@@ -57,6 +59,61 @@ const DRAWN_CLASSES: [DrawClass; 2] = [DrawClass::Opaque, DrawClass::Fur];
 
 /// Material flags that select a pipeline (cull mode), kept in the variant key.
 const VARIANT_FLAGS: u32 = FLAG_DOUBLE_SIDED;
+
+/// Forward lightingOutput "layers" / "layers-signals" / "layers-interlaced" (camera forward
+/// only; see raa-shader `opaque_layers.wgsl` for the per-pixel identity). The opaque draws write the HDR chain
+/// (`color` = d0, alpha s in Signals) and the extra Rgba16Float targets of
+/// [`ForwardLayers::PORTS`] in one pass; the forward contributors (sky background, opaque
+/// particles, fur shells, VG shade, planar reflection composite) then draw into `layerEm` only.
+/// MSAA forward passes refuse the three modes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ForwardLayers {
+    /// The ordinary forward pass (one colour target).
+    #[default]
+    Off,
+    /// `color` (d0), `layerKd`, `layerS0`, `layerEm`: no sun shadow, screen AO or probe GI read.
+    Layers,
+    /// Layers plus the signals: `color.a` = s, `layerKd.a` = a, `layerE` = (e, w) and the
+    /// recomposition residual `layerR`.
+    Signals,
+    /// "layers-interlaced": the layers every frame (`layerKd`, `layerS0`, `layerEm`,
+    /// `layerE`) and the signals of Signals only at the phase pixel of each 2x2 block on an R
+    /// frame (raa-pipeline `LightingInterlace`); every other pixel, every G frame pixel and the
+    /// cleared (sky / contributor-only) pixels hold -1 in `color.a`, `layerKd.a` and
+    /// `layerE.a` (`layerE.rgb` = 0). No residual.
+    Interlaced,
+}
+
+impl ForwardLayers {
+    /// The ports published after `color`, at colour locations 1.. (Layers: the first three).
+    pub const PORTS: [&'static str; 5] = ["layerKd", "layerS0", "layerEm", "layerE", "layerR"];
+    /// Index of `layerEm` in [`ForwardLayers::PORTS`]: the contributors' target.
+    const EM: usize = 2;
+
+    /// The number of colour targets after location 0.
+    pub fn extra_targets(self) -> usize {
+        match self {
+            ForwardLayers::Off => 0,
+            ForwardLayers::Layers => 3,
+            ForwardLayers::Interlaced => 4,
+            ForwardLayers::Signals => 5,
+        }
+    }
+
+    /// The raa-shader variant bits of the mode.
+    pub fn variant_flags(self) -> u32 {
+        match self {
+            ForwardLayers::Off => 0,
+            ForwardLayers::Layers => VARIANT_FLAG_FORWARD_LAYERS,
+            ForwardLayers::Signals => {
+                VARIANT_FLAG_FORWARD_LAYERS | VARIANT_FLAG_FORWARD_LAYER_SIGNALS
+            }
+            ForwardLayers::Interlaced => {
+                VARIANT_FLAG_FORWARD_LAYERS | VARIANT_FLAG_FORWARD_LAYER_INTERLACED
+            }
+        }
+    }
+}
 
 /// Registers the `prepass` and `forward` feature passes of `lit` in `pipeline`; `forward`
 /// records the enabled `contributors`. Refusals (nothing added): `pipeline.duplicate_pass`
@@ -394,6 +451,12 @@ struct ForwardPass {
     targets: Option<ForwardTargets>,
     reflection: Option<PlanarTargets>,
     combined_lighting: Option<wgpu::TextureView>,
+    /// The specs of ForwardLayers::Layers (4 targets), ::Signals (6) and ::Interlaced (5).
+    layer_specs: Specs,
+    signal_specs: Specs,
+    interlaced_specs: Specs,
+    /// The ForwardLayers::PORTS targets (single sample, HDR_FORMAT) of the current mode and size.
+    layers: Vec<wgpu::TextureView>,
 }
 
 impl ForwardPass {
@@ -406,7 +469,157 @@ impl ForwardPass {
             targets: None,
             reflection: None,
             combined_lighting: None,
+            layer_specs: Specs::new(vec![color_target(HDR_FORMAT); 4]),
+            signal_specs: Specs::new(vec![color_target(HDR_FORMAT); 6]),
+            interlaced_specs: Specs::new(vec![color_target(HDR_FORMAT); 5]),
+            layers: Vec::new(),
         }
+    }
+
+    fn drop_layers(&mut self) {
+        for view in self.layers.drain(..) {
+            view.texture().destroy();
+        }
+    }
+
+    /// Creates the layer targets of `mode` at `size` unless they exist.
+    fn ensure_layers(&mut self, gpu: &GpuContext, mode: ForwardLayers, size: (u32, u32)) {
+        let n = mode.extra_targets();
+        if self.layers.len() == n
+            && self.layers.first().is_none_or(|v| {
+                let t = v.texture();
+                (t.width(), t.height()) == (size.0.max(1), size.1.max(1))
+            })
+        {
+            return;
+        }
+        self.drop_layers();
+        for port in &ForwardLayers::PORTS[..n] {
+            let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("raa.lit.forward.{port}")),
+                size: wgpu::Extent3d {
+                    width: size.0.max(1),
+                    height: size.1.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            self.layers.push(texture.create_view(&Default::default()));
+        }
+    }
+
+    /// The layers recording: the opaque draws of the `mode` variants into `destination` (d0)
+    /// and the layer targets, depth stored; then the reflection composite and the enabled
+    /// contributors into `layerEm` over that depth.
+    fn record_layers(
+        &self,
+        ctx: &mut RecordCtx<'_>,
+        own: &ForwardTargets,
+        destination: &wgpu::TextureView,
+        frame: &wgpu::BindGroup,
+        reflection: Option<&PlanarView>,
+        mode: ForwardLayers,
+    ) -> Result<(), RaaError> {
+        let opaque_black = wgpu::Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        // Interlaced: the signal alphas of a pixel no opaque draw covers say "no sample".
+        let no_sample = wgpu::Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: -1.0,
+        };
+        let interlaced = mode == ForwardLayers::Interlaced;
+        let background = background_clear(ctx.lighting.env().background);
+        let n = mode.extra_targets();
+        let mut attachments: [Option<wgpu::RenderPassColorAttachment<'_>>; 6] = Default::default();
+        attachments[0] = cleared(
+            destination,
+            if interlaced { no_sample } else { opaque_black },
+        );
+        for (i, view) in self.layers[..n].iter().enumerate() {
+            let clear = match ForwardLayers::PORTS[i] {
+                "layerEm" => background,
+                "layerE" if interlaced => no_sample,
+                "layerE" => wgpu::Color::TRANSPARENT,
+                "layerKd" if interlaced => no_sample,
+                _ => opaque_black,
+            };
+            attachments[i + 1] = cleared(view, clear);
+        }
+        let specs = match mode {
+            ForwardLayers::Signals => &self.signal_specs,
+            ForwardLayers::Interlaced => &self.interlaced_specs,
+            _ => &self.layer_specs,
+        };
+        {
+            let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raa.lit.forward.layers"),
+                color_attachments: &attachments[..=n],
+                depth_stencil_attachment: Some(cleared_depth(&own.depth, wgpu::StoreOp::Store)),
+                ..Default::default()
+            });
+            pass.set_bind_group(0, frame, &[]);
+            pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+            draw_lit(
+                ctx.gpu,
+                &mut pass,
+                &self.lit,
+                PassKind::Forward,
+                self.msaa,
+                specs,
+                DrawSource::Camera(area_free_flag(ctx.lighting) | mode.variant_flags()),
+            )?;
+        }
+        let em = &self.layers[ForwardLayers::EM];
+        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("raa.lit.forward.layers.contributors"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: em,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &own.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+        pass.set_bind_group(0, frame, &[]);
+        pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+        if let (Some(view), Some(targets)) = (reflection, self.reflection.as_ref()) {
+            targets.composite(ctx.gpu, &mut pass, &self.lit, view);
+            pass.set_bind_group(0, frame, &[]);
+            pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+        }
+        let slots = self
+            .contributors
+            .try_borrow()
+            .map_err(|_| pipeline_busy())?;
+        for slot in slots.iter().filter(|s| s.enabled.get()) {
+            slot.contributor.record(&mut pass, &self.lit)?;
+            pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+        }
+        Ok(())
     }
 
     fn record_reflection(
@@ -537,6 +750,7 @@ impl FeaturePass for ForwardPass {
         if let Some(combined) = self.combined_lighting.take() {
             combined.texture().destroy();
         }
+        self.drop_layers();
     }
 
     /// Prepares the enabled contributors in order.
@@ -557,15 +771,63 @@ impl FeaturePass for ForwardPass {
         if let Some(view) = reflection.as_deref() {
             self.record_reflection(ctx, view)?;
         }
-        let Some(own) = self.targets.as_ref() else {
+        if self.targets.is_none() {
             return Err(RaaError::Resource(format!(
                 "{FORWARD_NAME}: record ran before resize created its targets"
             )));
-        };
+        }
         let hdr = ctx.targets.hdr();
         let (width, height) = ctx.targets.size();
         let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, width, height, 1, 1);
         let frame = self.lit.frame_bind_group();
+        let mode = self.lit.forward_layers();
+        if mode != ForwardLayers::Off {
+            if self.msaa > 1 {
+                return Err(RaaError::FrameGraph {
+                    code: "forward.layers_msaa",
+                    message: format!(
+                        "{FORWARD_NAME}: lightingOutput \"layers\", \"layers-signals\" and \
+                         \"layers-interlaced\" need msaa 1 (the forward pass has {} samples)",
+                        self.msaa
+                    ),
+                });
+            }
+            let targets = 1 + mode.extra_targets() as u32;
+            let limits = ctx.gpu.device().limits();
+            // Rgba16Float: 8 bytes per sample and target.
+            if limits.max_color_attachments < targets
+                || limits.max_color_attachment_bytes_per_sample < 8 * targets
+            {
+                return Err(RaaError::FrameGraph {
+                    code: "forward.layers_limits",
+                    message: format!(
+                        "{FORWARD_NAME}: {targets} Rgba16Float targets need \
+                         maxColorAttachments >= {targets} and maxColorAttachmentBytesPerSample \
+                         >= {} (device: {} and {})",
+                        8 * targets,
+                        limits.max_color_attachments,
+                        limits.max_color_attachment_bytes_per_sample
+                    ),
+                });
+            }
+            if let Some(combined) = self.combined_lighting.take() {
+                combined.texture().destroy();
+            }
+            self.ensure_layers(ctx.gpu, mode, (width, height));
+            let own = self.targets.as_ref().expect("forward targets");
+            self.record_layers(ctx, own, hdr.dst(), &frame, reflection.as_deref(), mode)?;
+            hdr.swap();
+            ctx.resources
+                .publish(FORWARD_NAME, "color", hdr.src(), desc);
+            for (port, view) in ForwardLayers::PORTS.iter().zip(&self.layers) {
+                ctx.resources.publish(FORWARD_NAME, port, view, desc);
+            }
+            return Ok(());
+        }
+        if !self.layers.is_empty() {
+            self.drop_layers();
+        }
+        let own = self.targets.as_ref().expect("forward targets");
         if let Some(preview) = self.lit.lighting_view_group(ctx.gpu) {
             if self.combined_lighting.is_none() {
                 let combined = ctx.gpu.device().create_texture(&wgpu::TextureDescriptor {

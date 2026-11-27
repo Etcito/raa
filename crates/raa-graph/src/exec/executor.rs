@@ -467,6 +467,7 @@ impl GraphExecutor {
                 type_id: node.type_id.clone(),
                 ran: self.node_ran(&node.type_id),
                 resources: Vec::new(),
+                history_valid: None,
             })
             .collect();
         for extension in &self.extensions {

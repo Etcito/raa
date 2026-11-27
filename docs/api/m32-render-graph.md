@@ -15,7 +15,8 @@ interface RenderGraphLink { from: string; to: string; history?: boolean }
 interface RenderGraphDoc { format: 'raa.render-graph'; version: 1; name: string; nodes: RenderGraphNode[]; links: RenderGraphLink[]; editor?: unknown }
 interface RenderGraphIssue { code: string; severity: 'error' | 'warning'; nodeId?: string; port?: string; param?: string; link?: number; message: string; fix: string }
 interface RenderGraphResult { ok: boolean; issues: RenderGraphIssue[]; rebuilt: number }
-interface RenderGraphStats { frameIndex: number | null; nodes: { id: string; type: string; ran: boolean; resources: { port: string; width: number; height: number; layers: number; mips: number; format: string; bytes: number }[] }[] }
+interface RenderGraphStats { frameIndex: number | null; nodes: { id: string; type: string; ran: boolean; resources: { port: string; width: number; height: number; layers: number; mips: number; format: string; bytes: number }[]; historyValid?: boolean }[] }
+interface LightingInterlaceState { mode: boolean; frame: number; real: boolean; phase: [number, number]; skipped: string[] }
 interface Engine {
   renderGraphCatalog(): RenderGraphCatalog
   setRenderGraph(graph: RenderGraphDoc | string | null): RenderGraphResult
@@ -24,6 +25,7 @@ interface Engine {
   renderGraphIssues(): RenderGraphIssue[]
   renderGraphStats(): RenderGraphStats
   renderGraphOwnedSetters(): string[]
+  lightingInterlace(): LightingInterlaceState | null
 }
 ```
 
@@ -38,6 +40,7 @@ interface Engine {
 | `renderGraphIssues()` | a fresh `RenderGraphIssue[]` | `api.disposed` |
 | `renderGraphStats()` | a fresh `RenderGraphStats` | `api.disposed` |
 | `renderGraphOwnedSetters()` | a fresh `string[]` | `api.disposed` |
+| `lightingInterlace()` | a fresh `LightingInterlaceState`, null before the first submitted frame | `api.disposed` |
 
 ### `renderGraphCatalog()`
 
@@ -151,7 +154,68 @@ not a graph is set.
   `indirectDiffuse`. The last setting uses the same diffuse AO shader control as `setAo`.
 - `pass.forward.lightingOutput` selects `combined`, `direct` or `indirect` in the raster
   shader. Use the mesh reference node's `lightingOutput` and `lightingDepth` for an exact
-  bounce, since the forward pass has no per-bounce signal.
+  bounce, since the forward pass has no per-bounce signal. `shadow` shows the sun
+  visibility. `layers` (msaa 1 only) writes the opaque lighting as demodulated layers in one
+  pass: `color` = unshadowed sun direct d0 and the extra Rgba16Float outputs `layerKd`,
+  `layerS0`, `layerEm`, without reading the sun shadow, screen AO or probe GI. `layerS0` rgb
+  is the AO-scaled ambient at AO 1 with the sky fully visible; its alpha codes the DDGI
+  sky-specular visibility `vis` (the sky irradiance luma of the pixel, 0 = vis 1).
+  `layers-signals` adds the signals (`color.a` = sun visibility s, `layerKd.a` = AO a,
+  `layerE` = probe GI e with weight w in alpha) and `layerR`, the residual of
+  `combined = d0·s + (kd·e + s0·vis)·a + em`, `vis = mix(1, clamp(luma(e/w)·f / L, 0, 1), w)`
+  (L the sky irradiance luma, f the DDGI screen-AO ratio). Exact formulas: raa-shader
+  `src/wgsl/opaque_layers.wgsl`. The forward contributors (sky background, opaque particles,
+  fur shells, VG shade) draw into `layerEm` in these modes.
+  `layers-interlaced` (msaa 1) is the 30 Hz half-resolution lighting cadence: the layers of
+  `layers` plus `layerE` every frame, and the signals only at one pixel per 2x2 block every
+  second frame. With n the real-frame counter (the lit scene frame index, advancing only on
+  submitted frames), an R frame (n even) evaluates s, a and (e, w) exactly as `layers-signals`
+  at the pixels with `(x & 1, y & 1) = phase`, `phase = [[0,0],[1,1],[1,0],[0,1]][(n / 2) % 4]`;
+  every other pixel and every pixel of a G frame (n odd) writes `color.a = layerKd.a = -1` and
+  `layerE = (0, 0, 0, -1)` ("no sample"), as do the clears under sky and contributor-only
+  pixels. There is no `layerR`. On a G frame `pass.shadow.csm` renders only its hero layers
+  (local lights), and the primary `pass.ao.gtao`, `pass.shadow.contact` and the `pass.gi.ddgi`
+  screen resolve record nothing. Transparent OIT, fur shells and opaque particles then read the
+  previous R frame's outputs: the cascade maps with that frame's `ShadowGpu` (the cascade
+  matrices and splits stay those of the last frame that rendered the cascades, so map and
+  matrices agree) and the contact / AO textures it left bound (one frame old in screen space).
+  VG shade keeps all four passes running, sun shafts keep the cascades, the planar reflection
+  keeps the cascades and contact. The DDGI probe update always runs.
+  `lightingInterlace()` reports the state of the latest submitted frame; lit shaders read it in
+  `FrameGpu.temporal.w` and `compute.wgsl` nodes in `rg_frame.interlace` (bit 0 mode, bit 1 R
+  frame, bits 2 and 3 px and py, bits 4-5 `(n / 2) % 4`).
+  In this mode the half-resolution signal passes evaluate the phase pixel itself: with
+  `pass.ao.gtao` `scale` 2 the AO texel (x, y) is traced (and denoised with depth taps) at pixel
+  `2 (x, y) + phase`, and the full-resolution reconstruction copies that texel unchanged at the
+  phase pixel; with `pass.gi.ddgi` `resolveScale` 2 the screen resolve texel is resolved at the
+  phase pixel and `raa_ddgi_screen` returns its own block's value there. Other pixels keep the
+  bilinear / bilateral reconstruction (from the shifted texel positions); other modes and scales
+  are unchanged.
+- `pass.lighting.reconstruct` (category lighting, multi-instance stage node, pipeline entry
+  `pass.lighting.reconstruct#<id>`, HDR chain member) turns the interlaced signals into the
+  displayed HDR colour, one full-resolution compute dispatch per frame and no network (the
+  analytic ablation of the neural target: `nt_model.step` with an identity kernel and constant
+  alphas). Inputs: `color`, `layerKd`, `layerS0`, `layerEm`, `layerE` linked from one
+  `pass.forward` in `lightingOutput: "layers-interlaced"` (else `graph.reconstruct_source`),
+  `depth`, `normal`, `motion` (prepass defaults). Output `color` (Rgba16Float, scene size) feeds
+  `pass.taa` / `pass.ssr` / `pass.fog` / `pass.tonemap` like any chain colour. It keeps a
+  ping-pong history (E rgb, a) / (s, linear view depth, confidence) reprojected by the motion
+  (depth test `|z_hist - z| <= 0.05 z + 0.02`); an R frame blends the phase-pixel samples
+  (guided 2x2 upsample, quality `qMiss` off the phase pixel) with the history by
+  `alpha*q` against `(1 - alpha)*c`; a G frame reuses the history and fills disocclusions
+  from 12 ring taps. Composite: `C = d0*s + (kd*E + s0*vis)*a + em` (sky: `em`), vis from the
+  `layerS0` alpha and the accumulated (E, a) with w = 1. Params:
+  `alphaSHit` 0.5, `alphaSMiss` 0.9803, `alphaEHit` 0.5, `alphaEMiss` 0.9799, `qMiss` 0.3,
+  `decay` 0.98 (learned constants), `jitterCorrect` (true; adds `(previous - current)` camera
+  jitter `x (0.5 W, -0.5 H)` pixels to the reprojection), `historyClamp` (true; on an R frame an
+  upsampled pixel keeps its reprojected history clamped to the min/max of the phase samples it
+  would interpolate, weighted by `min(1, c / qMiss)`, instead of the 2-pixel interpolation that
+  drew moving shadow edges as a 2 px staircase), `historyCubic` (true; (E, a) and s are read
+  from the history with a 5-tap Catmull-Rom, z and confidence bilinear), `debug` (`off`, `shadow`, `ao`,
+  `irradiance`, `confidence`, `holes`). The history is invalid (confidence 0) after a resize, a
+  camera cut, at the first frame and on any frame whose forward is not interlaced (the node
+  then passes its colour through); it flips only on submitted frames. One viewport only
+  (`graph.reconstruct_view`). `renderGraphStats()` reports `ran` and `historyValid`.
 
 ## Document format
 
