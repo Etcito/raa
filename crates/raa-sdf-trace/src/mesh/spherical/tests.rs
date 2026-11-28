@@ -35,6 +35,7 @@ fn triangle(key: u64, positions: &[[f32; 3]; 3]) -> MeshInput<'_> {
         indices: &[0, 1, 2],
         material: 0,
         world: Mat4::IDENTITY,
+        hidden: false,
     }
 }
 
@@ -1213,6 +1214,7 @@ fn bench_scheduler_update_on_triangle_file() {
                 indices: &indices,
                 material: 0,
                 world: Mat4::IDENTITY,
+                hidden: false,
             }],
             8 << 30,
             0,

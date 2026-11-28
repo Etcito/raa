@@ -123,9 +123,13 @@ pub struct MeshInput<'a> {
     pub indices: &'a [u32],
     pub material: u32,
     pub world: Mat4,
+    /// A dynamic part keeps its slot in the soup and the BVH but every triangle collapses to a point (never hit):
+    /// toggling it is a local refit of this part, never a rebuild of the whole BVH, and while it stays hidden its
+    /// `world` is ignored, so moving it costs nothing.
+    pub hidden: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy)]
 struct Part {
     id: u32,
     key: u64,
@@ -135,7 +139,24 @@ struct Part {
     colored: bool,
     indexed: bool,
     has_uv: bool,
+    hidden: bool,
     world: Mat4,
+}
+
+impl PartialEq for Part {
+    fn eq(&self, other: &Self) -> bool {
+        (self.id, self.key, self.material, self.count, self.vertices)
+            == (
+                other.id,
+                other.key,
+                other.material,
+                other.count,
+                other.vertices,
+            )
+            && (self.colored, self.indexed, self.has_uv, self.hidden)
+                == (other.colored, other.indexed, other.has_uv, other.hidden)
+            && (self.hidden || self.world == other.world)
+    }
 }
 
 impl Part {
@@ -157,6 +178,7 @@ impl Part {
             has_uv: value
                 .uvs
                 .is_some_and(|uvs| uvs.len() == value.positions.len()),
+            hidden: value.hidden,
             world: value.world,
         }
     }
@@ -597,6 +619,11 @@ impl Geometry {
                 points[0][axis].max(points[1][axis]).max(points[2][axis])
             });
             let [a, b, c] = vertex_ids.map(|index| index as u32);
+            let (min, max, [a, b, c]) = if input.hidden {
+                (points[0], points[0], [a, a, a])
+            } else {
+                (min, max, [a, b, c])
+            };
             self.triangles[triangle_start + i] = [a, b, c, surface];
             self.bounds[triangle_start + i] = (min, max);
             let bounds = Bounds { min, max };
@@ -731,6 +758,7 @@ mod tests {
             indices: &[0, 1, 2],
             material: 0,
             world: Mat4::IDENTITY,
+            hidden: false,
         };
         let mut geometry = Geometry::default();
         geometry
@@ -776,6 +804,7 @@ mod tests {
             indices: &[2, 0, 1],
             material: 7,
             world: Mat4::IDENTITY,
+            hidden: false,
         };
         let mut geometry = Geometry::default();
         geometry
@@ -836,6 +865,7 @@ mod tests {
             indices: &[2, 0, 1],
             material: 7,
             world: Mat4::IDENTITY,
+            hidden: false,
         };
         let mut geometry = Geometry::default();
         geometry
@@ -914,6 +944,7 @@ mod tests {
             indices,
             material: 0,
             world,
+            hidden: false,
         };
         let original = [
             input(1, 0, &p0, &n0, &i0, Mat4::IDENTITY),
@@ -953,6 +984,7 @@ mod tests {
             indices,
             material: 0,
             world,
+            hidden: false,
         };
         let original = [
             input(1, 0, &p0, &n0, &i0, Mat4::IDENTITY),
@@ -1035,5 +1067,51 @@ mod tests {
         reserialized.serialize_nodes_full();
         assert_eq!(geometry.mesh_bytes, reserialized.mesh_bytes);
         assert_eq!(geometry.node_bytes, reserialized.node_bytes);
+    }
+
+    #[test]
+    fn hiding_a_part_refits_locally_and_a_hidden_part_ignores_its_world() {
+        let p = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let n = [[0.0, 0.0, 1.0]; 3];
+        let idx = [0, 1, 2];
+        let input = |key: u64, world: Mat4, hidden: bool| MeshInput {
+            key,
+            mesh: key as u32,
+            positions: &p,
+            normals: &n,
+            colors: None,
+            uvs: None,
+            indices: &idx,
+            material: 0,
+            world,
+            hidden,
+        };
+        let shift = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
+        let visible: Vec<_> = (0..64)
+            .map(|i| input(i + 1, shift(i as f32 * 3.0), false))
+            .collect();
+        let mut geometry = Geometry::default();
+        geometry.update(&visible, 1 << 24, 0).unwrap();
+        let full_nodes = geometry.bvh.nodes.len();
+        geometry.mesh_dirty.clear();
+        geometry.node_dirty.clear();
+        let mut hidden = visible.clone();
+        hidden[10] = input(11, shift(30.0), true);
+        geometry.update(&hidden, 1 << 24, 0).unwrap();
+        assert!(!geometry.mesh_dirty.full && !geometry.node_dirty.full);
+        assert_eq!(geometry.bvh.nodes.len(), full_nodes);
+        let revision = geometry.revision;
+        hidden[10] = input(11, shift(99.0), true);
+        geometry.update(&hidden, 1 << 24, 0).unwrap();
+        assert_eq!(
+            geometry.revision, revision,
+            "a hidden part's world is ignored"
+        );
+        geometry.update(&visible, 1 << 24, 0).unwrap();
+        assert!(!geometry.mesh_dirty.full && !geometry.node_dirty.full);
+        let mut fresh = Geometry::default();
+        fresh.update(&visible, 1 << 24, 0).unwrap();
+        let root = |g: &Geometry| g.world_bounds().unwrap();
+        assert_eq!(root(&geometry), root(&fresh));
     }
 }

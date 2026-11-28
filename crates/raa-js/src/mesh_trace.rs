@@ -186,14 +186,11 @@ pub(crate) fn prepare(
             if material.class() == DrawClass::Transparent {
                 return None;
             }
-            if st
+            let hidden = st
                 .tags
                 .get(index)
                 .and_then(|tag| st.instances.get_ref(*tag).ok())
-                .is_some_and(|group| group.dynamic)
-            {
-                return None;
-            }
+                .is_some_and(|group| group.dynamic);
             let (key, source, indices) = parts.get(&item.mesh)?;
             Some(MeshInput {
                 key: *key,
@@ -205,6 +202,7 @@ pub(crate) fn prepare(
                 indices,
                 world: item.world,
                 material: item.material.0,
+                hidden,
             })
         })
         .collect::<Vec<_>>();
