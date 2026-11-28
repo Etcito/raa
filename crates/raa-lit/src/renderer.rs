@@ -2528,6 +2528,7 @@ mod tests {
         let materials = [MaterialClass {
             class: DrawClass::Opaque,
             material_fn: MaterialFnId(7),
+            shadow_only: false,
         }];
         let mut prep = crate::IdPrep::new(2, 1);
         let level_mesh = |slot, mesh| camera_mesh(&f.lods, &f.levels, slot, mesh);

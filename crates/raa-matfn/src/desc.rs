@@ -4,8 +4,8 @@
 use crate::{BUILTINS, BuiltinFn, DrawClass, MaterialFnRegistry, ParamKind};
 use raa_core::RaaError;
 use raa_lit::{
-    FLAG_DOUBLE_SIDED, FLAG_FUR, FLAG_NO_SHADOW, FLAG_TRANSMISSIVE, FLAG_TRANSPARENT, LitRenderer,
-    SurfaceMaterial, SurfaceModel,
+    FLAG_DOUBLE_SIDED, FLAG_FUR, FLAG_NO_SHADOW, FLAG_SHADOW_DOUBLE_SIDED, FLAG_SHADOW_ONLY,
+    FLAG_TRANSMISSIVE, FLAG_TRANSPARENT, LitRenderer, SurfaceMaterial, SurfaceModel,
 };
 use raa_shader::MaterialFnId;
 
@@ -76,6 +76,10 @@ pub struct SurfaceDesc {
     pub double_sided: bool,
     /// Default true.
     pub cast_shadow: bool,
+    /// FLAG_SHADOW_ONLY: invisible to the camera, casts shadows. Default false.
+    pub shadow_only: bool,
+    /// FLAG_SHADOW_DOUBLE_SIDED: both faces cast shadows. Default false.
+    pub shadow_double_sided: bool,
     pub overrides: StandardOverrides,
 }
 
@@ -87,6 +91,8 @@ impl Default for SurfaceDesc {
             blend: Blend::Opaque,
             double_sided: false,
             cast_shadow: true,
+            shadow_only: false,
+            shadow_double_sided: false,
             overrides: StandardOverrides::default(),
         }
     }
@@ -379,6 +385,12 @@ pub fn map_desc_with(
     }
     if !desc.cast_shadow {
         m.flags |= FLAG_NO_SHADOW;
+    }
+    if desc.shadow_only {
+        m.flags |= FLAG_SHADOW_ONLY;
+    }
+    if desc.shadow_double_sided {
+        m.flags |= FLAG_SHADOW_DOUBLE_SIDED;
     }
     if desc.blend == Blend::Opaque && m.opacity < 1.0 {
         return Err(refuse(

@@ -250,6 +250,8 @@ fn surface_desc(desc: &JsValue) -> Result<SurfaceDesc, RaaError> {
         blend,
         double_sided: optional_bool(desc, "doubleSided", d.double_sided)?,
         cast_shadow: optional_bool(desc, "castShadow", d.cast_shadow)?,
+        shadow_only: optional_bool(desc, "shadowOnly", d.shadow_only)?,
+        shadow_double_sided: optional_bool(desc, "shadowDoubleSided", d.shadow_double_sided)?,
         overrides,
     })
 }

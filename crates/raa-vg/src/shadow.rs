@@ -102,7 +102,9 @@ pub fn cascade_views(
         } else {
             ortho
         };
-        let mut cascade = ortho.seen_from(camera.eye, light, eye_lod_scale, near);
+        let mut cascade = ortho
+            .seen_from(camera.eye, light, eye_lod_scale, near)
+            .casting_shadows();
         cascade.allow_software = allow_software;
         *view = Some(cascade);
     }

@@ -31,6 +31,13 @@ pub const FLAG_TRACE_MIRROR: u32 = 256;
 /// [`SurfaceMaterial::gpu_flags`] whenever `diffuse_transmission > 0`; the forward variant of
 /// such a draw compiles the back-lighting term (`opaque_lighting.wgsl`), others drop it.
 pub const FLAG_DIFFUSE_TRANSMISSION: u32 = 512;
+/// Material flag: shadow only. Never drawn for the camera (nor planar reflections or the
+/// virtualized camera view); still drawn by every shadow caster pass, and still an occluder
+/// for mesh rays (GI, traced shadows). Ignored with FLAG_NO_SHADOW (draws nothing).
+pub const FLAG_SHADOW_ONLY: u32 = 1024;
+/// Material flag: casts shadows from both faces (no back-face culling in the shadow caster
+/// passes only); the camera draw keeps its own culling (FLAG_DOUBLE_SIDED).
+pub const FLAG_SHADOW_DOUBLE_SIDED: u32 = 2048;
 
 /// How a surface is shaded.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]

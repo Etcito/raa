@@ -32,6 +32,7 @@ pub use raster::{RASTER_COMMON_WGSL, VIS_WRITE_WGSL, raster_hw_module_wgsl};
 pub use resolve::resolve_module_wgsl;
 pub use scene::{
     INSTANCE_CASTS_SHADOW, INSTANCE_DOUBLE_SIDED, INSTANCE_GI, INSTANCE_MOVABLE,
+    INSTANCE_SHADOW_DOUBLE_SIDED, INSTANCE_SHADOW_ONLY,
     INSTANCE_PREVIOUS_VALID, InstanceRequests, MeshKeys, SectionRange, VG_INSTANCE_SIZE,
     VgInstanceRecord, VgPoolTraffic, VgScene, hierarchy_word, write_instance,
 };

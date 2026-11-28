@@ -13,7 +13,7 @@ use std::num::NonZeroU64;
 
 use raa_core::{GpuContext, RaaError};
 use raa_lit::{
-    DrawClass, FLAG_DOUBLE_SIDED, FLAG_NO_SHADOW, LitHandle, MAX_HERO_LIGHTS, PipelineSpec,
+    DrawClass, FLAG_DOUBLE_SIDED, FLAG_NO_SHADOW, FLAG_SHADOW_DOUBLE_SIDED, LitHandle, MAX_HERO_LIGHTS, PipelineSpec,
 };
 use raa_math::Mat4;
 use raa_shader::{PassKind, VariantKey};
@@ -450,7 +450,12 @@ impl Casters {
                 if indices.is_empty() {
                     continue;
                 }
-                let flags = flags & FLAG_DOUBLE_SIDED;
+                // Shadow-only double-sidedness culls no face here, like FLAG_DOUBLE_SIDED.
+                let flags = if flags & (FLAG_DOUBLE_SIDED | FLAG_SHADOW_DOUBLE_SIDED) != 0 {
+                    FLAG_DOUBLE_SIDED
+                } else {
+                    0
+                };
                 let key = VariantKey {
                     material_fn: d.material_fn,
                     pass: PassKind::Shadow,

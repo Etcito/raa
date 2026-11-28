@@ -32,6 +32,8 @@ pub struct LitDraw {
 pub struct MaterialClass {
     pub class: DrawClass,
     pub material_fn: MaterialFnId,
+    /// FLAG_SHADOW_ONLY: left out of the camera section, kept in the caster sections.
+    pub shadow_only: bool,
 }
 
 impl MaterialClass {
@@ -44,6 +46,7 @@ impl MaterialClass {
         MaterialClass {
             class: m.class(),
             material_fn,
+            shadow_only: m.flags & crate::material::FLAG_SHADOW_ONLY != 0,
         }
     }
 }

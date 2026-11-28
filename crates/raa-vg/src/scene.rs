@@ -10,7 +10,10 @@ use std::ops::Range;
 
 use raa_cluster::{ClusterMesh, ClusterState, ClusterStore};
 use raa_core::{GpuContext, MaterialId, MeshId, wgpu};
-use raa_lit::{FLAG_DOUBLE_SIDED, FLAG_NO_SHADOW, InstanceShape, LitHandle, MaterialFnId};
+use raa_lit::{
+    FLAG_DOUBLE_SIDED, FLAG_NO_SHADOW, FLAG_SHADOW_DOUBLE_SIDED, FLAG_SHADOW_ONLY, InstanceShape,
+    LitHandle, MaterialFnId,
+};
 use raa_math::Mat4;
 use raa_scene::{InstanceId, RenderList, Scene};
 
@@ -29,6 +32,10 @@ pub const INSTANCE_CASTS_SHADOW: u32 = 4;
 pub const INSTANCE_MOVABLE: u32 = 8;
 /// `ids.z` bit: a raa-gi voxel member; the GI cull filter (InstanceFilter::Gi) draws exactly these.
 pub const INSTANCE_GI: u32 = 16;
+/// `ids.z` bit: both faces cast shadows (shadow views only).
+pub const INSTANCE_SHADOW_DOUBLE_SIDED: u32 = 32;
+/// `ids.z` bit: shadow only, left out of every view but the shadow views (and GI voxels).
+pub const INSTANCE_SHADOW_ONLY: u32 = 64;
 
 const NODE_SIZE: u64 = 48;
 const CLUSTER_SIZE: u64 = 48;
@@ -700,6 +707,12 @@ fn planned_instance(
     }
     if material_flags & FLAG_NO_SHADOW == 0 {
         flags |= INSTANCE_CASTS_SHADOW;
+    }
+    if material_flags & FLAG_SHADOW_DOUBLE_SIDED != 0 {
+        flags |= INSTANCE_SHADOW_DOUBLE_SIDED;
+    }
+    if material_flags & FLAG_SHADOW_ONLY != 0 {
+        flags |= INSTANCE_SHADOW_ONLY;
     }
     if source.gi_member(item.tag) {
         flags |= INSTANCE_GI;

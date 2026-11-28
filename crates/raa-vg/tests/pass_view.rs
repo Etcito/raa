@@ -66,6 +66,7 @@ fn sample() -> PassView {
         stamp: 124,
         receiver_planes: receiver,
         eye_light: Vec3::new(149.0, 150.0, 151.0),
+        shadow_view: 152,
     }
 }
 
@@ -110,7 +111,7 @@ fn write_le_bytes_puts_every_field_at_its_s32_offset() {
         .collect::<Vec<_>>();
     assert_eq!(floats_at(&bytes, 320, 24), receiver);
     assert_eq!(floats_at(&bytes, 416, 3), vec![149.0, 150.0, 151.0]);
-    assert_eq!(floats_at(&bytes, 428, 1), vec![0.0]);
+    assert_eq!(u32_at(&bytes, 428), 152);
 
     let mut short = [0u8; 228];
     view.write_le_bytes(&mut short);

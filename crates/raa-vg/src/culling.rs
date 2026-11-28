@@ -75,6 +75,8 @@ pub struct PassView {
     pub stamp: u32,
     pub receiver_planes: [Vec4; 6],
     pub eye_light: Vec3,
+    /// 1 for a shadow map ([`PassView::casting_shadows`]).
+    pub shadow_view: u32,
 }
 
 impl PassView {
@@ -135,6 +137,7 @@ impl PassView {
             stamp: 0,
             receiver_planes: [Vec4::new(0.0, 0.0, 0.0, 0.0); 6],
             eye_light: Vec3::Y,
+            shadow_view: 0,
         }
     }
 
@@ -170,6 +173,7 @@ impl PassView {
             stamp: 0,
             receiver_planes: [Vec4::new(0.0, 0.0, 0.0, 0.0); 6],
             eye_light: Vec3::Y,
+            shadow_view: 0,
         }
     }
 
@@ -194,6 +198,16 @@ impl PassView {
         self.eye_light = if unit == Vec3::ZERO { Vec3::Y } else { unit };
         self.eye_lod_scale = lod_scale;
         self.eye_near = nearest.max(1.0e-3);
+        self
+    }
+
+    /// The same view as a shadow map: only shadow casters are drawn, and the near plane (the
+    /// light's side) culls nothing, since casters before it are pancaked onto it by the
+    /// rasterisers, exactly like the classic shadow pass. Without this a caster above the
+    /// fitted depth range (the roof of a room the camera stands in) is dropped and light leaks.
+    pub fn casting_shadows(mut self) -> PassView {
+        self.shadow_view = 1;
+        self.planes[4] = Vec4::new(0.0, 0.0, 0.0, 1.0);
         self
     }
 
@@ -252,7 +266,7 @@ impl PassView {
             put_f32(out, at, value);
             at += 4;
         }
-        put_u32(out, at, 0);
+        put_u32(out, at, self.shadow_view);
     }
 }
 

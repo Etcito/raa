@@ -312,7 +312,7 @@ impl IdPrep {
                 i += 1;
                 continue;
             };
-            if mc.class != class {
+            if mc.class != class || (mc.shadow_only && matches!(section, Section::Camera)) {
                 i += 1;
                 continue;
             }
@@ -402,7 +402,7 @@ impl IdPrep {
                 continue;
             }
             let transparent = material_class(input, item.material)
-                .is_ok_and(|mc| mc.class == DrawClass::Transparent);
+                .is_ok_and(|mc| mc.class == DrawClass::Transparent && !mc.shadow_only);
             if transparent {
                 self.sort.push(SortKey {
                     depth: view_depth(&input.view, item),
