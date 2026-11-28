@@ -180,9 +180,18 @@ pub(crate) fn prepare(
         .list
         .items
         .iter()
-        .filter_map(|item| {
+        .enumerate()
+        .filter_map(|(index, item)| {
             let material = library.get(item.material)?;
             if material.class() == DrawClass::Transparent {
+                return None;
+            }
+            if st
+                .tags
+                .get(index)
+                .and_then(|tag| st.instances.get_ref(*tag).ok())
+                .is_some_and(|group| group.dynamic)
+            {
                 return None;
             }
             let (key, source, indices) = parts.get(&item.mesh)?;

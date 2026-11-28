@@ -345,6 +345,14 @@ export interface Engine {
   setTransforms(nodes: Uint32Array, trs: Float32Array): void;
 
   /**
+   * Marks `node` and its descendants dynamic (excluded from the mesh-trace soup/BVH) or
+   * static. Dynamic instances still render, cast shadows and receive lighting; moving them
+   * does not rebuild the mesh-trace geometry. Toggling is a one-time geometry change.
+   * @throws RaaError `api.unknown_handle`.
+   */
+  setNodeDynamic(node: number, dynamic: boolean): void;
+
+  /**
    * Removes `node`, its subtree and their instances. Handles of removed descendants and
    * instances then throw `scene.stale_node` or `scene.stale_instance`.
    * @throws RaaError `api.unknown_handle`, `scene.stale_node`.

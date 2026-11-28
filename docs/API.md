@@ -168,6 +168,10 @@ Handles (meshes, materials, nodes, instances, assets) are plain numbers issued f
 
 `setTransforms(nodes: Uint32Array, trs: Float32Array): void`. Sets many local transforms without allocating in steady state. `trs` holds 10 floats per node, in the order of `nodes`: `t` (3, metres), `r` (4, `[x, y, z, w]`), `s` (3). So `trs.length` must equal `10 * nodes.length`, otherwise it throws `api.length_mismatch` before changing anything. An entry error (`api.unknown_handle`, `scene.stale_node`, `api.invalid_argument`) aborts at that entry; nodes before it keep their new transform.
 
+#### `setNodeDynamic`
+
+`setNodeDynamic(node: number, dynamic: boolean): void`. Marks `node` and its descendants dynamic (`true`) or static (`false`). A dynamic instance still renders, casts CSM/VSM shadows and receives lighting, but its mesh is excluded from the mesh-trace soup/BVH used by DDGI, local shadows, spherical GI, NRC and `reference` reflections; moving it therefore never rebuilds the trace geometry. Toggling the flag is a one-time geometry change. Throws `api.unknown_handle`.
+
 #### `removeNode`
 
 `removeNode(node: number): void`. Removes the node, its subtree and all their instances. The handles of the removed descendants and instances become stale (`scene.stale_node`, `scene.stale_instance`); the node's own handle then throws `api.unknown_handle` or `scene.stale_node`. Throws `api.unknown_handle`, `scene.stale_node`.

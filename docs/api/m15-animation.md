@@ -137,6 +137,9 @@ batch is the same record the other setters write: `setInstanceTint`, `setSquash`
 and a jiggle spring each update their own floats.
 
 Rigid hierarchies are not part of the batch: keep using `addNode` and `setTransforms` for them.
+A rigid instance that moves every frame can be marked with `setNodeDynamic(node, true)` (and
+`false` to return it) so its motion is excluded from the mesh-trace soup/BVH and never rebuilds
+the trace geometry. It still receives lighting and casts CSM/VSM shadows.
 
 ## Refusals
 

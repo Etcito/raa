@@ -101,6 +101,9 @@ impl EngineState {
             .add_node(parent, t)
             .map_err(|e| scene_error(&e))?;
         self.node_parents.push((id, parent));
+        if parent.is_some_and(|parent| self.dynamic_nodes.contains(&parent)) {
+            self.dynamic_nodes.insert(id);
+        }
         Ok(self.nodes.insert(id))
     }
 
@@ -285,6 +288,7 @@ impl WebApp for EngineApp {
             nodes: HandleMap::new("node"),
             instances: HandleMap::new("instance"),
             node_parents: Vec::with_capacity(max),
+            dynamic_nodes: Default::default(),
             dirty_meshes: Vec::new(),
             single_material: false,
             asset_handles: HandleMap::new("asset"),
@@ -1837,6 +1841,18 @@ impl Engine {
             let id = st.nodes.get(node)?;
             let local = trs_arg(Some(t), Some(r), Some(s))?;
             st.set_node_local(id, local)
+        })
+    }
+
+    /// Marks `node` and its descendants dynamic (excluded from the mesh-trace soup/BVH) or
+    /// static. A dynamic node still renders, casts CSM/VSM shadows and receives lighting;
+    /// moving it never rebuilds the trace geometry. Toggling is a one-time geometry change.
+    #[wasm_bindgen(js_name = setNodeDynamic)]
+    pub fn set_node_dynamic(&mut self, node: u32, dynamic: bool) -> Result<(), JsValue> {
+        self.with_state(|_, st| {
+            let id = st.nodes.get(node)?;
+            st.set_node_dynamic(id, dynamic);
+            Ok(())
         })
     }
 

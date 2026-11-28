@@ -4,7 +4,7 @@
 //! per-instance extras (S10) of every sub-mesh draw are shared.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 
 use raa_cluster::{BuildOptions, ClusterBake, ClusterError, ClusterStore, OwnedClusterInput};
@@ -483,6 +483,8 @@ pub(crate) struct InstanceGroup {
     /// The node was removed (`removeNode`): the group is never rebuilt and using it
     /// throws `scene.stale_instance`, as a v0 instance of a removed node did.
     pub stale: bool,
+    /// `setNodeDynamic`: this group is not part of the mesh-trace soup/BVH.
+    pub dynamic: bool,
 }
 
 impl InstanceGroup {
@@ -502,6 +504,7 @@ impl InstanceGroup {
             object_material: None,
             single: None,
             stale: false,
+            dynamic: false,
         }
     }
 
@@ -783,6 +786,8 @@ pub(crate) struct EngineState {
     /// Parent link of every Engine-created node, used to validate and refresh the local
     /// lights attached to the instance groups of a moved node's subtree.
     pub node_parents: NodeParents,
+    /// Nodes whose instances are excluded from the mesh-trace soup/BVH (`setNodeDynamic`).
+    pub dynamic_nodes: HashSet<NodeId>,
     /// Lit meshes whose geometry was replaced since the last frame: their instance groups
     /// are rebuilt by [`EngineState::rebuild_dirty_groups`] in `update`, before
     /// `lit.prepare`.
@@ -993,6 +998,32 @@ impl EngineState {
         self.scene.world(node).map_err(|e| scene_error(&e))
     }
 
+    /// Marks `node` and its descendants dynamic or static. A dynamic instance group is
+    /// not part of the mesh-trace soup/BVH; moving it never touches the trace geometry.
+    pub(crate) fn set_node_dynamic(&mut self, node: NodeId, dynamic: bool) {
+        let mut subtree = vec![node];
+        let mut next = 0;
+        while next < subtree.len() {
+            let id = subtree[next];
+            next += 1;
+            for &(child, parent) in &self.node_parents {
+                if parent == Some(id) {
+                    subtree.push(child);
+                }
+            }
+        }
+        for id in subtree {
+            if dynamic {
+                self.dynamic_nodes.insert(id);
+            } else {
+                self.dynamic_nodes.remove(&id);
+            }
+        }
+        for (_, group) in self.instances.iter_mut() {
+            group.dynamic = self.dynamic_nodes.contains(&group.node);
+        }
+    }
+
     /// Validates and applies a local node transform together with the local lights attached
     /// to that node's instance groups (and its descendants').
     pub(crate) fn set_node_local(
@@ -1020,6 +1051,7 @@ impl EngineState {
     ) -> Result<u32, RaaError> {
         let tag = self.instances.next_handle();
         let mut group = InstanceGroup::new(node, mesh, tag, material);
+        group.dynamic = self.dynamic_nodes.contains(&node);
         let skin = self.features.get::<SkinFeature>();
         let registration = skin.zip(Some(self.skins.as_slice()));
         let single = self.single_material;
@@ -1113,6 +1145,8 @@ impl EngineState {
             self.lit.local_lights_mut(),
             node,
         )?;
+        self.dynamic_nodes
+            .retain(|id| self.scene.local(*id).is_ok());
         let skin = self.features.get::<SkinFeature>();
         for (_, group) in self.instances.iter() {
             if group.stale {
