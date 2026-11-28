@@ -223,7 +223,41 @@ impl Geometry {
         self.triangles.len() as u32
     }
 
+    /// Updates the soup. A hidden (dynamic) input only keeps a slot when the soup already holds a part of that mesh
+    /// that no visible input claims (toggling an existing part stays a local refit); a hidden input that is new to the
+    /// soup (a spawned dynamic object) never enters it, so spawning or removing one never changes the part list.
     pub fn update(
+        &mut self,
+        inputs: &[MeshInput<'_>],
+        storage_limit: u64,
+        material_bytes: u64,
+    ) -> Result<(), RaaError> {
+        if !inputs.iter().any(|input| input.hidden) {
+            return self.update_parts(inputs, storage_limit, material_bytes);
+        }
+        let mut budget = std::collections::HashMap::<(u32, u64), i64>::new();
+        for part in &self.parts {
+            *budget.entry((part.id, part.key)).or_default() += 1;
+        }
+        for input in inputs.iter().filter(|input| !input.hidden) {
+            *budget.entry((input.mesh, input.key)).or_default() -= 1;
+        }
+        let kept: Vec<MeshInput<'_>> = inputs
+            .iter()
+            .filter(|input| {
+                if !input.hidden {
+                    return true;
+                }
+                let left = budget.entry((input.mesh, input.key)).or_default();
+                *left -= 1;
+                *left >= 0
+            })
+            .copied()
+            .collect();
+        self.update_parts(&kept, storage_limit, material_bytes)
+    }
+
+    fn update_parts(
         &mut self,
         inputs: &[MeshInput<'_>],
         storage_limit: u64,
@@ -1113,5 +1147,33 @@ mod tests {
         fresh.update(&visible, 1 << 24, 0).unwrap();
         let root = |g: &Geometry| g.world_bounds().unwrap();
         assert_eq!(root(&geometry), root(&fresh));
+    }
+
+    #[test]
+    fn a_new_hidden_part_never_enters_the_soup() {
+        let p = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let n = [[0.0, 0.0, 1.0]; 3];
+        let idx = [0, 1, 2];
+        let input = |key: u64, hidden: bool| MeshInput {
+            key,
+            mesh: key as u32,
+            positions: &p,
+            normals: &n,
+            colors: None,
+            uvs: None,
+            indices: &idx,
+            material: 0,
+            world: Mat4::from_translation(Vec3::new(key as f32 * 3.0, 0.0, 0.0)),
+            hidden,
+        };
+        let base: Vec<_> = (1..=32).map(|i| input(i, false)).collect();
+        let mut geometry = Geometry::default();
+        geometry.update(&base, 1 << 24, 0).unwrap();
+        let revision = geometry.revision;
+        let mut spawned = base.clone();
+        spawned.push(input(99, true));
+        geometry.update(&spawned, 1 << 24, 0).unwrap();
+        assert_eq!(geometry.revision, revision, "spawning a dynamic part changes nothing");
+        assert_eq!(geometry.count(), 32);
     }
 }
