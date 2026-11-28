@@ -8,7 +8,7 @@ struct LightGpu {
     cos_inner: f32,                 // 48
     kind: u32,                      // 52: point 0, spot 1, directional 2, area 3
     width: f32,                     // 56: full extent in metres
-    height: f32,                    // 60: full extent in metres (area); point/spot: shadow slot + 1, 0 = none
+    height: f32,                    // 60: full extent in metres (area); point/spot: traced shadow slot + 1, 0 = none, -layer = own map in raa_shadow_map
 }
 
 struct FrameGpu {

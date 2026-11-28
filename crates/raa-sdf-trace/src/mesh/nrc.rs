@@ -585,7 +585,7 @@ impl FeaturePass for NrcPass {
             buffer_entry(2, &geometry[0]),
             buffer_entry(3, &geometry[1]),
             buffer_entry(4, &geometry[2]),
-            buffer_entry(13, ctx.lighting.local_lights_buffer()),
+            buffer_entry(13, ctx.lighting.gi_local_lights_buffer()),
             image_entry(14, ctx.lighting.env_specular_view()),
             sampler,
             image_entry(crate::wgsl::MESH_TRACE_ATLAS_BINDING, &atlas),

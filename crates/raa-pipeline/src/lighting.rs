@@ -240,6 +240,7 @@ struct Pending {
     env_sh: bool,
     env: bool,
     local_lights: bool,
+    gi_lights: bool,
     weather: bool,
     gi_params: bool,
     area_table: bool,
@@ -253,6 +254,11 @@ struct State<V> {
     bound_views: Views<V>,
     local_lights: [u8; LOCAL_LIGHTS_SIZE],
     uploaded_lights: [u8; LOCAL_LIGHTS_SIZE],
+    /// `local_lights` with the records of the lights excluded from GI zeroed (`gi_excluded`).
+    gi_lights: [u8; LOCAL_LIGHTS_SIZE],
+    uploaded_gi_lights: [u8; LOCAL_LIGHTS_SIZE],
+    /// Bit `i` set: dense record `i` feeds no GI (a light with `gi: false`).
+    gi_excluded: [u64; MAX_LOCAL_LIGHTS / 64],
     shadow: [u8; SHADOW_GPU_SIZE],
     sh: [[f32; 4]; 9],
     sh_info: [f32; 4],
@@ -276,6 +282,9 @@ impl<V: Clone + PartialEq> State<V> {
             dummies,
             local_lights: [0; LOCAL_LIGHTS_SIZE],
             uploaded_lights: [0; LOCAL_LIGHTS_SIZE],
+            gi_lights: [0; LOCAL_LIGHTS_SIZE],
+            uploaded_gi_lights: [0; LOCAL_LIGHTS_SIZE],
+            gi_excluded: [0; MAX_LOCAL_LIGHTS / 64],
             shadow: [0; SHADOW_GPU_SIZE],
             sh: [[0.0; 4]; 9],
             sh_info: [0.0; 4],
@@ -374,11 +383,18 @@ impl<V: Clone + PartialEq> State<V> {
 
     fn set_local_lights(&mut self, bytes: &[u8; LOCAL_LIGHTS_SIZE], tiles: V) {
         self.local_lights.copy_from_slice(bytes);
+        self.gi_lights.copy_from_slice(bytes);
+        for (index, record) in self.gi_lights.chunks_exact_mut(LIGHT_GPU_SIZE).enumerate() {
+            if self.gi_excluded[index / 64] & (1 << (index % 64)) != 0 {
+                record.fill(0);
+            }
+        }
         self.views.light_tiles = tiles;
     }
 
     fn clear_local_lights(&mut self) {
         self.local_lights.fill(0);
+        self.gi_lights.fill(0);
         self.views.light_tiles = self.dummies.light_tiles.clone();
     }
 
@@ -495,6 +511,10 @@ impl<V: Clone + PartialEq> State<V> {
         self.pending.local_lights = self.local_lights != self.uploaded_lights;
         if self.pending.local_lights {
             self.uploaded_lights.copy_from_slice(&self.local_lights);
+        }
+        self.pending.gi_lights = self.gi_lights != self.uploaded_gi_lights;
+        if self.pending.gi_lights {
+            self.uploaded_gi_lights.copy_from_slice(&self.gi_lights);
         }
         self.pending.weather = self.weather.cpu_changed(&self.uploaded_weather);
         if self.pending.weather {
@@ -960,6 +980,7 @@ pub struct LightingResources {
     sh_buffer: wgpu::Buffer,
     env_buffer: wgpu::Buffer,
     light_buffer: wgpu::Buffer,
+    gi_light_buffer: wgpu::Buffer,
     weather_buffer: wgpu::Buffer,
     gi_params_buffer: wgpu::Buffer,
     area_table_buffer: wgpu::Buffer,
@@ -1039,6 +1060,7 @@ impl LightingResources {
         let sh_buffer = uniform_buffer(gpu, "raa-pipeline.env_sh", &state.sh_bytes());
         let env_buffer = uniform_buffer(gpu, "raa-pipeline.env_gpu", &state.env.to_bytes());
         let light_buffer = uniform_buffer(gpu, "raa-pipeline.local_lights", &state.local_lights);
+        let gi_light_buffer = uniform_buffer(gpu, "raa-pipeline.gi_local_lights", &state.gi_lights);
         let weather_buffer = uniform_buffer(
             gpu,
             "raa-pipeline.weather_lighting",
@@ -1134,6 +1156,7 @@ impl LightingResources {
             sh_buffer,
             env_buffer,
             light_buffer,
+            gi_light_buffer,
             weather_buffer,
             gi_params_buffer,
             area_table_buffer,
@@ -1292,6 +1315,14 @@ impl LightingResources {
     /// compute uniform from these bytes and its own layout; this layout stays fragment-only.
     pub fn set_local_lights(&mut self, bytes: &[u8; LOCAL_LIGHTS_SIZE], tiles: wgpu::TextureView) {
         self.state.set_local_lights(bytes, tiles);
+    }
+
+    /// The dense records (bit `i` = record `i`) of the lights that feed no GI (`gi: false`):
+    /// [`LightingResources::gi_local_lights_buffer`] and `gi_local_lights_bytes` hold them as
+    /// zero records, so the GI passes neither light with them nor see them change. Applies from
+    /// the next [`LightingResources::set_local_lights`].
+    pub fn set_local_light_gi_mask(&mut self, excluded: [u64; MAX_LOCAL_LIGHTS / 64]) {
+        self.state.gi_excluded = excluded;
     }
 
     /// Restores zero records and the 1x1x128 zero tile array. Disabled tiling calls this
@@ -1579,6 +1610,12 @@ impl LightingResources {
         &self.state.local_lights
     }
 
+    /// The records the GI passes read: [`LightingResources::local_lights_bytes`] with the
+    /// lights excluded from GI zeroed (DDGI, spherical GI, NRC, voxel GI, mesh-trace radiance).
+    pub fn gi_local_lights_bytes(&self) -> &[u8] {
+        &self.state.gi_lights
+    }
+
     /// The world-space record corresponding to a dense light index in the slot table.
     pub fn local_light_record(&self, index: u32) -> Option<&[u8; LIGHT_GPU_SIZE]> {
         let index = usize::try_from(index).ok()?;
@@ -1594,6 +1631,12 @@ impl LightingResources {
     /// The 16384-byte local-lights uniform (group 1 binding 12).
     pub fn local_lights_buffer(&self) -> &wgpu::Buffer {
         &self.light_buffer
+    }
+
+    /// The 16384-byte uniform of [`LightingResources::gi_local_lights_bytes`], same layout as
+    /// [`LightingResources::local_lights_buffer`]; GI passes bind it instead.
+    pub fn gi_local_lights_buffer(&self) -> &wgpu::Buffer {
+        &self.gi_light_buffer
     }
 
     /// The currently bound two-layer cloud-transmittance view (group 1 binding 15).
@@ -1653,6 +1696,10 @@ impl LightingResources {
         if pending.local_lights {
             gpu.queue()
                 .write_buffer(&self.light_buffer, 0, &self.state.local_lights);
+        }
+        if pending.gi_lights {
+            gpu.queue()
+                .write_buffer(&self.gi_light_buffer, 0, &self.state.gi_lights);
         }
         if pending.weather {
             for (offset, bytes) in self.state.weather.upload_ranges() {
@@ -1804,6 +1851,7 @@ mod tests {
         env_sh: false,
         env: false,
         local_lights: false,
+        gi_lights: false,
         weather: false,
         gi_params: false,
         area_table: false,
@@ -2021,6 +2069,32 @@ mod tests {
     }
 
     #[test]
+    fn gi_mask_zeroes_only_the_excluded_records() {
+        let mut state = State::new(dummies());
+        let mut bytes = [7; LOCAL_LIGHTS_SIZE];
+        bytes[0] = 1;
+        state.gi_excluded[0] = 0b10;
+        state.set_local_lights(&bytes, 10);
+        assert_eq!(state.local_lights, bytes);
+        assert_eq!(state.gi_lights[..LIGHT_GPU_SIZE], bytes[..LIGHT_GPU_SIZE]);
+        assert!(
+            state.gi_lights[LIGHT_GPU_SIZE..2 * LIGHT_GPU_SIZE]
+                .iter()
+                .all(|b| *b == 0)
+        );
+        assert_eq!(
+            state.gi_lights[2 * LIGHT_GPU_SIZE..],
+            bytes[2 * LIGHT_GPU_SIZE..]
+        );
+        // A moved excluded light changes the forward records, never the GI ones.
+        state.take_pending();
+        bytes[LIGHT_GPU_SIZE] = 9;
+        state.set_local_lights(&bytes, 10);
+        let pending = state.take_pending();
+        assert!(pending.local_lights && !pending.gi_lights);
+    }
+
+    #[test]
     fn local_lights_compare_uploaded_bytes_and_views_independently() {
         let mut state = State::new(dummies());
         let mut bytes = [0; LOCAL_LIGHTS_SIZE];
@@ -2032,6 +2106,7 @@ mod tests {
         state.set_local_lights(&bytes, 10);
         let changed = Pending {
             local_lights: true,
+            gi_lights: true,
             ..ONLY_BIND
         };
         assert_eq!(state.take_pending(), changed);
@@ -2046,6 +2121,7 @@ mod tests {
             state.take_pending(),
             Pending {
                 local_lights: true,
+                gi_lights: true,
                 ..Pending::default()
             }
         );

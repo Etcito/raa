@@ -23,7 +23,8 @@
 //! smoothstep fade over `[0.75 r_f, r_f]` (the GPU record's width lane carries `r_f`, 0 = forward
 //! everywhere). Beyond it the light is probe-only: DDGI injects its shadowed analytic direct
 //! light into the probe irradiance with the complementary weight (so the two add to 1 across the
-//! band, no pop). Area and directional lights, lights with `shadows` and lights with
+//! band, no pop). Area and directional lights, lights with `shadows`, lights with `gi: false` (no probe
+//! would carry them) and lights with
 //! `r_f >= range` are never tiered.
 //!
 //! Budget. The bar is the *total* error below the threshold, not each light's. Each light
@@ -150,7 +151,7 @@ pub(crate) fn budgeted(lights: &[LocalLight], cutoff: LightCutoff) -> (Vec<Local
 /// Forward radius of an effective light (0 when it is not tiered).
 pub(crate) fn forward_radius(light: &LocalLight, cutoff: LightCutoff) -> f32 {
     let tiered = matches!(light.kind, LocalLightKind::Point | LocalLightKind::Spot);
-    if !tiered || light.shadows || light.is_off() || cutoff.forward_radiance <= 0.0 {
+    if !tiered || light.shadows || !light.gi || light.is_off() || cutoff.forward_radiance <= 0.0 {
         return 0.0;
     }
     let radius = (light.peak_radiance() / cutoff.forward_radiance)

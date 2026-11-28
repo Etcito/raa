@@ -384,7 +384,7 @@ impl FeaturePass for MeshTracePass {
                         .map_or(&images.previous_depth, |image| &image.view),
                 ),
                 image_entry(12, &images.radiance),
-                buffer_entry(13, ctx.lighting.local_lights_buffer()),
+                buffer_entry(13, ctx.lighting.gi_local_lights_buffer()),
                 image_entry(14, ctx.lighting.env_specular_view()),
                 wgpu::BindGroupEntry {
                     binding: 15,

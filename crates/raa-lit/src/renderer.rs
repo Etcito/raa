@@ -498,6 +498,8 @@ pub struct LitRenderer {
     area_shadow_settings: AreaShadowSettings,
     /// One hero selector per viewport, created once so prepare allocates nothing.
     hero_selectors: [HeroSelector; MAX_VIEWS],
+    /// One local-map selector per viewport (`shadowMode: 'map'` lights).
+    local_map_selectors: [crate::LocalMapSelector; MAX_VIEWS],
     /// Heroes occupied by the most recently prepared view (0 before any prepare).
     active_area_heroes: u32,
     /// Mid-tier stochastic shadow settings; `StochasticShadowSettings::standard()` until set.
@@ -835,6 +837,7 @@ impl LitRenderer {
             readback: Arc::clone(&readback),
             lights_dirty: false,
             shadow_slots: Vec::new(),
+            gi_excluded: [0; raa_shader::MAX_LOCAL_LIGHTS / 64],
         }));
         let renderer = LitRenderer {
             opts,
@@ -866,6 +869,7 @@ impl LitRenderer {
             water: [0.0; 16],
             area_shadow_settings: AreaShadowSettings::default(),
             hero_selectors: std::array::from_fn(|_| HeroSelector::new()),
+            local_map_selectors: std::array::from_fn(|_| crate::LocalMapSelector::new()),
             active_area_heroes: 0,
             area_stochastic_settings: StochasticShadowSettings::default(),
             stochastic_selectors: std::array::from_fn(|_| StochasticSelector::new()),
@@ -2303,6 +2307,25 @@ impl LitRenderer {
                 AreaShadowTier::Auto | AreaShadowTier::Hero => settings.hero_count,
                 AreaShadowTier::Cone | AreaShadowTier::Fade => 0,
             };
+            // Own maps of the `shadowMode: 'map'` point/spot lights, in the layers after the
+            // area heroes; their lights leave the traced pass's slot list this frame.
+            if let Some(selector) = self.local_map_selectors.get_mut(view) {
+                let slots = self.local_lights.shadow_slots();
+                let area = s.area_hero_capacity.min(crate::MAX_HERO_LIGHTS as u32);
+                let mut targets = [None; crate::MAX_LOCAL_MAP_LAYERS];
+                let (capacity, changed, traced) = selector.update(
+                    &camera,
+                    &self.local_lights,
+                    &slots,
+                    area,
+                    &mut inputs.lights,
+                    &mut targets,
+                );
+                inputs.lights_dirty |= changed;
+                inputs.shadow_slots = traced;
+                s.local_maps = targets;
+                s.local_map_capacity = capacity;
+            }
             // Mid-tier slots follow the hero lanes in the same light records.
             let mut stochastic = AreaStochasticFrame::empty();
             if let Some(selector) = self.stochastic_selectors.get_mut(view) {

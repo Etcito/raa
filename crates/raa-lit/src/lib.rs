@@ -46,6 +46,7 @@ mod light_math;
 mod light_stats;
 mod local_light;
 mod local_lights;
+mod local_map;
 mod lod;
 mod material;
 mod material_data;
@@ -99,8 +100,13 @@ pub use handle::{DrawMemo, InstanceShape, LitHandle, LitMeshStorage, PipelineSpe
 pub use instance_store::{InstanceStore, StoreKind, write_instance_record};
 pub use library::SurfaceLibrary;
 pub use light_stats::LocalLightStats;
-pub use local_light::{LightHandle, LocalLight, LocalLightKind, MAX_LIGHT_HANDLE};
+pub use local_map::{
+    LOCAL_MAP_CUBE_TAN, LocalMapSelector, MAX_LOCAL_MAP_LAYERS, local_map_view_proj, spot_map_tan,
+};
+/// Extra shadow-array layers after the 4 cascades: the area heroes, then the local maps.
+pub const MAX_SHADOW_EXTRA_LAYERS: usize = MAX_HERO_LIGHTS + MAX_LOCAL_MAP_LAYERS;
 pub use light_cutoff::{DEFAULT_DISPLAY_THRESHOLD, DEFAULT_FORWARD_THRESHOLD, LightCutoff};
+pub use local_light::{LightHandle, LocalLight, LocalLightKind, LocalShadowMode, MAX_LIGHT_HANDLE};
 pub use local_lights::{DEFAULT_FORWARD_BUDGET, LocalLights, MAX_LOCAL_LIGHTS};
 pub use lod::{
     LodLevel, LodParams, LodRegistry, MAX_LOD_LEVELS, camera_level, lod_error, shadow_level,

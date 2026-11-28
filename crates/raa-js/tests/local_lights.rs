@@ -87,6 +87,9 @@ fn present_undefined_restores_the_s17_default() {
         size: [2.0, 3.0],
         radius: 4.0,
         shadows: true,
+        gi: false,
+        shadow_mode: raa_lit::LocalShadowMode::Map,
+        shadow_min_screen: 0.5,
     };
     let patch = parse(&Mock::new(&[
         ("kind", Raw::Undefined),
@@ -100,9 +103,27 @@ fn present_undefined_restores_the_s17_default() {
         ("size", Raw::Undefined),
         ("radius", Raw::Undefined),
         ("shadows", Raw::Undefined),
+        ("gi", Raw::Undefined),
+        ("shadowMode", Raw::Undefined),
+        ("shadowMinScreenSize", Raw::Undefined),
     ]))
     .unwrap();
     assert_eq!(merge(base, &patch), LocalLight::default());
+}
+
+#[test]
+fn parse_reads_the_per_light_gi_and_shadow_options() {
+    let patch = parse(&Mock::new(&[
+        ("gi", Raw::Bool(false)),
+        ("shadowMode", Raw::String("map".into())),
+        ("shadowMinScreenSize", Raw::Number(0.25)),
+    ]))
+    .unwrap();
+    let light = merge(LocalLight::default(), &patch);
+    assert!(!light.gi);
+    assert_eq!(light.shadow_mode, raa_lit::LocalShadowMode::Map);
+    assert_eq!(light.shadow_min_screen, 0.25);
+    assert!(parse(&Mock::new(&[("shadowMode", Raw::String("cube".into()))])).is_err());
 }
 
 #[test]

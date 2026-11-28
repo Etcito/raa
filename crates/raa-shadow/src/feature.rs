@@ -18,7 +18,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use raa_core::{GpuContext, RaaError};
-use raa_lit::{LitHandle, LitRenderer, MAX_HERO_LIGHTS};
+use raa_lit::{LitHandle, LitRenderer, MAX_SHADOW_EXTRA_LAYERS};
 use raa_math::{Aabb, Mat4, Vec3, Vec4};
 use raa_pipeline::{
     FeaturePass, ImageDesc, ImageDim, LightingResources, Pipeline, PrepareCtx, RecordCtx,
@@ -105,7 +105,7 @@ struct ShadowState {
     /// Cascade view-projections of the last prepare.
     matrices: [Mat4; CASCADES],
     /// Hero view-projections of the last prepare, `None` for empty slots.
-    heroes: [Option<Mat4>; MAX_HERO_LIGHTS],
+    heroes: [Option<Mat4>; MAX_SHADOW_EXTRA_LAYERS],
     /// Hero layers the last prepare will render (occupied slots below the capacity).
     hero_layers: u32,
     /// View-space splits of the last prepare.
@@ -245,7 +245,7 @@ impl FeaturePass for ShadowPass {
             lighting.clear_shadow();
             if let Ok(mut st) = self.state.try_borrow_mut() {
                 st.bound = false;
-                st.heroes = [None; MAX_HERO_LIGHTS];
+                st.heroes = [None; MAX_SHADOW_EXTRA_LAYERS];
                 st.hero_layers = 0;
                 st.rendered = None;
                 // Casters may move while disabled: the cached pages are dropped.
@@ -277,8 +277,8 @@ impl FeaturePass for ShadowPass {
         // `LitRenderer::prepare` wrote the area-light hero capacity and targets this frame
         // (see the comment below); recreate the array when either the resolution or the
         // number of hero layers it holds changes.
-        let hero_capacity = self.lit.area_hero_capacity().min(MAX_HERO_LIGHTS as u32);
-        let hero_targets = self.lit.area_hero_targets();
+        let hero_capacity = self.lit.shadow_extra_capacity().min(MAX_SHADOW_EXTRA_LAYERS as u32);
+        let hero_targets = self.lit.shadow_extra_targets();
         if st.casters.as_ref().is_none_or(|c| {
             c.resolution() != desc.resolution
                 || c.hero_layers() != hero_capacity
@@ -332,9 +332,9 @@ impl FeaturePass for ShadowPass {
         };
         // Caster list `i` uses `all[i]`: the four cascades, then each hero target of a slot
         // below the capacity (identity for an empty slot).
-        let mut all = [Mat4::IDENTITY; CASCADES + MAX_HERO_LIGHTS];
+        let mut all = [Mat4::IDENTITY; CASCADES + MAX_SHADOW_EXTRA_LAYERS];
         all[..CASCADES].copy_from_slice(&matrices);
-        let mut heroes = [None; MAX_HERO_LIGHTS];
+        let mut heroes = [None; MAX_SHADOW_EXTRA_LAYERS];
         for (h, target) in hero_targets.iter().take(hero_capacity as usize).enumerate() {
             if let Some(matrix) = target {
                 all[CASCADES + h] = *matrix;
@@ -492,7 +492,7 @@ fn ensure_vsm(lit: &LitHandle, gpu: &GpuContext, st: &mut ShadowState) {
     let per_layer = pps * pps;
     let pool_layers = (desc.vsm_pages + MAX_LEVELS).div_ceil(per_layer);
     let slots = pool_layers * per_layer;
-    let hero_capacity = lit.area_hero_capacity().min(MAX_HERO_LIGHTS as u32);
+    let hero_capacity = lit.shadow_extra_capacity().min(MAX_SHADOW_EXTRA_LAYERS as u32);
     let new_array = st.casters.as_ref().is_none_or(|c| {
         c.resolution() != res || c.hero_layers() != hero_capacity || c.pool_layers() != pool_layers
     });
@@ -531,8 +531,8 @@ fn prepare_vsm_frame(
     let desc = st.desc;
     let res = desc.resolution;
     let pps = (res / PAGE).max(1);
-    let hero_capacity = lit.area_hero_capacity().min(MAX_HERO_LIGHTS as u32);
-    let hero_targets = lit.area_hero_targets();
+    let hero_capacity = lit.shadow_extra_capacity().min(MAX_SHADOW_EXTRA_LAYERS as u32);
+    let hero_targets = lit.shadow_extra_targets();
     let proj = st.proj.unwrap_or_else(|| {
         Mat4::perspective_rh_zo(view.fov_y_rad, view.aspect, view.near, view.far)
     });
@@ -561,13 +561,13 @@ fn prepare_vsm_frame(
     // Caster lists: windows 0..2, the coarse map 3, heroes 4.. (a list that renders
     // nothing gets a box far outside the scene).
     let empty = light.map_or(Mat4::IDENTITY, |l| crate::vsm::empty_window(&l));
-    let mut all = [empty; CASCADES + MAX_HERO_LIGHTS];
+    let mut all = [empty; CASCADES + MAX_SHADOW_EXTRA_LAYERS];
     for (i, w) in cache.windows.iter().enumerate() {
         all[i] = w.matrix;
     }
     let coarse = cache.coarse_matrix().unwrap_or(empty);
     all[3] = coarse;
-    let mut heroes = [None; MAX_HERO_LIGHTS];
+    let mut heroes = [None; MAX_SHADOW_EXTRA_LAYERS];
     for (h, target) in hero_targets.iter().take(hero_capacity as usize).enumerate() {
         if let Some(matrix) = target {
             all[CASCADES + h] = *matrix;
@@ -824,7 +824,7 @@ impl ShadowFeature {
             casters: None,
             bound: false,
             matrices: [Mat4::IDENTITY; CASCADES],
-            heroes: [None; MAX_HERO_LIGHTS],
+            heroes: [None; MAX_SHADOW_EXTRA_LAYERS],
             hero_layers: 0,
             splits: [0.0; CASCADES],
             sun_dir: Vec3::ZERO,

@@ -60,6 +60,37 @@ pub struct LocalLight {
     pub size: [f32; 2],
     pub radius: f32,
     pub shadows: bool,
+    /// Whether the light feeds GI (DDGI, spherical GI, NRC, mesh-trace radiance). Off: direct
+    /// light only; its GI record is zero, so moving it relights no probe.
+    pub gi: bool,
+    /// How a shadow-casting point or spot light is shadowed.
+    pub shadow_mode: LocalShadowMode,
+    /// [`LocalShadowMode::Map`]: smallest screen coverage of the range sphere
+    /// (`area_shadow::screen_coverage`) that gets the light's own map; below it the light uses
+    /// its traced cube. In [0, 1], 0 = always.
+    pub shadow_min_screen: f32,
+}
+
+/// Shadow technique of a shadow-casting point or spot light.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum LocalShadowMode {
+    /// Cached cube traced through the GI mesh BVH (`shadow.local`); dynamic nodes are not in that
+    /// BVH and cast nothing. A moved light is re-traced in full in the frame it moves.
+    #[default]
+    Traced,
+    /// Its own rasterized shadow map (a cube for a point light, one frustum for a spot), drawn
+    /// every frame from every shadow caster, dynamic ones included (`shadow.csm` extra layers).
+    Map,
+}
+
+impl LocalShadowMode {
+    /// The JS spelling: `traced` or `map`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LocalShadowMode::Traced => "traced",
+            LocalShadowMode::Map => "map",
+        }
+    }
 }
 
 impl Default for LocalLight {
@@ -78,6 +109,9 @@ impl Default for LocalLight {
             size: [1.0, 1.0],
             radius: 0.0,
             shadows: false,
+            gi: true,
+            shadow_mode: LocalShadowMode::Traced,
+            shadow_min_screen: 0.0,
         }
     }
 }
@@ -204,6 +238,13 @@ impl LocalLight {
             }
         }
         check_min("intensity", self.intensity, 0.0, true)?;
+        check_finite("shadowMinScreenSize", self.shadow_min_screen)?;
+        if !(0.0..=1.0).contains(&self.shadow_min_screen) {
+            return Err(invalid(format!(
+                "shadowMinScreenSize must be in [0, 1] (got {})",
+                self.shadow_min_screen
+            )));
+        }
         check_min("range", self.range, 0.0, false)?;
         check_angle("angle_deg", self.angle_deg)?;
         if let Some(inner) = self.inner_angle_deg {

@@ -942,7 +942,7 @@ impl DdgiPass {
             track.sky = sky;
         }
 
-        let now = lighting.local_lights_bytes();
+        let now = lighting.gi_local_lights_bytes();
         let first = track.lights.is_empty();
         let changes = if first {
             Vec::new()
@@ -1566,7 +1566,7 @@ impl FeaturePass for DdgiPass {
                 buffer_entry(2, &geometry[0]),
                 buffer_entry(3, &geometry[1]),
                 buffer_entry(4, &geometry[2]),
-                buffer_entry(13, ctx.lighting.local_lights_buffer()),
+                buffer_entry(13, ctx.lighting.gi_local_lights_buffer()),
                 image_entry(14, ctx.lighting.env_specular_view()),
                 wgpu::BindGroupEntry {
                     binding: 15,

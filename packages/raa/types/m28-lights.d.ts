@@ -36,7 +36,34 @@ export interface LocalLightDesc {
    * unshadowed. Area lights use their own tiers; directional lights ignore it. Default false.
    */
   shadows?: boolean;
+  /**
+   * false: direct only. The light feeds no GI pass (DDGI, spherical GI, NRC and the mesh-trace
+   * sky/GI pass read it as absent), so moving it relights no probe and causes no GI flicker; it
+   * is also never put in the probe-only tier of the light cutoff. The voxel GI still sees it.
+   * Default true.
+   */
+  gi?: boolean;
+  /**
+   * Point and spot lights with `shadows: true`: 'traced' (default) uses the cached cube traced
+   * through the mesh BVH (static geometry only: dynamic nodes are not in that BVH and cast no
+   * shadow; a moving light is re-traced in full in the frame it moves). 'map' renders the
+   * light's own shadow map every frame from every caster, dynamic nodes included: one frustum
+   * for a spot, six cube faces for a point light, in extra layers of the sun shadow array (at
+   * most 12 layers; a map light that does not fit, or is below `shadowMinScreenSize`, uses its
+   * traced cube).
+   */
+  shadowMode?: LocalShadowMode;
+  /**
+   * 'map' lights: impact threshold in [0, 1]. Impact is the fraction of the screen area covered
+   * by the light's range sphere (pi r_px^2 / (w h) with r_px = f r / sqrt(d^2 - r^2), 1 when the
+   * eye is inside the range; the area-light hero metric). Below it the light falls back to its
+   * traced cube. Default 0 (always a map).
+   */
+  shadowMinScreenSize?: number;
 }
+
+/** Shadow source of a shadow-casting point or spot light; see {@link LocalLightDesc.shadowMode}. */
+export type LocalShadowMode = 'traced' | 'map';
 
 /** Settings accepted by {@link Engine.setLocalShadows}; omitted keys keep their value. */
 export interface LocalShadowsDesc {

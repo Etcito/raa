@@ -27,7 +27,7 @@
 use raa_core::RaaError;
 use raa_lit::{
     AreaShadowSettings, AreaShadowTier, LightHandle, LocalLight, LocalLightKind, LocalLights,
-    MAX_LIGHT_HANDLE, StochasticMode, StochasticShadowSettings,
+    LocalShadowMode, MAX_LIGHT_HANDLE, StochasticMode, StochasticShadowSettings,
 };
 
 /// The refusal code of every malformed local-light description (S17).
@@ -113,6 +113,9 @@ pub(crate) struct LocalLightPatch {
     pub size: Patch<[f32; 2]>,
     pub radius: Patch<f32>,
     pub shadows: Patch<bool>,
+    pub gi: Patch<bool>,
+    pub shadow_mode: Patch<LocalShadowMode>,
+    pub shadow_min_screen: Patch<f32>,
 }
 
 impl LocalLightPatch {
@@ -131,6 +134,9 @@ impl LocalLightPatch {
             size: Patch::Keep,
             radius: Patch::Keep,
             shadows: Patch::Keep,
+            gi: Patch::Keep,
+            shadow_mode: Patch::Keep,
+            shadow_min_screen: Patch::Keep,
         }
     }
 }
@@ -221,6 +227,13 @@ pub(crate) fn parse(source: &impl Properties) -> Result<LocalLightPatch, RaaErro
         size: vector::<2>(source.read("size")?, "size")?,
         radius: scalar(source.read("radius")?, "radius")?,
         shadows: bool_field(source.read("shadows")?, "shadows")?,
+        gi: bool_field(source.read("gi")?, "gi")?,
+        shadow_mode: present(source.read("shadowMode")?, |raw| match raw {
+            Raw::String(name) if name == "traced" => Ok(LocalShadowMode::Traced),
+            Raw::String(name) if name == "map" => Ok(LocalShadowMode::Map),
+            _ => Err(invalid("'shadowMode' must be 'traced' or 'map'")),
+        })?,
+        shadow_min_screen: scalar(source.read("shadowMinScreenSize")?, "shadowMinScreenSize")?,
     })
 }
 
@@ -415,6 +428,13 @@ pub(crate) fn merge(base: LocalLight, patch: &LocalLightPatch) -> LocalLight {
         size: patch.size.resolve(base.size, default.size),
         radius: patch.radius.resolve(base.radius, default.radius),
         shadows: patch.shadows.resolve(base.shadows, default.shadows),
+        gi: patch.gi.resolve(base.gi, default.gi),
+        shadow_mode: patch
+            .shadow_mode
+            .resolve(base.shadow_mode, default.shadow_mode),
+        shadow_min_screen: patch
+            .shadow_min_screen
+            .resolve(base.shadow_min_screen, default.shadow_min_screen),
     }
 }
 

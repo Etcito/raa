@@ -620,7 +620,7 @@ impl FeaturePass for SphericalPass {
                 .iter()
                 .zip(
                     ctx.lighting
-                        .local_lights_bytes()
+                        .gi_local_lights_bytes()
                         .chunks_exact(raa_shader::LIGHT_GPU_SIZE),
                 )
                 .filter_map(|(&id, record)| SphericalLight::from_packed(id, record)),
@@ -1317,7 +1317,7 @@ impl SphericalGpu {
                     buffer_entry(0, frame),
                     image_entry(6, &depth),
                     image_entry(7, &normal),
-                    buffer_entry(13, ctx.lighting.local_lights_buffer()),
+                    buffer_entry(13, ctx.lighting.gi_local_lights_buffer()),
                     buffer_entry(crate::wgsl::MESH_SPHERICAL_BINDING, &self.lookup),
                 ],
             });
@@ -1755,7 +1755,7 @@ impl SphericalGpu {
                     buffer_entry(2, &geometry[0]),
                     buffer_entry(3, &geometry[1]),
                     buffer_entry(4, &geometry[2]),
-                    buffer_entry(13, ctx.lighting.local_lights_buffer()),
+                    buffer_entry(13, ctx.lighting.gi_local_lights_buffer()),
                     image_entry(14, ctx.lighting.env_specular_view()),
                     wgpu::BindGroupEntry {
                         binding: 15,
@@ -1902,7 +1902,7 @@ impl SphericalGpu {
                 buffer_entry(1, &self.options),
                 buffer_entry(2, &geometry[0]),
                 buffer_entry(3, &geometry[1]),
-                buffer_entry(13, ctx.lighting.local_lights_buffer()),
+                buffer_entry(13, ctx.lighting.gi_local_lights_buffer()),
                 buffer_entry(22, &self.faces),
                 buffer_entry(34, &self.transfer),
                 buffer_entry(35, &self.reach_words),
@@ -1958,7 +1958,7 @@ impl SphericalGpu {
                     buffer_entry(2, &geometry[0]),
                     buffer_entry(3, &geometry[1]),
                     buffer_entry(4, &geometry[2]),
-                    buffer_entry(13, ctx.lighting.local_lights_buffer()),
+                    buffer_entry(13, ctx.lighting.gi_local_lights_buffer()),
                     buffer_entry(21, &self.work),
                     buffer_entry(23, &self.lookup),
                 ],

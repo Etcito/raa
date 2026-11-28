@@ -381,7 +381,8 @@ handles returned by `addInstance`/`addMeshInstance`.
 Defaults remain intensity 2, range 6 metres and full spot angle 35 degrees.
 An omitted inner angle is 80% of the outer angle; explicit `undefined` resets a
 field. Changes validate atomically. `radius` and `shadows` remain metadata;
-local lights cast no shadow yet. See m28 for all defaults, validation and errors.
+point/spot shadows are traced cubes or, with `shadowMode: 'map'`, own shadow maps;
+`gi: false` makes a light direct only. See m28 for all defaults, validation and errors.
 
 QB9 remains binding: existing startup, allocation, geometry, documentation and
 extensibility requirements continue, including the shipped-wasm gzip cap of

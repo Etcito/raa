@@ -11,6 +11,8 @@
 //! or radius), the BVH changes inside the light's sphere (the geometry's dirty bounds; a full
 //! rebuild re-traces everything) or the array is reallocated. At most `faces_per_frame` faces are
 //! traced per frame, nearest lights first, so a scene load or an edit never costs one long frame;
+//! a light that moved (a dynamic torch) is re-traced in full in the frame it moves, outside that
+//! budget (at most `LOCAL_SHADOW_MAX_JOBS` faces, nearest first);
 //! until a face is traced its texels are 0 and read as unoccluded. Without trace geometry (no
 //! BVH-consuming GI in the graph) nothing is traced and every light stays unshadowed.
 
@@ -453,6 +455,7 @@ impl FeaturePass for LocalShadowPass {
         self.ensure_array(ctx.gpu, needed, settings.resolution);
         // Free the slots no light holds any more; re-trace moved lights.
         let mut held = [false; MAX_LOCAL_SHADOWS];
+        let mut moved = [false; MAX_LOCAL_SHADOWS];
         for slot in &slots {
             let Some(cache) = self.cache.get_mut(slot.slot as usize) else {
                 continue;
@@ -460,6 +463,9 @@ impl FeaturePass for LocalShadowPass {
             held[slot.slot as usize] = true;
             let key = slot_key(slot);
             if cache.key != Some(key) || reset {
+                // A light that moved (it had faces keyed at another place) is re-traced in full
+                // this frame, outside the budget, so its shadow follows it without lag.
+                moved[slot.slot as usize] = cache.key.is_some() && !reset;
                 *cache = SlotCache {
                     key: Some(key),
                     done: 0,
@@ -490,7 +496,23 @@ impl FeaturePass for LocalShadowPass {
             }
         }
         if first && triangles > 0 {
-            self.jobs = pick_jobs(&slots, &self.cache, eye, settings.faces_per_frame);
+            let moving: Vec<LocalShadowSlot> = slots
+                .iter()
+                .filter(|s| moved.get(s.slot as usize).copied().unwrap_or(false))
+                .copied()
+                .collect();
+            self.jobs = pick_jobs(&moving, &self.cache, eye, LOCAL_SHADOW_MAX_JOBS);
+            let budget = settings
+                .faces_per_frame
+                .saturating_sub(self.jobs.len() as u32);
+            if budget > 0 {
+                let rest: Vec<LocalShadowSlot> = slots
+                    .iter()
+                    .filter(|s| !moved.get(s.slot as usize).copied().unwrap_or(false))
+                    .copied()
+                    .collect();
+                self.jobs.extend(pick_jobs(&rest, &self.cache, eye, budget));
+            }
         }
         let array = self.array.as_ref().expect("face array");
         ctx.lighting.set_local_shadow_map(array.sampled.clone());

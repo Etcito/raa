@@ -13,21 +13,21 @@ use std::num::NonZeroU64;
 
 use raa_core::{GpuContext, RaaError};
 use raa_lit::{
-    DrawClass, FLAG_DOUBLE_SIDED, FLAG_NO_SHADOW, FLAG_SHADOW_DOUBLE_SIDED, LitHandle, MAX_HERO_LIGHTS, PipelineSpec,
+    DrawClass, FLAG_DOUBLE_SIDED, FLAG_NO_SHADOW, FLAG_SHADOW_DOUBLE_SIDED, LitHandle, MAX_SHADOW_EXTRA_LAYERS, PipelineSpec,
 };
 use raa_math::Mat4;
 use raa_shader::{PassKind, VariantKey};
 
 /// Number of cascades (CSM).
 const CASCADES: usize = 4;
-/// Caster lists per frame: 4 cascades followed by up to [`MAX_HERO_LIGHTS`] hero layers.
-const SLOTS: usize = CASCADES + MAX_HERO_LIGHTS;
+/// Caster lists per frame: 4 cascades followed by up to [`MAX_SHADOW_EXTRA_LAYERS`] hero layers.
+const SLOTS: usize = CASCADES + MAX_SHADOW_EXTRA_LAYERS;
 /// Bytes of one caster slot in the uniform buffer (the dynamic offset alignment).
 const SLOT_SIZE: u64 = 256;
 /// Bytes of `RaaShadowCasterGpu` (one mat4x4<f32>).
 const CASTER_GPU_SIZE: u64 = 64;
 // Each 256 B slot (the dynamic offset alignment) holds one caster; 8 slots = 2048 B.
-const _: () = assert!(CASTER_GPU_SIZE <= SLOT_SIZE && SLOT_SIZE * SLOTS as u64 == 2048);
+const _: () = assert!(CASTER_GPU_SIZE <= SLOT_SIZE && SLOT_SIZE * SLOTS as u64 == 5120);
 /// Depth format of the cascade array (CSM).
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -45,11 +45,23 @@ const LABELS: [&str; CASCADES] = [
 ];
 
 /// Render pass label of each hero layer (array layer `HERO_LAYER_BASE + h`).
-const HERO_LABELS: [&str; MAX_HERO_LIGHTS] = [
+const HERO_LABELS: [&str; MAX_SHADOW_EXTRA_LAYERS] = [
     "raa.shadow.hero.0",
     "raa.shadow.hero.1",
     "raa.shadow.hero.2",
     "raa.shadow.hero.3",
+    "raa.shadow.hero.4",
+    "raa.shadow.hero.5",
+    "raa.shadow.hero.6",
+    "raa.shadow.hero.7",
+    "raa.shadow.hero.8",
+    "raa.shadow.hero.9",
+    "raa.shadow.hero.10",
+    "raa.shadow.hero.11",
+    "raa.shadow.hero.12",
+    "raa.shadow.hero.13",
+    "raa.shadow.hero.14",
+    "raa.shadow.hero.15",
 ];
 
 /// The classes that cast shadows, in order: opaque, then fur (drawn as opaque base).
@@ -108,14 +120,14 @@ impl Specs {
 /// The cascade array, its views, the caster uniform and the caster pipeline specs.
 pub(crate) struct Casters {
     resolution: u32,
-    /// Number of hero layers the array holds (0..=[`MAX_HERO_LIGHTS`]).
+    /// Number of hero layers the array holds (0..=[`MAX_SHADOW_EXTRA_LAYERS`]).
     hero_layers: u32,
     /// Keeps the array alive beside its views.
     _texture: wgpu::Texture,
     /// One D2 view per cascade layer, rendered by the cascade passes.
     layers: [wgpu::TextureView; CASCADES],
     /// One D2 view per allocated hero layer, rendered by the hero passes.
-    hero_views: [Option<wgpu::TextureView>; MAX_HERO_LIGHTS],
+    hero_views: [Option<wgpu::TextureView>; MAX_SHADOW_EXTRA_LAYERS],
     /// D2Array view over all cascades and hero layers, for `LightingResources::set_shadow`.
     array: wgpu::TextureView,
     /// VSM page pool layers after the hero layers (0 in CSM mode).
@@ -134,7 +146,7 @@ impl Casters {
     /// Creates the `resolution` x `resolution` x `(4 + hero_layers)` Depth32Float array, its
     /// views, the group-2 layout (binding 0 uniform, vertex, dynamic offset, 64 B), the
     /// [`SLOTS`]-slot caster uniform with its bind group and the two caster specs.
-    /// `hero_layers` is clamped to `0..=MAX_HERO_LIGHTS`.
+    /// `hero_layers` is clamped to `0..=MAX_SHADOW_EXTRA_LAYERS`.
     pub(crate) fn new(
         gpu: &GpuContext,
         resolution: u32,
@@ -142,7 +154,7 @@ impl Casters {
         pool_layers: u32,
     ) -> Casters {
         let device = gpu.device();
-        let hero_layers = hero_layers.min(MAX_HERO_LIGHTS as u32);
+        let hero_layers = hero_layers.min(MAX_SHADOW_EXTRA_LAYERS as u32);
         let depth_or_array_layers = CASCADES as u32 + hero_layers + pool_layers;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("raa.shadow.csm.map"),
@@ -286,7 +298,7 @@ impl Casters {
         gpu: &GpuContext,
         encoder: &mut wgpu::CommandEncoder,
         lit: &LitHandle,
-        heroes: &[Option<Mat4>; MAX_HERO_LIGHTS],
+        heroes: &[Option<Mat4>; MAX_SHADOW_EXTRA_LAYERS],
         windows: &[[u32; 4]],
         coarse: bool,
     ) -> Result<(), RaaError> {
@@ -349,7 +361,7 @@ impl Casters {
         gpu: &GpuContext,
         encoder: &mut wgpu::CommandEncoder,
         lit: &LitHandle,
-        heroes: &[Option<Mat4>; MAX_HERO_LIGHTS],
+        heroes: &[Option<Mat4>; MAX_SHADOW_EXTRA_LAYERS],
         cascades: usize,
     ) -> Result<(), RaaError> {
         for (i, (view, label)) in self.layers.iter().zip(LABELS).enumerate().take(cascades) {
@@ -493,17 +505,8 @@ mod tests {
             assert_eq!(depth.bias.constant, 2);
             assert_eq!(depth.bias.slope_scale, 2.0);
         }
-        assert_eq!(SLOTS, 8);
-        assert_eq!(SLOT_SIZE * SLOTS as u64, 2048);
-        assert_eq!(
-            HERO_LABELS,
-            [
-                "raa.shadow.hero.0",
-                "raa.shadow.hero.1",
-                "raa.shadow.hero.2",
-                "raa.shadow.hero.3",
-            ]
-        );
+        assert_eq!(SLOTS, 20);
+        assert_eq!(SLOT_SIZE * SLOTS as u64, 5120);
         for (h, label) in HERO_LABELS.iter().enumerate() {
             assert_eq!(*label, format!("raa.shadow.hero.{h}"));
         }

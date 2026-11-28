@@ -316,6 +316,18 @@ impl LocalLights {
             .collect()
     }
 
+    /// Bit `i` set: dense record `i` is a light with `gi: false` (its GI record is zeroed by
+    /// `LightingResources::set_local_light_gi_mask`).
+    pub fn gi_excluded(&self) -> [u64; MAX_LOCAL_LIGHTS / 64] {
+        let mut mask = [0u64; MAX_LOCAL_LIGHTS / 64];
+        for (index, light) in self.effective().1.iter().enumerate().take(MAX_LOCAL_LIGHTS) {
+            if !light.gi {
+                mask[index / 64] |= 1 << (index % 64);
+            }
+        }
+        mask
+    }
+
     /// Yields `(dense GPU record index, stable handle, world descriptor)` in the ascending-handle
     /// order that [`LocalLights::write_gpu`] packs, so index `i` names record `i` of its output.
     pub fn world_lights(&self) -> impl Iterator<Item = (usize, LightHandle, LocalLight)> + '_ {

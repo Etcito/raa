@@ -71,6 +71,8 @@ pub(crate) struct TileInputs {
     pub lights_dirty: bool,
     /// The shadow-casting lights of the records (`LocalLights::shadow_slots`).
     pub shadow_slots: Vec<raa_pipeline::LocalShadowSlot>,
+    /// Records of the lights excluded from GI (`LocalLights::gi_excluded`).
+    pub gi_excluded: [u64; raa_shader::MAX_LOCAL_LIGHTS / 64],
 }
 
 /// Tile grid of a framebuffer: `ceil(width/16)` by `ceil(height/16)`.
@@ -99,6 +101,7 @@ pub(crate) fn publish_local_lights(inputs: &mut TileInputs, lights: &mut LocalLi
     if lights.is_dirty() {
         lights.write_gpu(&mut inputs.lights);
         inputs.shadow_slots = lights.shadow_slots();
+        inputs.gi_excluded = lights.gi_excluded();
         lights.clear_dirty();
         inputs.lights_dirty = true;
     }
@@ -352,6 +355,7 @@ impl LightTiles {
             self.eligible = eligible_lights(&inputs.lights);
             inputs.lights_dirty = false;
         }
+        ctx.lighting.set_local_light_gi_mask(inputs.gi_excluded);
         ctx.lighting
             .set_local_lights(&inputs.lights, self.views[index].fragment.clone());
         ctx.lighting.set_local_shadow_slots(&inputs.shadow_slots);
@@ -438,6 +442,7 @@ mod tests {
             readback: Arc::new(Mutex::new(ReadbackCoordinator::new())),
             lights_dirty: false,
             shadow_slots: Vec::new(),
+            gi_excluded: [0; raa_shader::MAX_LOCAL_LIGHTS / 64],
         }
     }
 

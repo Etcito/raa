@@ -53,8 +53,9 @@ const ID_STRIDE: u64 = 4;
 const PREVIOUS_RECORD_BYTES: usize = 64;
 
 /// Shadow id sections after the camera: 4 CSM cascades plus [`MAX_HERO_LIGHTS`] hero layers.
-pub(crate) const SHADOW_SECTIONS: usize = 4 + MAX_HERO_LIGHTS;
-const _: () = assert!(SHADOW_SECTIONS == 8);
+/// The extra layers are the area heroes followed by the local maps (`MAX_SHADOW_EXTRA_LAYERS`).
+pub(crate) const SHADOW_SECTIONS: usize = 4 + crate::MAX_SHADOW_EXTRA_LAYERS;
+const _: () = assert!(SHADOW_SECTIONS == 20);
 
 /// The compacted instance id stream: one u32 slot per instance, read by
 /// `@builtin(instance_index)` and resolved with `raa_instance(id)`.
@@ -555,6 +556,11 @@ pub(crate) struct LitShared {
     pub(crate) area_heroes: [Option<Mat4>; MAX_HERO_LIGHTS],
     /// Number of hero shadow-map layers selected this frame (0 when none).
     pub(crate) area_hero_capacity: u32,
+    /// Own shadow-map view-projections of the point/spot lights with `shadowMode: 'map'`
+    /// (`local_map.rs`); local layer `i` is shadow-array layer `4 + area_hero_capacity + i`.
+    pub(crate) local_maps: [Option<Mat4>; crate::MAX_LOCAL_MAP_LAYERS],
+    /// Layers the local maps hold (0 without a map light).
+    pub(crate) local_map_capacity: u32,
     /// Mid-tier stochastic shadow frame written by the renderer's prepare (empty until then).
     pub(crate) area_stochastic: AreaStochasticFrame,
     pub(crate) lod_bias: HashMap<u32, i8>,
@@ -771,6 +777,8 @@ impl LitShared {
             shadow_levels: vec![NO_CAMERA_LEVEL; store.capacity() as usize * SHADOW_SECTIONS],
             area_heroes: [None; MAX_HERO_LIGHTS],
             area_hero_capacity: 0,
+            local_maps: [None; crate::MAX_LOCAL_MAP_LAYERS],
+            local_map_capacity: 0,
             area_stochastic: AreaStochasticFrame::empty(),
             lod_bias: HashMap::new(),
             stats: InstanceFrameStats::default(),
@@ -1675,6 +1683,29 @@ impl LitHandle {
     /// state is busy. The sun shadow uses it to cover the whole scene.
     pub fn scene_bounds(&self) -> Option<raa_math::Aabb> {
         self.shared.try_borrow().ok()?.index.root_bounds()
+    }
+
+    /// Every extra shadow-array layer `shadow.csm` renders after the cascades: the area-light
+    /// heroes (slots `0..area_hero_capacity`), then the local maps of the point/spot lights with
+    /// `shadowMode: 'map'`. Layer `4 + i` for entry `i`; `None` entries stay unrendered.
+    pub fn shadow_extra_targets(&self) -> [Option<Mat4>; crate::MAX_SHADOW_EXTRA_LAYERS] {
+        let mut out = [None; crate::MAX_SHADOW_EXTRA_LAYERS];
+        if let Ok(s) = self.shared.try_borrow() {
+            let area = (s.area_hero_capacity as usize).min(MAX_HERO_LIGHTS);
+            out[..area].copy_from_slice(&s.area_heroes[..area]);
+            let local = (s.local_map_capacity as usize).min(crate::MAX_LOCAL_MAP_LAYERS);
+            out[area..area + local].copy_from_slice(&s.local_maps[..local]);
+        }
+        out
+    }
+
+    /// The number of extra layers [`LitHandle::shadow_extra_targets`] describes (area hero
+    /// capacity plus local map capacity).
+    pub fn shadow_extra_capacity(&self) -> u32 {
+        self.shared.try_borrow().map_or(0, |s| {
+            s.area_hero_capacity.min(MAX_HERO_LIGHTS as u32)
+                + s.local_map_capacity.min(crate::MAX_LOCAL_MAP_LAYERS as u32)
+        })
     }
 
     /// The number of hero shadow-map layers the renderer's prepare selected; 0 while the

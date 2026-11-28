@@ -25,7 +25,8 @@ interface Engine {
 `LocalLightDesc` fields are optional. Defaults are `kind: 'point'`,
 `position: [0, 0, 0]`, `direction: [0, 0, -1]`, `color: [1, 1, 1]`,
 `intensity: 2`, `range: 6`, `angleDeg: 35`, `innerAngleDeg: undefined`,
-`size: [1, 1]`, `radius: 0` and `shadows: false`. Position, range, size and
+`size: [1, 1]`, `radius: 0`, `shadows: false`, `gi: true`,
+`shadowMode: 'traced'` and `shadowMinScreenSize: 0`. Position, range, size and
 radius use metres. JS `color` is sRGB in [0, 1] and is converted once to linear
 RGB; intensity is nonnegative. Direction must be finite and nonzero and is
 normalized when accepted.
@@ -56,6 +57,34 @@ order 36), nearest lights first; an untraced face reads as unoccluded. The forwa
 reads the faces with textureLoad and 2x2 PCF (group 1 binding 22; the light record
 carries `slot + 1` in its height lane). Shadow-casting lights are never put in the
 probe-only tier (light cutoff); the per-tile forward budget still applies.
+
+A traced light that moved (position, range or radius) is re-traced in full in the frame
+it moves, before and outside the `facesPerFrame` budget (at most 24 faces), so a torch
+carried every frame keeps a current shadow (about 0.8 ms for one point light's 6 faces at
+128 texels on an RTX 3090). The BVH holds static geometry only: dynamic nodes
+(`setRuntimeNodeDynamic`) cast no traced shadow; use `shadowMode: 'map'` for those.
+
+## Per-light GI and shadow options (dynamic lights)
+
+- `gi: false` (direct only): the light is zeroed in the copy of the light records that the
+  GI passes bind (`gi_local_lights_buffer`: DDGI, spherical GI, NRC, mesh-trace pass), so a
+  moving light causes no probe relight (DDGI counts no light edit) and no GI flicker. It is
+  never put in the probe-only tier. The voxel GI (`raa-gi`) still reads all lights.
+- `shadowMode: 'map'` (point/spot with `shadows: true`): the light's own depth map, rendered
+  every frame by `shadow.csm` from the caster lists (dynamic nodes included) into extra
+  layers of the sun shadow array after the area-light heroes: one layer for a spot (half
+  angle tangent 1.1 tan(outer/2) + 0.02, at most tan 70 degrees), six cube faces for a
+  point light (tangent 1.05). Near 0.05 m, far = range; 4 comparison taps. At most 12 map
+  layers (two point lights, or twelve spots); the array is reallocated only when map lights
+  are added or removed. The light record's height lane holds `-layer`.
+- `shadowMinScreenSize` (impact threshold X in [0, 1], default 0): a map light whose impact
+  is below it uses its traced cube instead. Impact is the area-light hero metric: the
+  fraction of the screen area covered by the range sphere, `min(1, pi r_px^2 / (w h))` with
+  `r_px = f r / sqrt(d^2 - r^2)`, `f = h / (2 tan(fovY / 2))`, and 1 when the eye is inside
+  the range. The highest-impact map lights get the layers first.
+
+Invalid values throw `light.invalid_desc` ("'shadowMode' must be 'traced' or 'map'",
+"shadowMinScreenSize must be in [0, 1]").
 
 ```ts
 interface LocalShadowsDesc { enabled?: boolean; resolution?: number; facesPerFrame?: number }

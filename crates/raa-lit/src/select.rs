@@ -21,7 +21,7 @@ use crate::prep::{LitDraw, MaterialClass};
 use crate::skin_views::SkinDraw;
 
 /// Number of shadow caster sections after the camera: 4 cascades and 4 hero layers.
-const SHADOW_SECTIONS: usize = 8;
+const SHADOW_SECTIONS: usize = 4 + crate::MAX_SHADOW_EXTRA_LAYERS;
 
 /// The inputs of one [`IdPrep`] camera or cascade preparation.
 pub struct SelectInput<'a> {

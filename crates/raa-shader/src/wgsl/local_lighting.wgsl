@@ -35,8 +35,66 @@ fn raa_local_shadow_face(v: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(5.0, -v.x / a.z, -v.y / a.z, a.z);
 }
 
+// Own shadow map of a `shadowMode: 'map'` point/spot light (lane 60 = -layer of the sun shadow
+// array): layers rendered by shadow.csm after the area heroes with the hero projection
+// (raa-lit local_map_view_proj: perspective_rh_zo, near RAA_AREA_HERO_NEAR, far = range, basis
+// raa_area_basis of the travel direction). A spot uses one layer whose half-angle tangent is
+// the cone's widened by 10 % plus 0.02 (at most RAA_LOCAL_MAP_MAX_TAN); a point light uses six
+// layers (+X, -X, +Y, -Y, +Z, -Z) of tangent RAA_LOCAL_MAP_CUBE_TAN, picked by the dominant
+// axis. Four comparison taps 1.2 texels apart after a 1.5-texel normal offset; outside the
+// frustum reads lit.
+const RAA_LOCAL_MAP_CUBE_TAN: f32 = 1.05;
+const RAA_LOCAL_MAP_MAX_TAN: f32 = 2.7474774;
+const RAA_LOCAL_MAP_NEAR: f32 = 0.05;
+
+fn raa_local_map_shadow(light: LightGpu, p: vec3<f32>, n: vec3<f32>) -> f32 {
+    var layer = i32(-light.height + 0.5);
+    if u32(layer) >= textureNumLayers(raa_shadow_map) { return 1.0; }
+    let to_p = p - light.position_range.xyz;
+    var axis = light.direction_cos_outer.xyz;
+    var tan_half = RAA_LOCAL_MAP_CUBE_TAN;
+    if light.kind == 0u {
+        let a = abs(to_p);
+        var face = 0;
+        if a.x >= a.y && a.x >= a.z {
+            face = select(1, 0, to_p.x > 0.0);
+            axis = vec3<f32>(sign(to_p.x), 0.0, 0.0);
+        } else if a.y >= a.z {
+            face = select(3, 2, to_p.y > 0.0);
+            axis = vec3<f32>(0.0, sign(to_p.y), 0.0);
+        } else {
+            face = select(5, 4, to_p.z > 0.0);
+            axis = vec3<f32>(0.0, 0.0, sign(to_p.z));
+        }
+        layer += face;
+    } else {
+        let c = clamp(light.direction_cos_outer.w, 1e-4, 1.0);
+        tan_half = min(sqrt(max(1.0 - c * c, 0.0)) / c * 1.1 + 0.02, RAA_LOCAL_MAP_MAX_TAN);
+    }
+    let m = raa_area_basis(axis);
+    let far = max(light.position_range.w, 2.0 * RAA_LOCAL_MAP_NEAR);
+    let res = 1.0 / raa_shadow.params.z;
+    let texel = 2.0 * max(dot(to_p, m[2]), RAA_LOCAL_MAP_NEAR) * tan_half / res;
+    let d = to_p + n * (1.5 * texel);
+    let dz = dot(d, m[2]);
+    if dz <= 1.01 * RAA_LOCAL_MAP_NEAR { return 1.0; }
+    let ndc = vec2<f32>(-dot(d, m[0]), dot(d, m[1])) / (dz * tan_half);
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) { return 1.0; }
+    let depth = far * (dz - RAA_LOCAL_MAP_NEAR) / ((far - RAA_LOCAL_MAP_NEAR) * dz);
+    let o = 0.6 / res;
+    var lit = 0.0;
+    lit += textureSampleCompareLevel(raa_shadow_map, raa_shadow_cmp, uv + vec2<f32>(-o, -o), layer, depth);
+    lit += textureSampleCompareLevel(raa_shadow_map, raa_shadow_cmp, uv + vec2<f32>(o, -o), layer, depth);
+    lit += textureSampleCompareLevel(raa_shadow_map, raa_shadow_cmp, uv + vec2<f32>(-o, o), layer, depth);
+    lit += textureSampleCompareLevel(raa_shadow_map, raa_shadow_cmp, uv + vec2<f32>(o, o), layer, depth);
+    return 0.25 * lit;
+}
+
 fn raa_local_shadow(light: LightGpu, p: vec3<f32>, n: vec3<f32>) -> f32 {
-    if light.kind > 1u || light.height < 0.5 { return 1.0; }
+    if light.kind > 1u { return 1.0; }
+    if light.height < -0.5 { return raa_local_map_shadow(light, p, n); }
+    if light.height < 0.5 { return 1.0; }
     let slot = u32(light.height + 0.5) - 1u;
     let layers = textureNumLayers(raa_local_shadow_map);
     if 6u * slot + 5u >= layers { return 1.0; }
