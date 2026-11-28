@@ -76,6 +76,9 @@ const SKY_STEP: f32 = 0.05;
 const SKY_AGE: u8 = 12;
 /// Age left to an invalidated group: its next updates blend as a running mean from there.
 const RELIGHT_AGE: u8 = 2;
+/// History kept by probes next to an edited (or moving) object, and by those in the wider ring around it.
+const MOVE_AGE: u8 = 16;
+const MOVE_AGE_FAR: u8 = 24;
 /// Age left to the other group of a probe whose light mask grew after a light edit.
 const LATE_AGE: u8 = 8;
 /// Frames after a light edit during which a grown light mask invalidates its probe.
@@ -859,12 +862,10 @@ fn sky_change(a: &[[f32; 4]; 9], b: &[[f32; 4]; 9]) -> f32 {
 }
 
 impl DdgiPass {
-    /// Geometry edits: the probes within two cells of a changed bound restart (every group and
-    /// the depth moments, their classification and relocation redone on that first update and
-    /// their light mask rescanned); those within six cells keep their groups as a prior of
-    /// `RELIGHT_AGE` updates (occlusion and bounces changed). Missed revisions (more than one
-    /// since the last frame, only the last delta is kept) relight the whole volume. Returns the
-    /// probes touched.
+    /// Geometry edits (the bounds of every edit since the last frame): the probes within six cells of a changed
+    /// bound keep their groups and blend toward the new result with a history of `MOVE_AGE` (two cells) or
+    /// `MOVE_AGE_FAR` updates, so an object moved every frame does not restart them. Without a delta the whole
+    /// volume relights. Returns the probes touched.
     fn invalidate_geometry(&mut self, dirty: &[([f32; 3], [f32; 3])], delta: bool) -> u32 {
         if !delta {
             return self.schedule.invalidate_all(GROUP_ALL, RELIGHT_AGE);
@@ -874,25 +875,24 @@ impl DdgiPass {
                 .iter()
                 .any(|(lo, hi)| (0..3).all(|i| p[i] >= lo[i] - margin && p[i] <= hi[i] + margin))
         };
-        let mut restart = Vec::new();
-        let mut relight = Vec::new();
+        // A moving object edits the same area every frame: probes there keep their record and blend toward the new
+        // result with the history of `MOVE_AGE` updates (never restarted, which would replace them by a one-update
+        // estimate each frame and flicker), the wider ring with `MOVE_AGE_FAR`.
+        let mut near_slots = Vec::new();
+        let mut far_slots = Vec::new();
         self.schedule.for_each_probe(|slot, p, spacing| {
             if near(p, 2.0 * spacing) {
-                restart.push(slot);
+                near_slots.push(slot);
             } else if near(p, 6.0 * spacing) {
-                relight.push(slot);
+                far_slots.push(slot);
             }
         });
         let mut n = 0;
-        for slot in restart {
-            self.schedule.restart_slot(slot);
-            n += 1;
+        for slot in near_slots {
+            n += u32::from(self.schedule.invalidate_slot(slot, GROUP_ALL, MOVE_AGE, true));
         }
-        for slot in relight {
-            n += u32::from(
-                self.schedule
-                    .invalidate_slot(slot, GROUP_ALL, RELIGHT_AGE, true),
-            );
+        for slot in far_slots {
+            n += u32::from(self.schedule.invalidate_slot(slot, GROUP_ALL, MOVE_AGE_FAR, true));
         }
         n
     }
@@ -1187,21 +1187,19 @@ impl FeaturePass for DdgiPass {
                 self.ms_per_probe += 0.25 * (sample - self.ms_per_probe);
             }
         }
+        // Every edit since the last frame (several revisions can pass between two frames of a moving object).
+        let logged: Vec<([f32; 3], [f32; 3])> = self
+            .mesh
+            .borrow_mut()
+            .geometry
+            .take_dirty_log()
+            .iter()
+            .map(|b| (b.min, b.max))
+            .collect();
         let mesh = self.mesh.borrow();
         let bounds = mesh.geometry.world_bounds().map(|b| (b.min, b.max));
         let geometry_revision = mesh.geometry.revision;
-        let geometry_dirty: Vec<([f32; 3], [f32; 3])> = if self
-            .geometry_revision
-            .is_some_and(|old| old.wrapping_add(1) == geometry_revision)
-        {
-            mesh.geometry
-                .dirty_bounds
-                .iter()
-                .map(|b| (b.min, b.max))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let geometry_dirty = logged;
         let sky_diffuse = mesh.sky_diffuse;
         let triangles = mesh.geometry.count();
         let traceable = triangles > 0 && mesh.frame.is_some() && mesh.texture_atlas.is_some();
@@ -1234,8 +1232,7 @@ impl FeaturePass for DdgiPass {
         if let Some(old) = self.geometry_revision.replace(geometry_revision)
             && old != geometry_revision
         {
-            invalidated[0] +=
-                self.invalidate_geometry(&geometry_dirty, old.wrapping_add(1) == geometry_revision);
+            invalidated[0] += self.invalidate_geometry(&geometry_dirty, true);
         }
         let floor = MIN_BATCH.min(probes);
         // The ray scratch bounds a dispatch.

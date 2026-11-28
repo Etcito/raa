@@ -300,6 +300,7 @@ impl Schedule {
 
     /// Restarts every group of one slot (age 0: its next update replaces them, depth moments
     /// included) and rescans its light mask; the probe keeps its record and offset.
+    #[allow(dead_code)]
     pub(super) fn restart_slot(&mut self, slot: u32) {
         let slot = slot as usize;
         self.age[slot] = 0;

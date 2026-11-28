@@ -172,6 +172,9 @@ pub(super) struct Geometry {
     bounds: Vec<TriangleBounds>,
     part_bounds: Vec<Option<Bounds>>,
     pub(super) dirty_bounds: Vec<Bounds>,
+    /// Bounds changed by every update since a consumer last took them (`take_dirty_log`): unlike `dirty_bounds` (the
+    /// latest update only) it survives several updates between two frames of a consumer.
+    pub(super) dirty_log: Vec<Bounds>,
     triangles: Vec<TraceTriangle>,
     vertices: Vec<TraceVertex>,
     bvh: Bvh,
@@ -190,6 +193,10 @@ pub(super) struct Geometry {
 }
 
 impl Geometry {
+    pub(super) fn take_dirty_log(&mut self) -> Vec<Bounds> {
+        std::mem::take(&mut self.dirty_log)
+    }
+
     pub fn count(&self) -> u32 {
         self.triangles.len() as u32
     }
@@ -391,6 +398,10 @@ impl Geometry {
             }
         }
         self.parts = parts;
+        for i in 0..self.dirty_bounds.len() {
+            let b = self.dirty_bounds[i];
+            record_dirty(&mut self.dirty_log, Some(b));
+        }
         self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
