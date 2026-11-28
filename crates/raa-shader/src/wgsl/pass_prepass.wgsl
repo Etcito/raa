@@ -3,9 +3,13 @@
 // S43: the prepass variant that evaluates the deform slot again at `time - dt` for the
 // previous world position. Only this pass sets the bit (`VARIANT_FLAG_MOTION_DEFORM`).
 const RAA_VARIANT_MOTION_DEFORM: u32 = 0x20000000u;
+// raa-lit's forward depth pre-draw (`VARIANT_FLAG_DEPTH_ONLY`, colour write mask empty): the
+// fragment returns before the material. The composer clears the bit when the material or a slot
+// can discard, so coverage always matches the forward shading.
+const RAA_VARIANT_DEPTH_ONLY: u32 = 0x1000000u;
 
 struct RaaVaryings {
-    @builtin(position) clip: vec4<f32>,
+    @invariant @builtin(position) clip: vec4<f32>,
     @location(0) world_position: vec3<f32>,
     @location(1) local_position: vec3<f32>,
     @location(2) normal: vec3<f32>,
@@ -168,6 +172,9 @@ fn raa_pass_encode_srgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> RaaPrepassTargets {
+    if ((RAA_VARIANT_FLAGS & RAA_VARIANT_DEPTH_ONLY) != 0u) {
+        return RaaPrepassTargets(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
+    }
     let in = raa_pass_material_input(v, front_facing);
     let s = raa_pass_material(in, v.instance_index);
     let n = normalize((raa_frame.view * vec4<f32>(s.normal, 0.0)).xyz);

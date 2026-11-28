@@ -10,8 +10,8 @@ use crate::registry::MaterialFnRegistry;
 use crate::{
     CLOUD_SHADOW_WGSL, DEPTH_WGSL, LIB_WGSL, LOCAL_LIGHTING_WGSL, PASS_FORWARD_WGSL,
     PASS_FURSHELL_WGSL, PASS_PREPASS_WGSL, PASS_SHADOW_WGSL, PASS_TRANSPARENT_WGSL,
-    PASS_VG_GBUFFER_WGSL, PASS_VG_SHADE_WGSL, PRELUDE_WGSL, VARIANT_FLAG_FORWARD_LAYERS,
-    VG_SURFACE_WGSL,
+    PASS_VG_GBUFFER_WGSL, PASS_VG_SHADE_WGSL, PRELUDE_WGSL, VARIANT_FLAG_DEPTH_ONLY,
+    VARIANT_FLAG_FORWARD_LAYERS, VG_SURFACE_WGSL,
 };
 
 /// Inserted after the material function when it defines no `material_vertex`.
@@ -265,6 +265,14 @@ impl Composer {
             winners.push(p);
         }
 
+        // A depth-only prepass keeps its material when anything it composes can discard.
+        let may_discard =
+            entry.wgsl.contains("discard") || winners.iter().any(|p| p.wgsl.contains("discard"));
+        let flags = if key.pass == PassKind::Prepass && may_discard {
+            key.flags & !VARIANT_FLAG_DEPTH_ONLY
+        } else {
+            key.flags
+        };
         let mut out = String::new();
         out.push_str(&format!(
             "// raa variant: pass {:?}, msaa {}, flags {:#x}, slots {:016x}\n",
@@ -330,7 +338,7 @@ impl Composer {
         let pass = format!(
             "const RAA_MSAA: u32 = {}u;\nconst RAA_VARIANT_FLAGS: u32 = {}u;\n\n{}",
             key.msaa,
-            key.flags,
+            flags,
             bake.map_or(body, Cow::Borrowed)
         );
         section(&mut out, &format!("pass {:?}", key.pass), &pass);

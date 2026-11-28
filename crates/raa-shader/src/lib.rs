@@ -195,6 +195,14 @@ pub const VARIANT_FLAG_FORWARD_LAYER_SIGNALS: u32 = 1 << 26;
 /// [`VARIANT_FLAG_FORWARD_LAYER_SIGNALS`]). Ignored without the layers bit.
 pub const VARIANT_FLAG_FORWARD_LAYER_INTERLACED: u32 = 1 << 25;
 
+/// [`VariantKey::flags`] bit of a [`PassKind::Prepass`] variant drawn depth-only (raa-lit's
+/// forward depth pre-draw: colour write mask empty). `pass_prepass.wgsl` tests it as
+/// `RAA_VARIANT_DEPTH_ONLY` and returns before the material, so the fragment does no work. The
+/// composer clears it from `RAA_VARIANT_FLAGS` when the material function or a slot provider
+/// contains `discard` (the material must run so coverage matches the forward shading); the
+/// vertex stage is the same either way.
+pub const VARIANT_FLAG_DEPTH_ONLY: u32 = 1 << 24;
+
 /// The forward pass body of a layers variant of `flags`: [`PASS_FORWARD_WGSL`] up to its
 /// `fs_main`, then [`OPAQUE_LAYERS_WGSL`] and the layers `fs_main` selected by
 /// [`VARIANT_FLAG_FORWARD_LAYER_INTERLACED`] (five targets), else

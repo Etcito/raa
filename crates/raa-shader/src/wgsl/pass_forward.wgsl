@@ -1,7 +1,7 @@
 // RAA forward pass (S11): opaque shading to the HDR target, MSAA.
 
 struct RaaVaryings {
-    @builtin(position) clip: vec4<f32>,
+    @invariant @builtin(position) clip: vec4<f32>,
     @location(0) world_position: vec3<f32>,
     @location(1) local_position: vec3<f32>,
     @location(2) normal: vec3<f32>,

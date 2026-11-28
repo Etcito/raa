@@ -5,11 +5,19 @@
 //!   `Prepass` shader variants into the pipeline targets `depth` (Depth32Float, Less,
 //!   cleared to 1.0), `normal`, `material` and `motion` (Rgba16Float, cleared to zero).
 //! - `forward` (order 60, required): the Opaque and Fur draws with the `Forward` variants
-//!   into an MSAA HDR_FORMAT colour target and an MSAA Depth32Float target (Less, cleared to
-//!   1.0) of `LitOptions::msaa` samples, created on resize, then the enabled forward
-//!   contributors by order; the colour is cleared to the background (as HDR) and resolved
-//!   into `hdr.dst()`, then the chain swaps. With 1 sample the pass renders straight into
+//!   into an MSAA HDR_FORMAT colour target and an MSAA Depth32Float target (cleared to 1.0)
+//!   of `LitOptions::msaa` samples, created on resize, then the enabled forward contributors
+//!   by order; the colour is cleared to the background (as HDR) and resolved into
+//!   `hdr.dst()`, then the chain swaps. With 1 sample the pass renders straight into
 //!   `hdr.dst()` (no MSAA colour, no resolve) with a single-sample depth of its own.
+//!   The camera recording shades each visible opaque sample once: it first draws the
+//!   ordinary (non-foliage) draws depth-only with their `Prepass` variants
+//!   (`VARIANT_FLAG_DEPTH_ONLY`: the fragment skips the material unless it can discard) at
+//!   the pass's sample count (Less, written), then shades them with depth Equal and no depth
+//!   write, so a hidden fragment never runs the lighting. Both variants mark the clip
+//!   position `@invariant`, so their depths are bit-identical. Foliage draws (fragment depth
+//!   from their own surface resolve) are drawn afterwards with Less, as before; the
+//!   contributors see the same depth as before.
 //!
 //! Both passes bind group 0 (the renderer's frame bind group) and group 1 (the pipeline's
 //! lighting resources) once, then draw each prepared draw with the variant of its material
@@ -33,9 +41,9 @@ use raa_pipeline::{
     RecordCtx, Targets,
 };
 use raa_shader::{
-    LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, PassKind, VARIANT_FLAG_FORWARD_LAYER_INTERLACED,
-    VARIANT_FLAG_FORWARD_LAYER_SIGNALS, VARIANT_FLAG_FORWARD_LAYERS, VARIANT_FLAG_NO_AREA_LIGHTS,
-    VariantKey,
+    LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, PassKind, VARIANT_FLAG_DEPTH_ONLY,
+    VARIANT_FLAG_FORWARD_LAYER_INTERLACED, VARIANT_FLAG_FORWARD_LAYER_SIGNALS,
+    VARIANT_FLAG_FORWARD_LAYERS, VARIANT_FLAG_NO_AREA_LIGHTS, VariantKey,
 };
 
 use crate::handle::{DrawMemo, LitHandle, PipelineSpec};
@@ -164,6 +172,15 @@ fn depth_state() -> wgpu::DepthStencilState {
     }
 }
 
+/// Depth32Float, read only, compare Equal: the forward shading over its depth pre-draw.
+fn depth_equal_state() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::Equal),
+        ..depth_state()
+    }
+}
+
 /// An opaque colour target of `format` (no blending).
 fn color_target(format: wgpu::TextureFormat) -> Option<wgpu::ColorTargetState> {
     Some(wgpu::ColorTargetState {
@@ -181,9 +198,16 @@ struct Specs {
 
 impl Specs {
     fn new(color_targets: Vec<Option<wgpu::ColorTargetState>>) -> Specs {
+        Specs::with_depth(color_targets, depth_state())
+    }
+
+    fn with_depth(
+        color_targets: Vec<Option<wgpu::ColorTargetState>>,
+        depth: wgpu::DepthStencilState,
+    ) -> Specs {
         let culled = PipelineSpec {
             color_targets,
-            depth: Some(depth_state()),
+            depth: Some(depth),
             cull: Some(wgpu::Face::Back),
             alpha_to_coverage: false,
             extra_layout: None,
@@ -222,6 +246,17 @@ enum DrawPipeline {
     Foliage,
 }
 
+/// Which draws of the drawn classes one [`draw_lit`] call records.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Draws {
+    /// Every draw.
+    All,
+    /// The ordinary draws only (forward depth pre-draw and depth-equal shading).
+    Ordinary,
+    /// The foliage draws only (forward, after the depth-equal shading).
+    Foliage,
+}
+
 /// Selects the pipeline of one draw from its material's foliage mode: a material with an
 /// associated generation draws through the additive foliage pipeline (and binds its group
 /// 2), an ordinary material keeps the unchanged S10 path.
@@ -241,6 +276,9 @@ fn select_pipeline(foliage_mode: Option<u32>) -> DrawPipeline {
 /// group 1 and that generation's group 2 ([`LitHandle::bind_foliage`]); every other draw
 /// keeps the ordinary pipeline and the caller's group 1. The caller's full group 1 is
 /// restored after a foliage draw (only then), so a scene without foliage binds exactly as before.
+/// `draws` filters ordinary/foliage draws; `surface` (camera forward and its depth pre-draw)
+/// skips the surfaces of wireframe-only instances in editor surface-edges mode.
+#[allow(clippy::too_many_arguments)]
 fn draw_lit<'a>(
     gpu: &GpuContext,
     pass: &mut wgpu::RenderPass<'a>,
@@ -250,6 +288,8 @@ fn draw_lit<'a>(
     msaa: u32,
     specs: &Specs,
     source: DrawSource<'_>,
+    draws: Draws,
+    surface: bool,
 ) -> Result<(), RaaError> {
     let (capture, extra_flags) = match source {
         DrawSource::Camera(flags) => (None, flags),
@@ -258,19 +298,24 @@ fn draw_lit<'a>(
     // One memo per pass recording: repeated sub-meshes of a lit mesh, pipelines and the id
     // stream are bound once, and the hashed pipeline cache is consulted once per variant.
     let mut memo = DrawMemo::new();
-    let edges_only = kind == PassKind::Forward && capture.is_none() && lit.surface_edges_only();
+    let surface = surface && capture.is_none();
+    let edges_only = surface && lit.surface_edges_only();
     // Set by a foliage draw (opaque group 1 + group 2 bound, pipeline outside the memo).
     let mut foliage_bound = false;
     for class in DRAWN_CLASSES {
         let camera_draws;
-        let draws = if let Some(view) = capture {
+        let list = if let Some(view) = capture {
             view.select.draws(class)
         } else {
             camera_draws = lit.camera_draws(class);
             &camera_draws
         };
-        for d in draws {
+        for d in list {
             if d.instance_count == 0 {
+                continue;
+            }
+            let foliage = select_pipeline(lit.foliage_mode(d.material)) == DrawPipeline::Foliage;
+            if (draws == Draws::Ordinary && foliage) || (draws == Draws::Foliage && !foliage) {
                 continue;
             }
             let indices = lit.bind_selected_mesh_memo(pass, d.mesh, capture, &mut memo)?;
@@ -290,7 +335,7 @@ fn draw_lit<'a>(
                 msaa,
                 flags: flags | forward_flags | lit.material_variant_flags(d.material) | extra_flags,
             };
-            if select_pipeline(lit.foliage_mode(d.material)) == DrawPipeline::Foliage {
+            if foliage {
                 let pipeline =
                     lit.pipeline_for_foliage(gpu, d.mesh, key, specs.get(flags), d.material)?;
                 pass.set_pipeline(&pipeline);
@@ -307,7 +352,7 @@ fn draw_lit<'a>(
                 memo.set_pipeline(pass, &pipeline);
             }
             let instances = d.first_instance..d.first_instance.saturating_add(d.instance_count);
-            if kind == PassKind::Forward && capture.is_none() {
+            if surface {
                 lit.draw_surface_instances_with(pass, indices, instances, edges_only);
             } else {
                 pass.draw_indexed(indices, 0, instances);
@@ -451,6 +496,8 @@ impl FeaturePass for Prepass {
             1,
             &self.specs,
             DrawSource::Camera(extra_flags),
+            Draws::All,
+            false,
         )
     }
 }
@@ -508,6 +555,9 @@ struct ForwardPass {
     contributors: Contributors,
     msaa: u32,
     specs: Specs,
+    /// Camera depth pre-draw (colour write mask empty, Less, written) and depth-equal shading.
+    depth_specs: Specs,
+    equal_specs: Specs,
     /// Created by `resize` (before the first prepare and on every size change).
     targets: Option<ForwardTargets>,
     reflection: Option<PlanarTargets>,
@@ -527,6 +577,14 @@ impl ForwardPass {
             contributors,
             msaa,
             specs: Specs::new(vec![color_target(HDR_FORMAT)]),
+            // Same attachment state as the pass (WebGPU), nothing written: the Prepass
+            // fragment's location 0 (normal, f32) is a valid output for the HDR target.
+            depth_specs: Specs::new(vec![Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::empty(),
+            })]),
+            equal_specs: Specs::with_depth(vec![color_target(HDR_FORMAT)], depth_equal_state()),
             targets: None,
             reflection: None,
             combined_lighting: None,
@@ -642,6 +700,8 @@ impl ForwardPass {
                 self.msaa,
                 specs,
                 DrawSource::Camera(area_free_flag(ctx.lighting) | mode.variant_flags()),
+                Draws::All,
+                true,
             )?;
         }
         let em = &self.layers[ForwardLayers::EM];
@@ -714,6 +774,8 @@ impl ForwardPass {
             1,
             &self.specs,
             DrawSource::Reflection(view),
+            Draws::All,
+            false,
         )
     }
 
@@ -754,6 +816,34 @@ impl ForwardPass {
         });
         pass.set_bind_group(0, frame, &[]);
         pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+        // Depth pre-draw: the ordinary draws' depth-only Prepass variants (same clip position;
+        // the material runs only when it can discard) at this pass's sample count, no colour
+        // written.
+        draw_lit(
+            ctx.gpu,
+            &mut pass,
+            &self.lit,
+            ctx.lighting,
+            PassKind::Prepass,
+            self.msaa,
+            &self.depth_specs,
+            DrawSource::Camera(VARIANT_FLAG_DEPTH_ONLY),
+            Draws::Ordinary,
+            true,
+        )?;
+        let flags = area_free_flag(ctx.lighting);
+        draw_lit(
+            ctx.gpu,
+            &mut pass,
+            &self.lit,
+            ctx.lighting,
+            PassKind::Forward,
+            self.msaa,
+            &self.equal_specs,
+            DrawSource::Camera(flags),
+            Draws::Ordinary,
+            true,
+        )?;
         draw_lit(
             ctx.gpu,
             &mut pass,
@@ -762,7 +852,9 @@ impl ForwardPass {
             PassKind::Forward,
             self.msaa,
             &self.specs,
-            DrawSource::Camera(area_free_flag(ctx.lighting)),
+            DrawSource::Camera(flags),
+            Draws::Foliage,
+            true,
         )?;
         if let (Some(view), Some(targets)) = (reflection, self.reflection.as_ref()) {
             targets.composite(ctx.gpu, &mut pass, &self.lit, view);
