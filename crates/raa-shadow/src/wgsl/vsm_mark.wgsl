@@ -1,6 +1,7 @@
 // VSM page marking (crates/raa-shadow/src/vsm_gpu.rs): every pixel of the prepass depth (one thread per 4 x 4 block) picks
 // its clipmap level (as raa_csm_vsm_level in vsm.wgsl) and sets the request bits of the pages its
-// filter footprint touches (the page of each corner of a MARGIN-texel square). Bit layout: level
+// filter footprint touches (the page of each corner of a MARGIN-texel square), at its level and
+// at the filter level FILTER_UP levels coarser. Bit layout: level
 // l, toroidal entry (y & 127) * 128 + (x & 127), word l * 512 + entry / 32.
 
 struct VsmMark {
@@ -43,10 +44,16 @@ struct Req {
     level: u32,
     p0: vec2<i32>,
     p1: vec2<i32>,
+    // The same square at the filter level (level + FILTER_UP, see vsm.wgsl): wide penumbrae
+    // are filtered there.
+    q0: vec2<i32>,
+    q1: vec2<i32>,
 }
 
+const FILTER_UP: u32 = 2u;
+
 fn pixel_request(px: vec2<u32>, size: vec2<u32>) -> Req {
-    var r = Req(0xffffffffu, vec2<i32>(0), vec2<i32>(0));
+    var r = Req(0xffffffffu, vec2<i32>(0), vec2<i32>(0), vec2<i32>(0), vec2<i32>(0));
     let d = textureLoad(depth_tex, vec2<i32>(px), 0);
     if (d >= 1.0) {
         return r;
@@ -67,7 +74,17 @@ fn pixel_request(px: vec2<u32>, size: vec2<u32>) -> Req {
     let m = mark.params2.x;
     r.p0 = vec2<i32>(floor((uv - vec2<f32>(m)) / 128.0));
     r.p1 = vec2<i32>(floor((uv + vec2<f32>(m)) / 128.0));
+    let quv = uv / f32(1u << FILTER_UP);
+    r.q0 = vec2<i32>(floor((quv - vec2<f32>(m)) / 128.0));
+    r.q1 = vec2<i32>(floor((quv + vec2<f32>(m)) / 128.0));
     return r;
+}
+
+fn request_box(level: u32, p0: vec2<i32>, p1: vec2<i32>) {
+    request(level, p0);
+    if (p1.x != p0.x) { request(level, vec2<i32>(p1.x, p0.y)); }
+    if (p1.y != p0.y) { request(level, vec2<i32>(p0.x, p1.y)); }
+    if (p1.x != p0.x && p1.y != p0.y) { request(level, p1); }
 }
 
 // One thread per BLOCK x BLOCK pixels; a request equal to the thread's previous one is
@@ -77,7 +94,7 @@ const BLOCK: u32 = 4u;
 @compute @workgroup_size(8, 8, 1)
 fn cs_mark(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(depth_tex);
-    var last = Req(0xffffffffu, vec2<i32>(0), vec2<i32>(0));
+    var last = Req(0xffffffffu, vec2<i32>(0), vec2<i32>(0), vec2<i32>(0), vec2<i32>(0));
     for (var k = 0u; k < BLOCK * BLOCK; k = k + 1u) {
         let px = id.xy * BLOCK + vec2<u32>(k % BLOCK, k / BLOCK);
         if (px.x >= size.x || px.y >= size.y) {
@@ -88,9 +105,10 @@ fn cs_mark(@builtin(global_invocation_id) id: vec3<u32>) {
             continue;
         }
         last = r;
-        request(r.level, r.p0);
-        if (r.p1.x != r.p0.x) { request(r.level, vec2<i32>(r.p1.x, r.p0.y)); }
-        if (r.p1.y != r.p0.y) { request(r.level, vec2<i32>(r.p0.x, r.p1.y)); }
-        if (r.p1.x != r.p0.x && r.p1.y != r.p0.y) { request(r.level, r.p1); }
+        request_box(r.level, r.p0, r.p1);
+        let up = r.level + FILTER_UP;
+        if (up < u32(mark.params.y)) {
+            request_box(up, r.q0, r.q1);
+        }
     }
 }

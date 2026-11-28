@@ -81,7 +81,8 @@ in a per-pixel rotated Poisson disk, turned with the camera jitter under TAA, sl
 **Virtual shadow map** (`mode: 'vsm'`): 8 clipmap levels of 16384 x 16384 virtual texels around the
 camera in sun space (level 0 texel 1/1024 m, doubling per level), paged in 128 x 128 pages. A
 compute pass marks, from the prepass depth, the pages each visible pixel needs at the level whose
-texel matches its footprint (about one texel per pixel), plus the pages its filter reaches; the
+texel matches its footprint (about one texel per pixel), plus the pages its filter reaches, at
+that level and at the filter level two levels coarser; the
 request set is read back asynchronously and the CPU allocates pool pages (free list, then least
 recently requested), renders the missing pages through up to 3 windows of 16 x 16 pages per frame
 (the cascade layers; both the lit and the virtualized-geometry casters, scissored to the pages)
@@ -90,7 +91,9 @@ while the sun and the casters stay still; a moved caster re-renders only the pag
 light-space footprint, a new sun direction or scene depth range drops them all. Until a page is
 resident the pixel uses the finest resident coarser level, else a scene-wide coarse map in
 cascade layer 3 (also used by the sun shafts and planar reflections). Same PCSS kernel as the
-cascades with per-tap page translation, minimum radius 1.5 texels (the `filter` floor is not used).
+cascades with page translation through the 2 x 2 page block around the kernel (read once per
+pixel), minimum radius 1.5 texels (the `filter` floor is not used); a penumbra wider than 16
+texels is filtered at the filter level (same world radius, 16x fewer texels, no 48-texel cap).
 
 A wrong type, a non-finite number or a value outside its range throws `shadow.invalid` naming the
 field.
