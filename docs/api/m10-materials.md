@@ -29,6 +29,8 @@ nothing). Colours are sRGB [0, 1] except `emissive`, which is linear and unbound
 | `blend` | `opaque` | `opaque`, `transparent`, `transmissive` |
 | `doubleSided` | false | disables culling |
 | `castShadow` | true | |
+| `shadowOnly` | false | Shadow only (flag 1024): never drawn for the camera, planar reflections or the virtualized camera view; still drawn by every shadow caster pass (sun cascades, VSM pages, spot shadows, classic and virtualized geometry) and still an occluder for mesh rays (GI, traced shadows). |
+| `shadowDoubleSided` | false | Both faces cast shadows (flag 2048): no back-face culling in the shadow caster passes only, classic and virtualized; the camera draw keeps `doubleSided`. |
 | `color` | [0.8, 0.8, 0.8] | sRGB |
 | `roughness` | 0.5 | [0, 1] |
 | `metallic` | 0 | [0, 1] |

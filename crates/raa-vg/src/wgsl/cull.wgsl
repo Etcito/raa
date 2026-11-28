@@ -267,6 +267,14 @@ fn instance_movable(instance: VgInstance) -> bool {
 
 // Whether this view draws an instance at all.
 fn view_draws(instance: VgInstance) -> bool {
+    if view.shadow_view != 0u && (instance.ids.z & CASTS_SHADOW) == 0u {
+        return false;
+    }
+    // Shadow-only instances are drawn by the shadow views and kept as GI voxel occluders.
+    if view.shadow_view == 0u && view.instance_filter != INSTANCES_GI
+        && (instance.ids.z & SHADOW_ONLY) != 0u {
+        return false;
+    }
     switch view.instance_filter {
         case INSTANCES_STATIC: {
             return !instance_movable(instance);

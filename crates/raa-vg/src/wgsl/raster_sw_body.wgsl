@@ -90,7 +90,7 @@ fn main(
                 screen[local_vertex(packed, 1u)],
                 screen[local_vertex(packed, 2u)],
                 encode_id(visible_index, lane),
-                instance_two_sided(instance),
+                instance_two_sided(instance, view.shadow_view != 0u),
             );
         }
         // The next cluster reuses the vertex memory.

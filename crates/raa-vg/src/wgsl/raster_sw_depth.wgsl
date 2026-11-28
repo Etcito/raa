@@ -34,8 +34,13 @@ SOFTWARE.
 @group(2) @binding(7) var<storage, read_write> shadow_depth: array<atomic<u32>>;
 
 // Keeps the nearest depth. The view is orthographic with depth running 0 at the light's side
-// to 1 at the far side, so anything past either side is left out.
-fn write_visibility(index: u32, depth: f32, id: u32) {
+// to 1 at the far side: anything past the far side is left out, and a shadow map pancakes
+// what lies before the light's side onto it (depth 0), as the classic shadow pass does.
+fn write_visibility(index: u32, raw_depth: f32, id: u32) {
+    var depth = raw_depth;
+    if view.shadow_view != 0u {
+        depth = max(depth, 0.0);
+    }
     if depth < 0.0 || depth >= RAA_DEPTH_FAR {
         return;
     }

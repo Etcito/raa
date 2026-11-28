@@ -66,6 +66,10 @@ struct PassView {
     receiver_planes: array<vec4<f32>, 6>,
     // Towards the light, for a shadow view.
     eye_light: vec3<f32>,
+    // 1 for a shadow map: draws only the instances flagged CASTS_SHADOW, and casters on the
+    // light's side of the near plane are pancaked onto it (depth 0) instead of clipped, as
+    // the classic shadow pass does (pass_shadow.wgsl).
+    shadow_view: u32,
 }
 
 // Twins of `InstanceFilter` in vg/culling.rs.
@@ -83,6 +87,9 @@ const CASTS_SHADOW: u32 = 4u;
 const MOVABLE: u32 = 8u;
 // Twin of INSTANCE_GI in vg/scene.rs: a raa-gi voxel member.
 const GI_MEMBER: u32 = 16u;
+// Twins of INSTANCE_SHADOW_DOUBLE_SIDED and INSTANCE_SHADOW_ONLY in vg/scene.rs.
+const SHADOW_DOUBLE_SIDED: u32 = 32u;
+const SHADOW_ONLY: u32 = 64u;
 
 // Written by the cull passes. Atomic view of `CullStateRead`.
 struct CullState {
@@ -286,8 +293,10 @@ fn instance_max_scale(i: VgInstance) -> f32 {
     return max(length(i.model[0].xyz), max(length(i.model[1].xyz), length(i.model[2].xyz)));
 }
 
-fn instance_two_sided(i: VgInstance) -> bool {
-    return (i.ids.z & DOUBLE_SIDED) != 0u;
+// Whether back faces are drawn; a shadow view also draws them for SHADOW_DOUBLE_SIDED.
+fn instance_two_sided(i: VgInstance, shadow: bool) -> bool {
+    let bits = select(DOUBLE_SIDED, DOUBLE_SIDED | SHADOW_DOUBLE_SIDED, shadow);
+    return (i.ids.z & bits) != 0u;
 }
 
 // PCG hash: a well-distributed 32-bit integer hash (solstice common/math.wgsl).

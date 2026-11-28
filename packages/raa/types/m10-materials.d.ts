@@ -55,6 +55,10 @@ export interface SurfaceMaterialDesc {
   doubleSided?: boolean;
   /** Casts sun shadows. Default true. */
   castShadow?: boolean;
+  /** Shadow only (flag 1024): invisible to the camera, still casts shadows (and still blocks mesh rays). Default false. */
+  shadowOnly?: boolean;
+  /** Both faces cast shadows (flag 2048), whatever the camera culling. Default false. */
+  shadowDoubleSided?: boolean;
   /**
    * Base word offset of the material's data block (`Engine.addMaterialData`), read by its
    * material function through `raa_material_data_base(in.record)`. Default 0 (no data: the

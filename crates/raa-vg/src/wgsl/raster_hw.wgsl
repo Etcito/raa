@@ -63,11 +63,15 @@ fn cluster_vertex(vertex_index: u32, instance_index: u32) -> VertexOutput {
     // homogeneous coordinates keeps it right for triangles that cross behind the camera
     // (Olano and Greer 1997).
     let facing = determinant(mat3x3<f32>(clip[0].xyw, clip[1].xyw, clip[2].xyw));
-    if facing <= 0.0 && !instance_two_sided(instance) {
+    if facing <= 0.0 && !instance_two_sided(instance, view.shadow_view != 0u) {
         return out;
     }
 
     out.position = clip[vertex_index % 3u];
+    // A shadow map pancakes casters before its near plane onto it (pass_shadow.wgsl).
+    if view.shadow_view != 0u {
+        out.position.z = max(out.position.z, 0.0);
+    }
     out.id = encode_id(visible_index, triangle);
     return out;
 }
