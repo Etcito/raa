@@ -349,6 +349,11 @@ fn raa_spherical_blend_diffuse(legacy: vec3<f32>, s: MaterialOutput, c: ShadeCtx
 // not apply), so that the layers carry vis as a separate factor.
 var<private> raa_probe_sky_unoccluded: bool;
 var<private> raa_probe_sky_luma: f32;
+// Set by blended (OIT) fragments (pass_transparent.wgsl) before their shadow lookups: the sun
+// shadow provider may answer with a cheaper kernel (the virtual shadow map skips its blocker
+// search, crates/raa-shadow/src/wgsl/vsm.wgsl). Overdraw of transparent layers makes the full
+// PCSS there cost more than it shows.
+var<private> raa_shadow_lite: bool;
 
 fn raa_probe_sky_environment(env: vec3<f32>, sky_diffuse: vec3<f32>, c: ShadeCtx) -> vec3<f32> {
     if !raa_feature_enabled(RAA_DDGI_GI_FEATURE) || c.spherical_diffuse.w <= 0.0 { return env; }

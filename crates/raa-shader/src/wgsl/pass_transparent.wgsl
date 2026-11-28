@@ -274,6 +274,7 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) {
     let s = raa_pass_material(in, v.instance_index);
     let unlit = raa_pass_unlit(in.record);
     let transmissive = s.transmission > 0.0;
+    raa_shadow_lite = true;
     let shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
     let ao = select(raa_slot_ao(in.frag_coord), 1.0, transmissive);
     var c = raa_pass_shade_ctx(s, in, ao, shadow);

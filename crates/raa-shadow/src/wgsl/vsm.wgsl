@@ -165,6 +165,21 @@ fn raa_csm_vsm_poisson_pcf(level: u32, uv: vec2<f32>, depth: f32, r: f32, rotati
     return pcf / 32.0;
 }
 
+// Cheap visibility for blended (OIT) fragments: no blocker search, the five-tap probe of the
+// tent grid at a fixed 1.5-texel radius, all taps inside the home page.
+fn raa_csm_vsm_lite(level: u32, uv: vec2<f32>, depth: f32, home_in: RaaVsmPage) -> f32 {
+    var home = home_in;
+    let local = clamp(uv - vec2<f32>(home.page * 128), vec2<f32>(2.0), vec2<f32>(126.0));
+    let c = vec2<f32>(home.page * 128) + local;
+    home.inside = true;
+    let r = 1.5;
+    return 0.2 * (raa_csm_vsm_cmp(level, c, depth, home)
+        + raa_csm_vsm_cmp(level, c + vec2<f32>(r, r), depth, home)
+        + raa_csm_vsm_cmp(level, c + vec2<f32>(-r, r), depth, home)
+        + raa_csm_vsm_cmp(level, c + vec2<f32>(r, -r), depth, home)
+        + raa_csm_vsm_cmp(level, c + vec2<f32>(-r, -r), depth, home));
+}
+
 // Sun visibility from the virtual shadow map: the finest resident level at or above the
 // pixel's level (the coarse scene map when none is), normal-offset receiver, PCSS.
 fn raa_csm_vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>, view_depth: f32) -> f32 {
@@ -196,6 +211,9 @@ fn raa_csm_vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>, view_
     }
     if (depth <= 0.0 || depth >= 1.0) {
         return 1.0;
+    }
+    if (raa_shadow_lite) {
+        return raa_csm_vsm_lite(level, uv, depth, home);
     }
     let tan_angle = max(tan(raa_frame.sun_dir.w * raa_shadow.params.x), 0.0);
     let min_texels = 1.5;
