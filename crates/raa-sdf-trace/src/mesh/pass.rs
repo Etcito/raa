@@ -5,7 +5,7 @@ use std::{cell::RefCell, rc::Rc, sync::mpsc::sync_channel};
 use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx};
 
-use super::geometry::{ATTRIBUTE_HEADER_BYTES, GEOMETRY_HEADER_BYTES, storage_limit};
+use super::geometry::{ATTRIBUTE_HEADER_BYTES, DirtyBytes, GEOMETRY_HEADER_BYTES, storage_limit};
 use super::{
     COUNTER_COUNT, GRID_DIFFUSE_CAPTURE_WORDS, GRID_DIFFUSE_MAX_CAPTURE_ROWS, GridDiffuseCapture,
     GridDiffuseMode, MeshIndirectGrid, MeshTraceScene, MeshTraceSettings, MeshTraceStats,
@@ -759,15 +759,27 @@ impl DataBuffer {
         true
     }
 
-    fn upload(&mut self, gpu: &GpuContext, revision: u64, bytes: &[u8]) {
+    fn upload(&mut self, gpu: &GpuContext, revision: u64, bytes: &[u8], dirty: &mut DirtyBytes) {
         if self.revision == Some(revision) {
             return;
         }
-        self.ensure_size(gpu, bytes.len() as u64);
-        if !bytes.is_empty() {
-            gpu.queue().write_buffer(&self.buffer, 0, bytes);
+        let resized = self.ensure_size(gpu, bytes.len() as u64);
+        if resized || self.revision.is_none() || dirty.full {
+            if !bytes.is_empty() {
+                gpu.queue().write_buffer(&self.buffer, 0, bytes);
+            }
+        } else {
+            for range in &dirty.ranges {
+                let start = range.start as usize;
+                let end = range.end.min(bytes.len() as u64) as usize;
+                if start < end {
+                    gpu.queue()
+                        .write_buffer(&self.buffer, range.start, &bytes[start..end]);
+                }
+            }
         }
         self.revision = Some(revision);
+        dirty.clear();
     }
 }
 
@@ -795,14 +807,23 @@ impl GeometryBuffers {
     pub(super) fn upload(
         &mut self,
         gpu: &GpuContext,
-        geometry: &super::Geometry,
+        geometry: &mut super::Geometry,
         material_revision: u64,
         material_bytes: &[u8],
     ) -> [wgpu::Buffer; 3] {
-        self.nodes
-            .upload(gpu, geometry.revision, &geometry.node_bytes);
-        self.mesh
-            .upload(gpu, geometry.revision, &geometry.mesh_bytes);
+        let revision = geometry.revision;
+        self.nodes.upload(
+            gpu,
+            revision,
+            &geometry.node_bytes,
+            &mut geometry.node_dirty,
+        );
+        self.mesh.upload(
+            gpu,
+            revision,
+            &geometry.mesh_bytes,
+            &mut geometry.mesh_dirty,
+        );
         // One storage binding: the header holds the material offset in words.
         // In-place material edits never resend the local-space vertex UV stream.
         let material_offset = ATTRIBUTE_HEADER_BYTES + geometry.uv_bytes.len() as u64;

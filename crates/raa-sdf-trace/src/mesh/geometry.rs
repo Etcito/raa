@@ -1,5 +1,7 @@
 //! Triangle input for the shared trace BVH. Refit the world bounds for rigid motion.
 
+use std::ops::Range;
+
 use raa_core::RaaError;
 use raa_math::{Mat4, Vec3};
 
@@ -16,7 +18,7 @@ type TraceVertex = [f32; VERTEX_WORDS];
 type TraceTriangle = [u32; TRIANGLE_WORDS];
 type TriangleBounds = ([f32; 3], [f32; 3]);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Bounds {
     pub(super) min: [f32; 3],
     pub(super) max: [f32; 3],
@@ -59,7 +61,58 @@ fn record_dirty(dirty: &mut Vec<Bounds>, bounds: Option<Bounds>) {
     }
 }
 
+/// Byte ranges rewritten by the latest geometry updates since the GPU last consumed them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct DirtyBytes {
+    pub(super) full: bool,
+    pub(super) ranges: Vec<Range<u64>>,
+}
+
+impl DirtyBytes {
+    pub(super) fn clear(&mut self) {
+        self.full = false;
+        self.ranges.clear();
+    }
+
+    pub(super) fn mark_full(&mut self) {
+        self.full = true;
+        self.ranges.clear();
+    }
+
+    fn add_blocks(&mut self, mut blocks: Vec<u64>, size: u64) {
+        if self.full || blocks.is_empty() {
+            return;
+        }
+        blocks.sort_unstable();
+        let mut start = blocks[0];
+        let mut end = start + size;
+        for &block in &blocks[1..] {
+            if block <= end {
+                end = end.max(block + size);
+            } else {
+                self.ranges.push(start..end);
+                start = block;
+                end = block + size;
+            }
+        }
+        self.ranges.push(start..end);
+        self.ranges.sort_unstable_by_key(|range| range.start);
+        let mut merged: Vec<Range<u64>> = Vec::with_capacity(self.ranges.len());
+        for range in self.ranges.drain(..) {
+            if let Some(last) = merged.last_mut()
+                && range.start <= last.end
+            {
+                last.end = last.end.max(range.end);
+            } else {
+                merged.push(range);
+            }
+        }
+        self.ranges = merged;
+    }
+}
+
 /// One submesh range with the renderer's current material and world transform.
+#[derive(Clone, Copy)]
 pub struct MeshInput<'a> {
     pub key: u64,
     pub mesh: u32,
@@ -113,7 +166,7 @@ fn same_geometry(a: &Part, b: &Part) -> bool {
     (a.id, a.key, a.count, a.vertices, a.indexed) == (b.id, b.key, b.count, b.vertices, b.indexed)
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Geometry {
     parts: Vec<Part>,
     bounds: Vec<TriangleBounds>,
@@ -122,9 +175,16 @@ pub(super) struct Geometry {
     triangles: Vec<TraceTriangle>,
     vertices: Vec<TraceVertex>,
     bvh: Bvh,
+    parents: Vec<u32>,
+    triangle_node: Vec<u32>,
+    triangle_position: Vec<u32>,
+    refit_mark: Vec<u32>,
+    refit_generation: u32,
     pub revision: u64,
     pub mesh_bytes: Vec<u8>,
     pub node_bytes: Vec<u8>,
+    pub(super) mesh_dirty: DirtyBytes,
+    pub(super) node_dirty: DirtyBytes,
     pub uv_bytes: Vec<u8>,
     pub uv_revision: u64,
 }
@@ -257,19 +317,184 @@ impl Geometry {
             triangle_start += part.count;
             vertex_start += part.vertices;
         }
+        let old_vertex_words = self.mesh_bytes.get(..4).map_or(0, |word| {
+            u32::from_le_bytes(word.try_into().expect("vertex stride")) as usize
+        });
         if rebuild {
             self.bvh = if count == 0 {
                 Bvh::default()
             } else {
                 build_bounds(&self.bounds)
             };
+            self.build_index();
+            self.serialize_mesh_full(vertex_words, mesh_size);
+            self.serialize_nodes_full();
+            self.mesh_dirty.mark_full();
+            self.node_dirty.mark_full();
         } else {
-            for i in (0..self.bvh.nodes.len()).rev() {
+            let mut triangle_starts = Vec::new();
+            let mut vertex_starts: Vec<(u64, usize, usize)> = Vec::new();
+            let mut vertex_blocks = Vec::new();
+            let mut leaves = Vec::new();
+            let (mut triangle_start, mut vertex_start) = (0, 0);
+            for (i, part) in parts.iter().enumerate() {
+                if self.parts[i] != *part {
+                    for triangle in triangle_start..triangle_start + part.count {
+                        let position = self.triangle_position[triangle] as u64;
+                        triangle_starts
+                            .push(GEOMETRY_HEADER_BYTES + position * (TRIANGLE_WORDS * 4) as u64);
+                        leaves.push(self.triangle_node[triangle]);
+                    }
+                    if part.vertices != 0 {
+                        let base =
+                            GEOMETRY_HEADER_BYTES + count as u64 * (TRIANGLE_WORDS * 4) as u64;
+                        vertex_starts.push((
+                            base + vertex_start as u64 * (vertex_words * 4) as u64,
+                            vertex_start,
+                            part.vertices,
+                        ));
+                        vertex_blocks.extend((0..part.vertices).map(|vertex| {
+                            base + (vertex_start + vertex) as u64 * (vertex_words * 4) as u64
+                        }));
+                    }
+                }
+                triangle_start += part.count;
+                vertex_start += part.vertices;
+            }
+            let mut nodes = self.dirty_ancestors(&leaves);
+            nodes.sort_unstable_by(|a, b| b.cmp(a));
+            let mut node_starts = Vec::with_capacity(nodes.len());
+            for i in nodes {
                 self.refit(i);
+                self.write_node(i);
+                node_starts.push(i as u64 * (NODE_WORDS * 4) as u64);
+            }
+            self.node_dirty
+                .add_blocks(node_starts, (NODE_WORDS * 4) as u64);
+
+            if old_vertex_words != vertex_words || self.mesh_bytes.len() as u64 != mesh_size {
+                self.serialize_mesh_full(vertex_words, mesh_size);
+                self.mesh_dirty.mark_full();
+            } else {
+                for &start in &triangle_starts {
+                    let triangle =
+                        ((start - GEOMETRY_HEADER_BYTES) / (TRIANGLE_WORDS * 4) as u64) as usize;
+                    self.write_triangle(triangle, start);
+                }
+                for &(start, first, length) in &vertex_starts {
+                    self.write_vertices(first, length, start, vertex_words);
+                }
+                self.mesh_dirty
+                    .add_blocks(triangle_starts, (TRIANGLE_WORDS * 4) as u64);
+                self.mesh_dirty
+                    .add_blocks(vertex_blocks, (vertex_words * 4) as u64);
             }
         }
         self.parts = parts;
+        self.revision = self.revision.wrapping_add(1);
+        Ok(())
+    }
 
+    fn build_index(&mut self) {
+        let nodes = self.bvh.nodes.len();
+        self.parents.clear();
+        self.parents.resize(nodes, u32::MAX);
+        self.triangle_node.clear();
+        self.triangle_node.resize(self.bvh.order.len(), u32::MAX);
+        self.triangle_position.clear();
+        self.triangle_position
+            .resize(self.bvh.order.len(), u32::MAX);
+        self.refit_mark.clear();
+        self.refit_mark.resize(nodes, 0);
+        self.refit_generation = 0;
+        for i in 0..nodes {
+            let node = self.bvh.nodes[i];
+            let first = node.left as usize;
+            if node.count == 0 {
+                if first < nodes {
+                    self.parents[first] = i as u32;
+                }
+                if first + 1 < nodes {
+                    self.parents[first + 1] = i as u32;
+                }
+            } else {
+                for offset in 0..node.count as usize {
+                    let triangle = self.bvh.order[first + offset] as usize;
+                    self.triangle_node[triangle] = i as u32;
+                    self.triangle_position[triangle] = (first + offset) as u32;
+                }
+            }
+        }
+    }
+
+    fn dirty_ancestors(&mut self, leaves: &[u32]) -> Vec<usize> {
+        self.refit_generation = self.refit_generation.wrapping_add(1);
+        if self.refit_generation == 0 {
+            self.refit_mark.fill(0);
+            self.refit_generation = 1;
+        }
+        let generation = self.refit_generation;
+        let mut dirty = Vec::new();
+        for &leaf in leaves {
+            let mut node = leaf as usize;
+            while node < self.refit_mark.len() && self.refit_mark[node] != generation {
+                self.refit_mark[node] = generation;
+                dirty.push(node);
+                let parent = self.parents[node];
+                if parent == u32::MAX {
+                    break;
+                }
+                node = parent as usize;
+            }
+        }
+        dirty
+    }
+
+    fn write_triangle(&mut self, triangle: usize, mut offset: u64) {
+        for word in self.triangles[triangle] {
+            let end = offset as usize + 4;
+            self.mesh_bytes[offset as usize..end].copy_from_slice(&word.to_le_bytes());
+            offset += 4;
+        }
+    }
+
+    fn write_vertices(
+        &mut self,
+        first: usize,
+        length: usize,
+        mut offset: u64,
+        vertex_words: usize,
+    ) {
+        for vertex in &self.vertices[first..first + length] {
+            for &word in &vertex[..vertex_words] {
+                let end = offset as usize + 4;
+                self.mesh_bytes[offset as usize..end].copy_from_slice(&word.to_le_bytes());
+                offset += 4;
+            }
+        }
+    }
+
+    fn write_node(&mut self, index: usize) {
+        let Node {
+            min,
+            max,
+            left,
+            count,
+        } = self.bvh.nodes[index];
+        let offset = index * NODE_WORDS * 4;
+        let words = min
+            .map(f32::to_bits)
+            .into_iter()
+            .chain([left])
+            .chain(max.map(f32::to_bits))
+            .chain([count]);
+        for (i, word) in words.enumerate() {
+            let start = offset + i * 4;
+            self.node_bytes[start..start + 4].copy_from_slice(&word.to_le_bytes());
+        }
+    }
+
+    fn serialize_mesh_full(&mut self, vertex_words: usize, mesh_size: u64) {
         self.mesh_bytes.clear();
         self.mesh_bytes.reserve_exact(mesh_size as usize);
         self.mesh_bytes
@@ -285,7 +510,9 @@ impl Geometry {
             }
         }
         debug_assert_eq!(self.mesh_bytes.len() as u64, mesh_size);
+    }
 
+    fn serialize_nodes_full(&mut self) {
         self.node_bytes.clear();
         self.node_bytes
             .reserve_exact(self.bvh.nodes.len() * NODE_WORDS * 4);
@@ -306,8 +533,6 @@ impl Geometry {
                 self.node_bytes.extend_from_slice(&word.to_le_bytes());
             }
         }
-        self.revision = self.revision.wrapping_add(1);
-        Ok(())
     }
 
     fn write_part(
@@ -648,5 +873,156 @@ mod tests {
         geometry.update(&[input], 128, 64).unwrap();
         assert_eq!(geometry.triangles[0][3], 7);
         assert!(geometry.uv_bytes.is_empty());
+    }
+
+    fn strip(offset: f32, triangles: usize) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>) {
+        let mut positions = Vec::with_capacity(triangles * 3);
+        let mut indices = Vec::with_capacity(triangles * 3);
+        for triangle in 0..triangles {
+            let x = offset + triangle as f32;
+            positions.extend([[x, 0.0, 0.0], [x + 0.5, 0.0, 0.0], [x, 1.0, 0.0]]);
+            let base = (triangle * 3) as u32;
+            indices.extend([base, base + 1, base + 2]);
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; triangles * 3];
+        (positions, normals, indices)
+    }
+
+    #[test]
+    fn refit_of_a_moved_part_matches_a_full_rebuild_bounds() {
+        let (p0, n0, i0) = strip(0.0, 2);
+        let (p1, n1, i1) = strip(10.0, 2);
+        let (p2, n2, i2) = strip(20.0, 2);
+        let input = |key, mesh, positions, normals, indices, world| MeshInput {
+            key,
+            mesh,
+            positions,
+            normals,
+            colors: None,
+            uvs: None,
+            indices,
+            material: 0,
+            world,
+        };
+        let original = [
+            input(1, 0, &p0, &n0, &i0, Mat4::IDENTITY),
+            input(2, 1, &p1, &n1, &i1, Mat4::IDENTITY),
+            input(3, 2, &p2, &n2, &i2, Mat4::IDENTITY),
+        ];
+        let moved_world = Mat4::from_translation(Vec3::new(3.0, 2.0, 1.0));
+        let moved = [
+            input(1, 0, &p0, &n0, &i0, moved_world),
+            original[1],
+            original[2],
+        ];
+        let mut geometry = Geometry::default();
+        geometry.update(&original, 1 << 20, 0).unwrap();
+        geometry.update(&moved, 1 << 20, 0).unwrap();
+
+        let mut rebuilt = Geometry::default();
+        rebuilt.update(&moved, 1 << 20, 0).unwrap();
+        assert_eq!(geometry.bounds, rebuilt.bounds);
+        assert_eq!(geometry.part_bounds, rebuilt.part_bounds);
+        assert_eq!(geometry.world_bounds(), rebuilt.world_bounds());
+        assert_eq!(geometry.count(), rebuilt.count());
+    }
+
+    #[test]
+    fn incremental_update_writes_only_the_moved_ranges_and_matches_full_serialization() {
+        let (p0, n0, i0) = strip(0.0, 2);
+        let (p1, n1, i1) = strip(10.0, 2);
+        let (p2, n2, i2) = strip(20.0, 2);
+        let input = |key, mesh, positions, normals, indices, world| MeshInput {
+            key,
+            mesh,
+            positions,
+            normals,
+            colors: None,
+            uvs: None,
+            indices,
+            material: 0,
+            world,
+        };
+        let original = [
+            input(1, 0, &p0, &n0, &i0, Mat4::IDENTITY),
+            input(2, 1, &p1, &n1, &i1, Mat4::IDENTITY),
+            input(3, 2, &p2, &n2, &i2, Mat4::IDENTITY),
+        ];
+        let moved_world = Mat4::from_translation(Vec3::new(3.0, 2.0, 1.0));
+        let moved = [
+            input(1, 0, &p0, &n0, &i0, moved_world),
+            original[1],
+            original[2],
+        ];
+        let mut geometry = Geometry::default();
+        geometry.update(&original, 1 << 20, 0).unwrap();
+        let old_part_bounds = geometry.part_bounds[0];
+        geometry.mesh_dirty.clear();
+        geometry.node_dirty.clear();
+        geometry.update(&moved, 1 << 20, 0).unwrap();
+
+        let mut expected_mesh = DirtyBytes::default();
+        let count = geometry.count() as u64;
+        let vertex_words = if geometry.parts.iter().any(|part| part.colored) {
+            VERTEX_WORDS
+        } else {
+            POSITION_NORMAL_WORDS
+        };
+        let triangles = (0..2)
+            .map(|triangle| {
+                GEOMETRY_HEADER_BYTES
+                    + geometry.triangle_position[triangle] as u64 * (TRIANGLE_WORDS * 4) as u64
+            })
+            .collect();
+        expected_mesh.add_blocks(triangles, (TRIANGLE_WORDS * 4) as u64);
+        expected_mesh.add_blocks(
+            (0..6)
+                .map(|vertex| {
+                    GEOMETRY_HEADER_BYTES
+                        + count * (TRIANGLE_WORDS * 4) as u64
+                        + vertex as u64 * (vertex_words * 4) as u64
+                })
+                .collect(),
+            (vertex_words * 4) as u64,
+        );
+        assert!(!geometry.mesh_dirty.full);
+        assert_eq!(geometry.mesh_dirty.ranges, expected_mesh.ranges);
+
+        let mut leaves = vec![geometry.triangle_node[0], geometry.triangle_node[1]];
+        let mut nodes = Vec::new();
+        while let Some(leaf) = leaves.pop() {
+            let mut node = leaf as usize;
+            loop {
+                if nodes.contains(&node) {
+                    break;
+                }
+                nodes.push(node);
+                let parent = geometry.parents[node];
+                if parent == u32::MAX {
+                    break;
+                }
+                node = parent as usize;
+            }
+        }
+        let mut expected_nodes = DirtyBytes::default();
+        expected_nodes.add_blocks(
+            nodes
+                .into_iter()
+                .map(|node| node as u64 * (NODE_WORDS * 4) as u64)
+                .collect(),
+            (NODE_WORDS * 4) as u64,
+        );
+        assert!(!geometry.node_dirty.full);
+        assert_eq!(geometry.node_dirty.ranges, expected_nodes.ranges);
+
+        assert_eq!(geometry.dirty_bounds[0], old_part_bounds.unwrap());
+        assert_eq!(geometry.dirty_bounds[1], geometry.part_bounds[0].unwrap());
+
+        let mut reserialized = geometry.clone();
+        let mesh_size = geometry.mesh_bytes.len() as u64;
+        reserialized.serialize_mesh_full(vertex_words, mesh_size);
+        reserialized.serialize_nodes_full();
+        assert_eq!(geometry.mesh_bytes, reserialized.mesh_bytes);
+        assert_eq!(geometry.node_bytes, reserialized.node_bytes);
     }
 }

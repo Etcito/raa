@@ -489,14 +489,12 @@ impl MeshTraceScene {
     }
 
     fn geometry_buffers(&mut self, gpu: &raa_core::GpuContext) -> [Buffer; 3] {
+        let material_revision = self.material_revision;
+        let material_bytes = &self.material_bytes;
+        let geometry = &mut self.geometry;
         self.gpu_geometry
             .get_or_insert_with(|| pass::GeometryBuffers::new(gpu.device()))
-            .upload(
-                gpu,
-                &self.geometry,
-                self.material_revision,
-                &self.material_bytes,
-            )
+            .upload(gpu, geometry, material_revision, material_bytes)
     }
 
     pub fn update(
